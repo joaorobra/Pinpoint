@@ -1,0 +1,8 @@
+# Dependencies
+node_modules
+
+# Frontend build output
+dist
+
+# Rust / Tauri build output
+src-tauri/target

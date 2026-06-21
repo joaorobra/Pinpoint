@@ -1,0 +1,9 @@
+{
+  "name": "Projects",
+  "fields": [
+    { "key": "status", "type": "select", "options": ["idea", "active", "done"] },
+    { "key": "priority", "type": "number" },
+    { "key": "due", "type": "date" }
+  ],
+  "defaultView": "table"
+}
