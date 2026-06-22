@@ -336,6 +336,17 @@ export default function App() {
     [addTab, pushHistory]
   );
 
+  // An inline TASK query block toggled a checkbox on disk. Refresh task-derived views, and if the
+  // toggle hit the file currently open in the editor, re-open it so its own rendered checkboxes
+  // reflect the change (otherwise they stay stale until a manual reload).
+  const onTaskToggled = useCallback(
+    (relPath: string) => {
+      setTaskRefresh((k) => k + 1);
+      if (relPath === activePath) void openPage(relPath);
+    },
+    [activePath, openPage]
+  );
+
   // Open a non-markdown file (PDF, image, …) in the viewer pane instead of the editor.
   const openAsset = useCallback(
     (node: TreeNode) => {
@@ -1524,6 +1535,7 @@ export default function App() {
                 onCreateDatabase={newDatabase}
                 onOpenPage={openPageByName}
                 onOpenPath={openPage}
+                onTaskToggled={onTaskToggled}
                 dateFormat={settings.date_format}
                 timeFormat={settings.time_format}
                 taskDateFormat={settings.task_date_format}

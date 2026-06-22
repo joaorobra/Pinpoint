@@ -126,7 +126,10 @@ fn parse_task_line(
     let rest = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))?;
     let rest = rest.strip_prefix("[")?;
     let (mark, after) = rest.split_at(1);
-    let after = after.strip_prefix("] ")?;
+    // Require `]` but allow the space after it (and the body) to be empty, so `- [ ]` and
+    // `- [x]done` parse. Mirrors `TASK_RE` in fsa-vault.ts and `toggle_task_line` below.
+    let after = after.strip_prefix("]")?;
+    let after = after.strip_prefix(' ').unwrap_or(after);
     let done = mark.eq_ignore_ascii_case("x");
 
     // Inline fields: `📅 2026-06-21`, `due:: 2026-06-21`, `🔁 every week`, `repeat:: FREQ=WEEKLY`.
@@ -173,7 +176,10 @@ pub fn toggle_task_line(line: &str, occurrence: Option<&str>) -> Option<String> 
     let bullet = &trimmed[..trimmed.len() - rest.len()]; // "- " or "* "
     let rest = rest.strip_prefix('[')?;
     let (mark, after) = rest.split_at(1);
-    let body = after.strip_prefix("] ")?;
+    // Accept an optional space after `]` (and an empty body) to match `parse_task_line` above and
+    // `toggleTaskLine` in fsa-vault.ts — otherwise a line indexes as a task but won't toggle.
+    let after = after.strip_prefix("]")?;
+    let body = after.strip_prefix(' ').unwrap_or(after);
     let _ = mark;
 
     match occurrence {

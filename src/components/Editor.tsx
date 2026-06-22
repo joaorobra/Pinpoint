@@ -70,6 +70,12 @@ interface Props {
   onOpenPage?: (name: string) => void;
   /** Open a page by its vault-relative path (used by inline TASK query results). */
   onOpenPath?: (relPath: string) => void;
+  /**
+   * Called after an inline TASK query block toggles a task on disk, with that task's vault-relative
+   * path. The host reloads the editor when the path is the open document so its own checkboxes
+   * refresh without a manual F5.
+   */
+  onTaskToggled?: (relPath: string) => void;
   /** Pattern for /today and the /date default. */
   dateFormat?: string;
   /** Pattern for the /time command. */
@@ -434,6 +440,7 @@ export default function Editor({
   onCreateDatabase,
   onOpenPage,
   onOpenPath,
+  onTaskToggled,
   dateFormat = "YYYY-MM-DD",
   timeFormat = "HH:mm",
   taskDateFormat = "YYYY-MM-DD",
@@ -445,6 +452,8 @@ export default function Editor({
   onOpenPageRef.current = onOpenPage;
   const onOpenPathRef = useRef(onOpenPath);
   onOpenPathRef.current = onOpenPath;
+  const onTaskToggledRef = useRef(onTaskToggled);
+  onTaskToggledRef.current = onTaskToggled;
   const lastEmitted = useRef<string>(value);
   const [slash, setSlash] = useState<{ query: string; left: number; top: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -572,6 +581,7 @@ export default function Editor({
         QueryBlock.configure({
           onEdit: (getPos, dsl) => editQueryRef.current(getPos, dsl),
           onOpenPath: (relPath) => onOpenPathRef.current?.(relPath),
+          onTaskToggled: (relPath) => onTaskToggledRef.current?.(relPath),
           dateFormat: taskDateFormat,
         }),
         MoveBlock,

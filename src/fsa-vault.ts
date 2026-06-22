@@ -208,6 +208,10 @@ function extractTags(text: string): string[] {
   return out;
 }
 
+// Space after `]` is optional and the body may be empty, so `- [ ]` and `- [x]done` count. The
+// same rule is mirrored in `toggleTaskLine` below and the Rust indexer/toggle (`parse_task_line` /
+// `toggle_task_line`) — they must agree, or a line gets indexed as a task but the toggle rejects it
+// with "not a task line".
 const TASK_RE = /^\s*[-*]\s\[([ xX])\]\s?(.*)$/;
 // Match a marker then everything up to the next field marker, mirroring index.rs `find_field`.
 const DUE_RE = /(?:📅|due::)\s*([^📅🔁⏳✅]+)/;
@@ -230,7 +234,7 @@ function parseDoneDates(text: string): string[] {
  * Returns the new line, or null if the line isn't a task.
  */
 export function toggleTaskLine(line: string, occurrence: string | null): string | null {
-  const m = line.match(/^(\s*)([-*]\s)\[([ xX])\]\s(.*)$/);
+  const m = line.match(/^(\s*)([-*]\s)\[([ xX])\]\s?(.*)$/);
   if (!m) return null;
   const [, indent, bullet, mark, body] = m;
 
@@ -529,6 +533,9 @@ function runQueryDsl(dsl: string): QueryResult {
       columns: ["text", "due", "done", "recurring"],
       rows: tasks.map((t) => ({
         "file.path": t.rel_path,
+        // Source line index — required so checkbox toggles rewrite the right line. Without it the
+        // client falls back to line 0 and the toggle fails with "not a task line".
+        line: t.line,
         text: t.text,
         due: t.due,
         done: t.done,

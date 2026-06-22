@@ -25,6 +25,12 @@ export interface QueryBlockOptions {
   onOpenPath?: (relPath: string) => void;
   /** Pattern for rendering task due dates (see dateformat.ts). */
   dateFormat?: string;
+  /**
+   * Called after a task checkbox toggle has been written to disk, with the toggled task's
+   * vault-relative path. Lets the host reload the open editor when the toggle changed the very
+   * file being edited (otherwise its rendered checkboxes stay stale until a manual reload).
+   */
+  onTaskToggled?: (relPath: string) => void;
 }
 
 declare module "@tiptap/core" {
@@ -99,7 +105,12 @@ function QueryBlockView({ node, editor, getPos, extension }: NodeViewProps) {
             onToggle={(t) =>
               api
                 .toggleTask(t.rel_path, t.line, t.occurrence ?? null)
-                .then(run)
+                .then(() => {
+                  run();
+                  // If the toggle hit the file currently open in the editor, ask the host to reload
+                  // it so its own checkboxes reflect the change without a manual refresh.
+                  extension.options.onTaskToggled?.(t.rel_path);
+                })
                 .catch((e) => setError(String(e)))
             }
             // TASK blocks expand recurring tasks into upcoming occurrences, matching the Tasks panel.
@@ -119,7 +130,7 @@ export const QueryBlock = Node.create<QueryBlockOptions>({
   draggable: true,
 
   addOptions() {
-    return { onEdit: undefined, onOpenPath: undefined, dateFormat: "YYYY-MM-DD" };
+    return { onEdit: undefined, onOpenPath: undefined, dateFormat: "YYYY-MM-DD", onTaskToggled: undefined };
   },
 
   addAttributes() {
