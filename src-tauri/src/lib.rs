@@ -5,6 +5,7 @@
 
 mod index;
 mod query;
+mod recents;
 mod settings;
 mod vault;
 
@@ -12,7 +13,23 @@ use notify::{RecursiveMode, Watcher};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
+
+/// The OS app-config directory (e.g. `%APPDATA%/<bundle-id>`), where the global
+/// recent-vaults list is stored. Falls back to the current dir if unavailable.
+fn config_dir(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Shared app state behind a mutex (commands are infrequent, contention is negligible).
 #[derive(Default)]
@@ -67,6 +84,9 @@ fn open_vault(
 
     let tree = vault::build_tree(&root).map_err(err)?;
 
+    // Remember this vault as the most-recently-opened so the app can re-open it next launch.
+    recents::record(&config_dir(&app), &root, now_ms());
+
     *state.inner.lock().unwrap() = Some(VaultSession {
         root,
         conn,
@@ -74,6 +94,13 @@ fn open_vault(
     });
 
     Ok(tree)
+}
+
+/// The recently-opened vaults, most-recent first (stale folders filtered out). The
+/// frontend uses the first entry to auto-open on launch and the rest to populate the switcher.
+#[tauri::command]
+fn list_recent_vaults(app: tauri::AppHandle) -> Vec<recents::RecentVault> {
+    recents::list(&config_dir(&app))
 }
 
 #[tauri::command]
@@ -88,6 +115,13 @@ fn read_page(rel_path: String, state: State<AppState>) -> Result<vault::ParsedDo
     let guard = state.inner.lock().unwrap();
     let session = guard.as_ref().ok_or("no vault open")?;
     vault::read_doc(&session.root.join(&rel_path)).map_err(err)
+}
+
+#[tauri::command]
+fn read_asset(rel_path: String, state: State<AppState>) -> Result<String, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    vault::read_asset(&session.root.join(&rel_path)).map_err(err)
 }
 
 #[tauri::command]
@@ -118,13 +152,119 @@ fn create_page(rel_path: String, body: String, state: State<AppState>) -> Result
     Ok(())
 }
 
+/// Create a database: a folder + `.pinpoint-db.json` schema (the editor's `/database` command and
+/// the sidebar ＋ menu). Rows are added later as `.md` files inside it.
+#[tauri::command]
+fn create_database(rel_path: String, name: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let abs = session.root.join(&rel_path);
+    vault::create_database(&abs, &name).map_err(err)
+}
+
+/// Read a database folder's schema (`.pinpoint-db.json`). Falls back to a default if absent.
+#[tauri::command]
+fn read_db_schema(rel_path: String, state: State<AppState>) -> Result<serde_json::Value, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    vault::read_db_schema(&session.root.join(&rel_path)).map_err(err)
+}
+
+/// Persist a database folder's schema (column add/rename/retype, option edits, widths).
+#[tauri::command]
+fn write_db_schema(
+    rel_path: String,
+    schema: serde_json::Value,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    vault::write_db_schema(&session.root.join(&rel_path), &schema).map_err(err)
+}
+
+/// Permanently delete a file or folder (shift-delete / "Delete forever"). For a soft delete that
+/// can be restored, use `trash_page` instead.
 #[tauri::command]
 fn delete_page(rel_path: String, state: State<AppState>) -> Result<(), String> {
     let guard = state.inner.lock().unwrap();
     let session = guard.as_ref().ok_or("no vault open")?;
     let abs = session.root.join(&rel_path);
-    std::fs::remove_file(&abs).map_err(err)?;
-    index::index_file(&session.conn, &session.root, &abs).map_err(err)?;
+    if abs.is_dir() {
+        std::fs::remove_dir_all(&abs).map_err(err)?;
+    } else {
+        std::fs::remove_file(&abs).map_err(err)?;
+    }
+    // The index only tracks markdown; rebuild so a deleted folder's pages all drop out.
+    index::rebuild(&session.conn, &session.root).map_err(err)?;
+    Ok(())
+}
+
+/// Soft delete: move a file or folder into `.trash`, recorded in the manifest for later restore.
+#[tauri::command]
+fn trash_page(rel_path: String, state: State<AppState>) -> Result<vault::TrashEntry, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let entry = vault::trash_move(&session.root, &rel_path, now_ms()).map_err(err)?;
+    index::rebuild(&session.conn, &session.root).map_err(err)?;
+    Ok(entry)
+}
+
+/// List trashed items, most-recently-deleted first.
+#[tauri::command]
+fn list_trash(state: State<AppState>) -> Result<Vec<vault::TrashEntry>, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let mut entries = vault::read_manifest(&session.root);
+    entries.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    Ok(entries)
+}
+
+/// Restore a trashed item to its original location (or a non-clobbering variant). Returns the
+/// rel_path it landed at.
+#[tauri::command]
+fn restore_trash(id: String, state: State<AppState>) -> Result<String, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let rel = vault::trash_restore(&session.root, &id).map_err(err)?;
+    index::rebuild(&session.conn, &session.root).map_err(err)?;
+    Ok(rel)
+}
+
+/// Permanently remove one trashed item.
+#[tauri::command]
+fn purge_trash(id: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    vault::trash_purge(&session.root, &id).map_err(err)
+}
+
+/// Permanently empty the entire trash.
+#[tauri::command]
+fn empty_trash(state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    vault::trash_empty(&session.root).map_err(err)
+}
+
+#[tauri::command]
+fn rename_path(
+    from_rel: String,
+    to_rel: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let from = session.root.join(&from_rel);
+    let to = session.root.join(&to_rel);
+    if to.exists() {
+        return Err(format!("already exists: {to_rel}"));
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::rename(&from, &to).map_err(err)?;
+    // Rebuild the index so renamed pages keep correct paths.
+    index::rebuild(&session.conn, &session.root).map_err(err)?;
     Ok(())
 }
 
@@ -140,6 +280,41 @@ fn run_query(dsl: String, state: State<AppState>) -> Result<query::QueryResult, 
     let guard = state.inner.lock().unwrap();
     let session = guard.as_ref().ok_or("no vault open")?;
     query::run(&session.conn, &dsl).map_err(err)
+}
+
+/// Toggle a task's done state by rewriting its source line in place, then re-indexing.
+///
+/// `line` is the 0-based line index within the page body (as stored in the tasks index).
+/// `occurrence`:
+///   - `None`        → plain task: flip its `[ ]`⇄`[x]` checkbox.
+///   - `Some(date)`  → a specific occurrence of a recurring task: add/remove that ISO date from
+///                     the line's `✅ …` completed-occurrences list (the recurring line stays open).
+#[tauri::command]
+fn toggle_task(
+    rel_path: String,
+    line: usize,
+    occurrence: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let abs = session.root.join(&rel_path);
+    let doc = vault::read_doc(&abs).map_err(err)?;
+
+    let mut lines: Vec<String> = doc.body.lines().map(|s| s.to_string()).collect();
+    let target = lines.get(line).ok_or("task line out of range")?;
+    let new_line = index::toggle_task_line(target, occurrence.as_deref())
+        .ok_or("not a task line")?;
+    lines[line] = new_line;
+    // Preserve a trailing newline if the original body had one.
+    let mut body = lines.join("\n");
+    if doc.body.ends_with('\n') {
+        body.push('\n');
+    }
+
+    vault::write_doc(&abs, &doc.frontmatter, &body).map_err(err)?;
+    index::index_file(&session.conn, &session.root, &abs).map_err(err)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -173,14 +348,26 @@ pub fn run() {
             open_vault,
             get_tree,
             read_page,
+            read_asset,
             write_page,
             create_page,
+            create_database,
+            read_db_schema,
+            write_db_schema,
             delete_page,
+            trash_page,
+            list_trash,
+            restore_trash,
+            purge_trash,
+            empty_trash,
+            rename_path,
             reindex,
             run_query,
             list_tasks,
+            toggle_task,
             get_settings,
-            save_settings
+            save_settings,
+            list_recent_vaults
         ])
         .setup(|app| {
             // Ensure state exists; nothing else needed at startup.

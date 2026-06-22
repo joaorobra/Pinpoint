@@ -118,6 +118,59 @@ fn field_sql(c: &Cond, params: &mut Vec<String>) -> Result<String> {
     }
 }
 
+/// Build a SQL fragment + params for a WHERE condition in a TASK query, against the `tasks` table.
+/// Supported fields: `due`, `done`, `text`, `recurring`, `tag`, `file.path`/`path`.
+fn task_field_sql(c: &Cond, params: &mut Vec<String>) -> Result<String> {
+    let op_sql = match c.op.as_str() {
+        "=" => "=",
+        "!=" => "!=",
+        ">" => ">",
+        "<" => "<",
+        ">=" => ">=",
+        "<=" => "<=",
+        "contains" => "LIKE",
+        other => bail!("unsupported operator: {other}"),
+    };
+
+    match c.field.as_str() {
+        // Boolean: `done = true|false` (also `recurring`, by presence of an rrule).
+        "done" => {
+            let v = if c.value.eq_ignore_ascii_case("true") || c.value == "1" { 1 } else { 0 };
+            Ok(format!("done {op_sql} {v}"))
+        }
+        "recurring" => {
+            let want = c.value.eq_ignore_ascii_case("true") || c.value == "1";
+            // `recurring = true` ⇒ rrule IS NOT NULL; `= false` ⇒ IS NULL. `!=` inverts.
+            let not_null = if c.op == "!=" { !want } else { want };
+            Ok(if not_null { "rrule IS NOT NULL".into() } else { "rrule IS NULL".into() })
+        }
+        "tag" => {
+            // Match a #tag found on the task line (tags stored comma-joined).
+            let tag = c.value.trim_start_matches('#');
+            params.push(format!("%,{},%", tag));
+            Ok("(',' || COALESCE(tags,'') || ',') LIKE ?".into())
+        }
+        // Text columns and the ISO `due` date all compare lexically — ISO dates sort correctly.
+        "due" | "text" | "file.path" | "path" => {
+            let col = if c.field == "due" {
+                "due"
+            } else if c.field == "text" {
+                "text"
+            } else {
+                "rel_path"
+            };
+            if c.op == "contains" {
+                params.push(format!("%{}%", c.value));
+                Ok(format!("{col} LIKE ?"))
+            } else {
+                params.push(c.value.clone());
+                Ok(format!("{col} {op_sql} ?"))
+            }
+        }
+        other => bail!("unknown task field: {other} (use due, done, text, recurring, tag, path)"),
+    }
+}
+
 fn json_encode_value(v: &str) -> String {
     if v == "true" || v == "false" || v.parse::<f64>().is_ok() {
         v.to_string()
@@ -156,7 +209,7 @@ pub fn run(conn: &Connection, dsl: &str) -> Result<QueryResult> {
         }
         "TASK" => {
             i += 1;
-            (QueryKind::Task, vec!["text".into(), "due".into(), "done".into()])
+            (QueryKind::Task, vec!["text".into(), "due".into(), "done".into(), "recurring".into()])
         }
         other => bail!("query must start with TABLE/LIST/TASK, got {other}"),
     };
@@ -165,6 +218,9 @@ pub fn run(conn: &Connection, dsl: &str) -> Result<QueryResult> {
     let mut params: Vec<String> = Vec::new();
     let mut sort: Option<(String, bool)> = None;
     let mut limit: Option<i64> = None;
+    // TASK queries run against the `tasks` table, whose columns differ from `pages` — so they need
+    // their own WHERE fragments (FROM/WHERE map to task columns rather than `p.*`).
+    let is_task = kind == QueryKind::Task;
 
     while i < toks.len() {
         match toks[i].to_uppercase().as_str() {
@@ -172,7 +228,16 @@ pub fn run(conn: &Connection, dsl: &str) -> Result<QueryResult> {
                 i += 1;
                 if i < toks.len() {
                     let src = &toks[i];
-                    if let Some(tag) = src.strip_prefix('#') {
+                    if is_task {
+                        // FROM "folder"/#tag scopes tasks by their source page path / line tags.
+                        if let Some(tag) = src.strip_prefix('#') {
+                            where_sql.push("(',' || COALESCE(tags,'') || ',') LIKE ?".into());
+                            params.push(format!("%,{},%", tag));
+                        } else {
+                            where_sql.push("rel_path LIKE ?".into());
+                            params.push(format!("{}%", unquote(src)));
+                        }
+                    } else if let Some(tag) = src.strip_prefix('#') {
                         where_sql.push("EXISTS (SELECT 1 FROM tags t WHERE t.rel_path = p.rel_path AND t.tag = ?)".into());
                         params.push(tag.to_string());
                     } else {
@@ -196,7 +261,11 @@ pub fn run(conn: &Connection, dsl: &str) -> Result<QueryResult> {
                         op: toks[i + 1].clone(),
                         value: unquote(&toks[i + 2]),
                     };
-                    let frag = field_sql(&c, &mut params)?;
+                    let frag = if is_task {
+                        task_field_sql(&c, &mut params)?
+                    } else {
+                        field_sql(&c, &mut params)?
+                    };
                     if where_sql.is_empty() {
                         where_sql.push(frag);
                     } else {
@@ -238,24 +307,47 @@ pub fn run(conn: &Connection, dsl: &str) -> Result<QueryResult> {
 
     // TASK queries read from the tasks table directly.
     if kind == QueryKind::Task {
-        let mut sql = "SELECT rel_path, line, text, done, due FROM tasks".to_string();
+        let mut sql =
+            "SELECT rel_path, line, text, done, due, rrule, tags, done_dates FROM tasks".to_string();
         if !where_sql.is_empty() {
-            // tasks table doesn't have p.* columns; only support folder/tag-less for MVP
-            // Reuse rel_path filters only.
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql.join(" "));
         }
-        sql.push_str(" ORDER BY due IS NULL, due");
+        // Honor an explicit SORT on a task column; default to due-date order (nulls last).
+        if let Some((field, desc)) = &sort {
+            let col = match field.as_str() {
+                "due" => "due",
+                "text" => "text",
+                "done" => "done",
+                "file.path" | "path" => "rel_path",
+                _ => "due",
+            };
+            sql.push_str(&format!(" ORDER BY {} {}", col, if *desc { "DESC" } else { "ASC" }));
+        } else {
+            sql.push_str(" ORDER BY due IS NULL, due");
+        }
         if let Some(l) = limit {
             sql.push_str(&format!(" LIMIT {l}"));
         }
-        let mut stmt = conn.prepare(&sql)?;
+        let p: Vec<&dyn rusqlite::ToSql> = params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| anyhow!("sql: {e} ({sql})"))?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(p.as_slice(), |r| {
+                let tags: Option<String> = r.get(6)?;
+                let done_dates: Option<String> = r.get(7)?;
                 Ok(serde_json::json!({
                     "file.path": r.get::<_, String>(0)?,
                     "line": r.get::<_, i64>(1)?,
                     "text": r.get::<_, String>(2)?,
                     "done": r.get::<_, i64>(3)? != 0,
                     "due": r.get::<_, Option<String>>(4)?,
+                    // `rrule` is the raw recurrence rule (for client-side occurrence expansion);
+                    // `recurring` is the convenient boolean the column list exposes.
+                    "rrule": r.get::<_, Option<String>>(5)?,
+                    "recurring": r.get::<_, Option<String>>(5)?.is_some(),
+                    "tags": tags.unwrap_or_default(),
+                    // Comma-joined ISO dates of completed occurrences (for per-occurrence done state).
+                    "done_dates": done_dates.unwrap_or_default(),
                 }))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

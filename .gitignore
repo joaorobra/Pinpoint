@@ -6,3 +6,6 @@ dist
 
 # Rust / Tauri build output
 src-tauri/target
+
+# Archives / build artifacts
+src-tauri.zip

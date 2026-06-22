@@ -1,48 +1,377 @@
-import { useState } from "react";
-import type { TreeNode } from "../types";
+import type React from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CaretDown,
+  CaretRight,
+  File as FileIcon,
+  FileText,
+  FilePdf,
+  Image as ImageIcon,
+  Paperclip,
+  Folder,
+  Database,
+  type Icon as PhosphorIcon,
+} from "@phosphor-icons/react";
+import type { NodeIcon, TreeNode } from "../types";
+import { assetKindFor } from "../types";
+import { NodeIconView } from "./Icon";
+
+/** Click modifiers that drive multi-selection, normalized across platforms. */
+export interface SelectMods {
+  /** Ctrl (Win/Linux) or Cmd (macOS) was held: toggle this row in/out of the selection. */
+  toggle: boolean;
+  /** Shift was held: select the contiguous range from the anchor to this row. */
+  range: boolean;
+}
 
 interface Props {
   node: TreeNode;
   activePath: string | null;
+  /** rel_paths currently selected (multi-selection). Always includes activePath after a plain click. */
+  selected: Set<string>;
+  /**
+   * A row was clicked. `mods` says whether ctrl/shift were held; `range` is the list of
+   * rel_paths the click resolves to in visible order (a single path for plain/ctrl clicks,
+   * the spanned rows for a shift-click). A plain click (no mods) also opens the node.
+   */
+  onSelect: (node: TreeNode, mods: SelectMods, range: string[]) => void;
+  /** Per-node icon overrides, keyed by rel_path. */
+  nodeIcons: Record<string, NodeIcon>;
+  /** Open a markdown page in the editor. */
   onOpen: (relPath: string) => void;
-  depth?: number;
+  /** Open a non-markdown file (PDF, image, …) in the asset viewer. */
+  onOpenAsset?: (node: TreeNode) => void;
+  /** Open a database folder (is_database) in the table view. */
+  onOpenDatabase?: (node: TreeNode) => void;
+  /** Right-click on a tree row: hand the node and pointer coords to the host for a context menu. */
+  onContextMenu?: (node: TreeNode, x: number, y: number) => void;
+  /** Click on a node's icon: open the icon picker for that node. */
+  onPickIcon?: (node: TreeNode) => void;
+  /** rel_path of the row currently being renamed inline, or null. */
+  renamingPath?: string | null;
+  /** Commit an inline rename with the edited (display) name. */
+  onRenameCommit?: (node: TreeNode, newName: string) => void;
+  /** Cancel the inline rename without changes. */
+  onRenameCancel?: () => void;
 }
 
-export default function FileTree({ node, activePath, onOpen, depth = 0 }: Props) {
-  const [open, setOpen] = useState(depth < 1);
+/** The default Phosphor icon for a node when the user hasn't chosen one. */
+function defaultIcon(node: TreeNode): PhosphorIcon {
+  if (node.is_dir) return node.is_database ? Database : Folder;
+  if (!node.ext) return FileText; // markdown page
+  switch (assetKindFor(node.ext)) {
+    case "image":
+      return ImageIcon;
+    case "pdf":
+      return FilePdf;
+    case "text":
+      return FileText;
+    default:
+      return node.ext ? Paperclip : FileIcon;
+  }
+}
+
+/**
+ * The vault file tree. Folder open/closed state is owned here (a Set of collapsed paths) so the
+ * header's expand-all / collapse-all controls can drive every folder at once — Obsidian-style.
+ */
+export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, onOpen, onOpenAsset, onOpenDatabase, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel }: Props) {
+  // We track which folders are *collapsed*; everything else is open by default at depth 0,
+  // and a bumped signal lets the toolbar collapse/expand the whole tree at once.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  const allDirPaths = useMemo(() => {
+    const paths: string[] = [];
+    const visit = (n: TreeNode) => {
+      if (n.is_dir && n.rel_path) paths.push(n.rel_path);
+      n.children.forEach(visit);
+    };
+    node.children.forEach(visit);
+    return paths;
+  }, [node]);
+
+  const toggle = (relPath: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(relPath) ? next.delete(relPath) : next.add(relPath);
+      return next;
+    });
+
+  const expandAll = () => setCollapsed(new Set());
+  const collapseAll = () => setCollapsed(new Set(allDirPaths));
+
+  // Flat, top-to-bottom order of the rows the user can currently see (collapsed folders hide
+  // their children). Shift-click ranges are resolved against this order, mirroring how
+  // Explorer/Finder treat a range as "everything between the two clicks as displayed".
+  const visibleOrder = useMemo(() => {
+    const order: string[] = [];
+    const visit = (n: TreeNode) => {
+      order.push(n.rel_path);
+      if (n.is_dir && !collapsed.has(n.rel_path)) n.children.forEach(visit);
+    };
+    node.children.forEach(visit);
+    return order;
+  }, [node, collapsed]);
+
+  // The last row that was selected with a plain or ctrl click. Shift-click extends from here.
+  const anchorRef = useRef<string | null>(null);
+
+  const handleSelect = (target: TreeNode, mods: SelectMods) => {
+    if (mods.range && anchorRef.current) {
+      const a = visibleOrder.indexOf(anchorRef.current);
+      const b = visibleOrder.indexOf(target.rel_path);
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        onSelect(target, mods, visibleOrder.slice(lo, hi + 1));
+        return; // anchor stays put across a range selection
+      }
+    }
+    anchorRef.current = target.rel_path;
+    onSelect(target, mods, [target.rel_path]);
+  };
+
+  return (
+    <>
+      <div className="tree-toolbar">
+        <button onClick={expandAll} title="Expand all folders">
+          <CaretDown size={12} weight="bold" /> Expand
+        </button>
+        <button onClick={collapseAll} title="Collapse all folders">
+          <CaretRight size={12} weight="bold" /> Collapse
+        </button>
+      </div>
+      <div className="tree-body">
+        {node.children.map((c) => (
+          <TreeRow
+            key={c.rel_path}
+            node={c}
+            depth={0}
+            activePath={activePath}
+            selected={selected}
+            onSelect={handleSelect}
+            nodeIcons={nodeIcons}
+            collapsed={collapsed}
+            onToggle={toggle}
+            onOpen={onOpen}
+            onOpenAsset={onOpenAsset}
+            onOpenDatabase={onOpenDatabase}
+            onContextMenu={onContextMenu}
+            onPickIcon={onPickIcon}
+            renamingPath={renamingPath}
+            onRenameCommit={onRenameCommit}
+            onRenameCancel={onRenameCancel}
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+
+interface RowProps {
+  node: TreeNode;
+  depth: number;
+  activePath: string | null;
+  selected: Set<string>;
+  onSelect: (node: TreeNode, mods: SelectMods) => void;
+  nodeIcons: Record<string, NodeIcon>;
+  collapsed: Set<string>;
+  onToggle: (relPath: string) => void;
+  onOpen: (relPath: string) => void;
+  onOpenAsset?: (node: TreeNode) => void;
+  onOpenDatabase?: (node: TreeNode) => void;
+  onContextMenu?: (node: TreeNode, x: number, y: number) => void;
+  onPickIcon?: (node: TreeNode) => void;
+  renamingPath?: string | null;
+  onRenameCommit?: (node: TreeNode, newName: string) => void;
+  onRenameCancel?: () => void;
+}
+
+function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
+  const renaming = renamingPath === node.rel_path;
+  const isSelected = selected.has(node.rel_path);
+  // Normalize the click into selection modifiers. metaKey covers Cmd on macOS.
+  const mods = (e: React.MouseEvent): SelectMods => ({
+    toggle: e.ctrlKey || e.metaKey,
+    range: e.shiftKey,
+  });
+  // Clicking the icon opens the picker instead of opening/toggling the node.
+  const pickIcon = onPickIcon
+    ? (e: React.MouseEvent) => {
+        e.stopPropagation();
+        onPickIcon(node);
+      }
+    : undefined;
+  const icon = nodeIcons[node.rel_path];
+  const ctx = onContextMenu
+    ? (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(node, e.clientX, e.clientY);
+      }
+    : undefined;
+  // Depth-based indent guides: one vertical rule per ancestor level, like Obsidian.
+  const guides = (
+    <span className="tree-guides" aria-hidden>
+      {Array.from({ length: depth }, (_, i) => (
+        <span key={i} className="tree-guide" />
+      ))}
+    </span>
+  );
 
   if (!node.is_dir) {
-    const label = node.name.replace(/\.md$/, "");
+    const isMd = node.ext === "";
+    const label = isMd ? node.name.replace(/\.md$/i, "") : node.name.replace(new RegExp(`\\.${node.ext}$`, "i"), "");
     return (
       <div
-        className={`tree-file${activePath === node.rel_path ? " active" : ""}`}
-        style={{ paddingLeft: depth * 14 + 8 }}
-        onClick={() => onOpen(node.rel_path)}
+        className={`tree-file${activePath === node.rel_path ? " active" : ""}${isSelected ? " selected" : ""}`}
+        onClick={(e) => {
+          const m = mods(e);
+          onSelect(node, m);
+          // Only a plain click opens the file; ctrl/shift are selection-only.
+          if (!m.toggle && !m.range) (isMd ? onOpen(node.rel_path) : onOpenAsset?.(node));
+        }}
+        onContextMenu={ctx}
         title={node.rel_path}
       >
-        <span className="tree-icon">📄</span>
-        {label}
+        {guides}
+        <span
+          className={`tree-icon tree-icon-btn${onPickIcon ? " clickable" : ""}`}
+          onClick={pickIcon}
+          title={onPickIcon ? "Set icon" : undefined}
+        >
+          <NodeIconView icon={icon} fallback={defaultIcon(node)} />
+        </span>
+        {renaming ? (
+          <RenameInput
+            initial={label}
+            onCommit={(v) => onRenameCommit?.(node, v)}
+            onCancel={() => onRenameCancel?.()}
+          />
+        ) : (
+          <>
+            <span className="tree-label">{label}</span>
+            {!isMd && <span className="tree-ext">{node.ext}</span>}
+          </>
+        )}
       </div>
     );
   }
 
+  const open = !collapsed.has(node.rel_path);
   return (
     <div>
-      {depth > 0 && (
-        <div
-          className="tree-dir"
-          style={{ paddingLeft: depth * 14 + 8 }}
-          onClick={() => setOpen((o) => !o)}
+      <div
+        className={`tree-dir${isSelected ? " selected" : ""}`}
+        onClick={(e) => {
+          const m = mods(e);
+          // Ctrl/shift select the folder. A plain click opens/closes it — and for a database
+          // folder, also opens its table view (Notion-style).
+          if (m.toggle || m.range) onSelect(node, m);
+          else {
+            onToggle(node.rel_path);
+            if (node.is_database) onOpenDatabase?.(node);
+          }
+        }}
+        onContextMenu={ctx}
+      >
+        {guides}
+        <span className="tree-icon tree-caret">
+          {open ? <CaretDown size={12} weight="bold" /> : <CaretRight size={12} weight="bold" />}
+        </span>
+        <span
+          className={`tree-icon tree-icon-btn${onPickIcon ? " clickable" : ""}`}
+          onClick={pickIcon}
+          title={onPickIcon ? "Set icon" : undefined}
         >
-          <span className="tree-icon">{open ? "▾" : "▸"}</span>
-          <span className="tree-icon">{node.is_database ? "🗃️" : "📁"}</span>
-          {node.name}
-        </div>
-      )}
+          <NodeIconView icon={icon} fallback={defaultIcon(node)} fallbackColor="var(--accent)" />
+        </span>
+        {renaming ? (
+          <RenameInput
+            initial={node.name}
+            onCommit={(v) => onRenameCommit?.(node, v)}
+            onCancel={() => onRenameCancel?.()}
+          />
+        ) : (
+          <span className="tree-label">{node.name}</span>
+        )}
+      </div>
       {open &&
         node.children.map((c) => (
-          <FileTree key={c.rel_path} node={c} activePath={activePath} onOpen={onOpen} depth={depth + 1} />
+          <TreeRow
+            key={c.rel_path}
+            node={c}
+            depth={depth + 1}
+            activePath={activePath}
+            selected={selected}
+            onSelect={onSelect}
+            nodeIcons={nodeIcons}
+            collapsed={collapsed}
+            onToggle={onToggle}
+            onOpen={onOpen}
+            onOpenAsset={onOpenAsset}
+            onOpenDatabase={onOpenDatabase}
+            onContextMenu={onContextMenu}
+            onPickIcon={onPickIcon}
+            renamingPath={renamingPath}
+            onRenameCommit={onRenameCommit}
+            onRenameCancel={onRenameCancel}
+          />
         ))}
     </div>
+  );
+}
+
+/**
+ * Inline rename field for a tree row. Seeds with the display name, selects the basename (the part
+ * before any extension dot) on focus, commits on Enter/blur and cancels on Escape — Windows
+ * Explorer behaviour.
+ */
+function RenameInput({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const committed = useRef(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Select the basename only (everything before the last dot), so an extension stays put.
+    const dot = initial.lastIndexOf(".");
+    el.setSelectionRange(0, dot > 0 ? dot : initial.length);
+  }, [initial]);
+
+  const commit = () => {
+    if (committed.current) return;
+    committed.current = true;
+    onCommit(ref.current?.value ?? initial);
+  };
+
+  return (
+    <input
+      ref={ref}
+      className="tree-rename-input"
+      defaultValue={initial}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          committed.current = true; // suppress the blur-commit that follows
+          onCancel();
+        }
+      }}
+    />
   );
 }

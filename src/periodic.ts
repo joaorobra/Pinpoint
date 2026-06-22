@@ -3,6 +3,8 @@
 // Each maps to a deterministic path under <vault>/<periodicFolder>/<Kind>/<file>.md and a starter
 // template. Navigation (prev/next/today) is pure date math so it works offline and cross-platform.
 
+import { formatDate } from "./dateformat";
+
 export type Period = "daily" | "weekly" | "monthly" | "quarterly" | "semestral" | "yearly";
 
 export const PERIODS: Period[] = ["daily", "weekly", "monthly", "quarterly", "semestral", "yearly"];
@@ -48,8 +50,11 @@ export function pathFor(folder: string, period: Period, date: Date): string {
   }
 }
 
-/** A human label for the note covering `date`. */
-export function labelFor(period: Period, date: Date): string {
+/**
+ * A human label for the note covering `date`. For daily notes, `dailyFormat` is a dateformat.ts
+ * pattern (e.g. "dddd, MMMM D"); omitting it falls back to the native `Date#toDateString`.
+ */
+export function labelFor(period: Period, date: Date, dailyFormat?: string): string {
   const y = date.getFullYear();
   const q = Math.floor(date.getMonth() / 3) + 1;
   const half = date.getMonth() < 6 ? 1 : 2;
@@ -59,7 +64,7 @@ export function labelFor(period: Period, date: Date): string {
   ];
   switch (period) {
     case "daily":
-      return date.toDateString();
+      return dailyFormat ? formatDate(date, dailyFormat) : date.toDateString();
     case "weekly": {
       const { year, week } = isoWeek(date);
       return `Week ${week}, ${year}`;
@@ -101,16 +106,75 @@ export function step(period: Period, date: Date, dir: 1 | -1): Date {
   return d;
 }
 
+/** ISO date (YYYY-MM-DD) in local time. */
+function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * The inclusive [start, end] calendar window a period note covers, as ISO dates. Used to build the
+ * pre-query that surfaces tasks due within the period. Weeks are ISO (Mon–Sun).
+ */
+export function periodRange(period: Period, date: Date): { start: string; end: string } {
+  const y = date.getFullYear();
+  const m = date.getMonth();
+  switch (period) {
+    case "daily":
+      return { start: isoDate(date), end: isoDate(date) };
+    case "weekly": {
+      // Back up to Monday, forward to Sunday.
+      const day = (date.getDay() + 6) % 7; // 0 = Monday
+      const mon = new Date(y, m, date.getDate() - day);
+      const sun = new Date(mon);
+      sun.setDate(mon.getDate() + 6);
+      return { start: isoDate(mon), end: isoDate(sun) };
+    }
+    case "monthly":
+      return { start: isoDate(new Date(y, m, 1)), end: isoDate(new Date(y, m + 1, 0)) };
+    case "quarterly": {
+      const qStart = Math.floor(m / 3) * 3;
+      return { start: isoDate(new Date(y, qStart, 1)), end: isoDate(new Date(y, qStart + 3, 0)) };
+    }
+    case "semestral": {
+      const hStart = m < 6 ? 0 : 6;
+      return { start: isoDate(new Date(y, hStart, 1)), end: isoDate(new Date(y, hStart + 6, 0)) };
+    }
+    case "yearly":
+      return { start: isoDate(new Date(y, 0, 1)), end: isoDate(new Date(y, 11, 31)) };
+  }
+}
+
+/**
+ * Pre-query blocks for a period note: an inline query block (```query fences) listing tasks due
+ * inside the period, plus one listing recurring tasks (whose upcoming occurrences the block expands
+ * client-side). These render live in the editor via the QueryBlock node.
+ */
+function taskQueries(period: Period, date: Date): string {
+  const { start, end } = periodRange(period, date);
+  const due = `\`\`\`query\nTASK WHERE due >= "${start}" AND due <= "${end}" AND done = false SORT due\n\`\`\``;
+  const recurring = `\`\`\`query\nTASK WHERE recurring = true AND done = false SORT due\n\`\`\``;
+  const windowLabel: Record<Period, string> = {
+    daily: "Due today",
+    weekly: "Due this week",
+    monthly: "Due this month",
+    quarterly: "Due this quarter",
+    semestral: "Due this semester",
+    yearly: "Due this year",
+  };
+  return `## ${windowLabel[period]}\n\n${due}\n\n## Recurring\n\n${recurring}\n`;
+}
+
 /** Starter template body for a fresh period note. */
-export function template(period: Period, date: Date): string {
-  const label = labelFor(period, date);
+export function template(period: Period, date: Date, dailyFormat?: string): string {
+  const label = labelFor(period, date, dailyFormat);
+  const tasks = taskQueries(period, date);
   const sections: Record<Period, string> = {
-    daily: `# ${label}\n\n## Tasks\n- [ ] \n\n## Notes\n\n## Log\n`,
-    weekly: `# ${label}\n\n## Focus\n\n## Tasks\n- [ ] \n\n## Review\n`,
-    monthly: `# ${label}\n\n## Goals\n\n## Highlights\n\n## Review\n`,
-    quarterly: `# ${label}\n\n## Objectives\n\n## Key Results\n\n## Review\n`,
-    semestral: `# ${label}\n\n## Theme\n\n## Objectives\n\n## Review\n`,
-    yearly: `# ${label}\n\n## Vision\n\n## Goals\n\n## Review\n`,
+    daily: `# ${label}\n\n${tasks}\n## Tasks\n- [ ] \n\n## Notes\n\n## Log\n`,
+    weekly: `# ${label}\n\n## Focus\n\n${tasks}\n## Tasks\n- [ ] \n\n## Review\n`,
+    monthly: `# ${label}\n\n## Goals\n\n${tasks}\n## Highlights\n\n## Review\n`,
+    quarterly: `# ${label}\n\n## Objectives\n\n${tasks}\n## Key Results\n\n## Review\n`,
+    semestral: `# ${label}\n\n## Theme\n\n${tasks}\n## Objectives\n\n## Review\n`,
+    yearly: `# ${label}\n\n## Vision\n\n${tasks}\n## Goals\n\n## Review\n`,
   };
   return sections[period];
 }

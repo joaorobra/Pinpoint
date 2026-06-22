@@ -49,6 +49,7 @@ function inline(nodes?: Node[]): string {
       if (n.type === "text") return applyMarks(n.text ?? "", n.marks);
       if (n.type === "hardBreak") return "\n";
       if (n.type === "image") return `![${n.attrs?.alt ?? ""}](${n.attrs?.src ?? ""})`;
+      if (n.type === "wikiLink") return `[[${n.attrs?.name ?? ""}]]`;
       return inline(n.content);
     })
     .join("");
@@ -114,6 +115,10 @@ export function docToMarkdown(doc: Node): string {
       case "codeBlock":
         blocks.push("```" + (node.attrs?.language ?? "") + "\n" + (node.content?.[0]?.text ?? "") + "\n```");
         break;
+      case "queryBlock":
+        // Inline query → a fenced `query` block, so it round-trips as plain markdown.
+        blocks.push("```query\n" + (node.attrs?.dsl ?? "") + "\n```");
+        break;
       case "horizontalRule":
         blocks.push("---");
         break;
@@ -135,6 +140,12 @@ function escapeHtml(s: string): string {
 
 function inlineMd(text: string): string {
   let s = escapeHtml(text);
+  // Wikilinks `[[Name]]` -> styled page-link atom. Must run before the `[text](url)` rule so the
+  // double brackets aren't consumed as a regular markdown link.
+  s = s.replace(/\[\[([^\]]+)\]\]/g, (_m, name) => {
+    const n = String(name).trim();
+    return `<span data-page-link="${n.replace(/"/g, "&quot;")}">${n}</span>`;
+  });
   s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2">');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -190,9 +201,16 @@ export function markdownToHtml(md: string): string {
       i++;
       while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
       i++; // closing fence
-      html.push(
-        `<pre><code${lang ? ` class="language-${lang}"` : ""}>${escapeHtml(code.join("\n"))}</code></pre>`
-      );
+      // A `query` fence becomes an inline query block (the QueryBlock node parses data-query),
+      // not a literal code listing.
+      if (lang.toLowerCase() === "query") {
+        const dsl = code.join(" ").trim();
+        html.push(`<div data-query="${dsl.replace(/"/g, "&quot;")}"></div>`);
+      } else {
+        html.push(
+          `<pre><code${lang ? ` class="language-${lang}"` : ""}>${escapeHtml(code.join("\n"))}</code></pre>`
+        );
+      }
       continue;
     }
     if (/^>\s?/.test(line)) {

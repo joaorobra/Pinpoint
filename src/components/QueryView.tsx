@@ -1,30 +1,13 @@
 import { useState } from "react";
+import { X } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { QueryResult } from "../types";
+import { OPS, KINDS, compile, type Filter } from "../querydsl";
+import Select, { type SelectOption } from "./Select";
+import QueryResultView from "./QueryResultView";
 
-// Visual builder state compiles to the same DSL the engine runs, so power users and the GUI share
-// one execution path.
-interface Filter {
-  field: string;
-  op: string;
-  value: string;
-}
-
-const OPS = ["=", "!=", ">", "<", ">=", "<=", "contains"];
-
-function compile(kind: string, cols: string, from: string, filters: Filter[], sort: string): string {
-  let dsl = kind === "TABLE" ? `TABLE ${cols || "file.name"}` : kind;
-  if (from.trim()) dsl += ` FROM ${from.trim().startsWith("#") ? from.trim() : `"${from.trim()}"`}`;
-  const valid = filters.filter((f) => f.field && f.value);
-  if (valid.length)
-    dsl +=
-      " WHERE " +
-      valid
-        .map((f) => `${f.field} ${f.op} ${/^\d+$|^(true|false)$/.test(f.value) ? f.value : `"${f.value}"`}`)
-        .join(" AND ");
-  if (sort.trim()) dsl += ` SORT ${sort.trim()}`;
-  return dsl;
-}
+const OP_OPTIONS: SelectOption[] = OPS.map((o) => ({ value: o, label: o }));
+const KIND_OPTIONS: SelectOption[] = KINDS.map((k) => ({ value: k, label: k }));
 
 export default function QueryView() {
   const [mode, setMode] = useState<"builder" | "dsl">("builder");
@@ -37,7 +20,7 @@ export default function QueryView() {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const effectiveDsl = mode === "builder" ? compile(kind, cols, from, filters, sort) : dsl;
+  const effectiveDsl = mode === "builder" ? compile({ kind, cols, from, filters, sort }) : dsl;
 
   const run = async () => {
     setError(null);
@@ -67,11 +50,8 @@ export default function QueryView() {
         <div className="builder">
           <div className="row">
             <label>Show</label>
-            <select value={kind} onChange={(e) => setKind(e.target.value)}>
-              <option>TABLE</option>
-              <option>LIST</option>
-              <option>TASK</option>
-            </select>
+            <Select value={kind} options={KIND_OPTIONS} onChange={setKind} ariaLabel="Query kind" />
+
             {kind === "TABLE" && (
               <input value={cols} onChange={(e) => setCols(e.target.value)} placeholder="columns, comma-separated" />
             )}
@@ -89,20 +69,21 @@ export default function QueryView() {
                   value={f.field}
                   onChange={(e) => setFilters((fs) => fs.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)))}
                 />
-                <select
+                <Select
                   value={f.op}
-                  onChange={(e) => setFilters((fs) => fs.map((x, j) => (j === i ? { ...x, op: e.target.value } : x)))}
-                >
-                  {OPS.map((o) => (
-                    <option key={o}>{o}</option>
-                  ))}
-                </select>
+                  options={OP_OPTIONS}
+                  onChange={(v) => setFilters((fs) => fs.map((x, j) => (j === i ? { ...x, op: v } : x)))}
+                  ariaLabel="Operator"
+                  className="select-op"
+                />
                 <input
                   placeholder="value"
                   value={f.value}
                   onChange={(e) => setFilters((fs) => fs.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))}
                 />
-                <button onClick={() => setFilters((fs) => fs.filter((_, j) => j !== i))}>✕</button>
+                <button title="Remove filter" onClick={() => setFilters((fs) => fs.filter((_, j) => j !== i))}>
+                  <X size={14} weight="bold" />
+                </button>
               </div>
             ))}
             <button className="add-filter" onClick={() => setFilters((fs) => [...fs, { field: "", op: "=", value: "" }])}>
@@ -129,33 +110,16 @@ export default function QueryView() {
 
       {result && (
         <div className="result">
-          {result.kind === "list" ? (
-            <ul>
-              {result.rows.map((r, i) => (
-                <li key={i}>{String(r["file.name"])}</li>
-              ))}
-            </ul>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  {result.columns.map((c) => (
-                    <th key={c}>{c}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {result.rows.map((r, i) => (
-                  <tr key={i}>
-                    {result.columns.map((c) => (
-                      <td key={c}>{String(r[c] ?? "")}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <p className="muted">{result.rows.length} result(s)</p>
+          <QueryResultView
+            result={result}
+            // Toggle a task's done state on disk, then re-run so the result reflects it.
+            onToggle={(t) =>
+              api
+                .toggleTask(t.rel_path, t.line, t.occurrence ?? null)
+                .then(run)
+                .catch((e) => setError(String(e)))
+            }
+          />
         </div>
       )}
     </div>

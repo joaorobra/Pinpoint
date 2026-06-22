@@ -34,13 +34,14 @@ CREATE TABLE IF NOT EXISTS links (
     dst TEXT NOT NULL          -- target page name (wikilink) or path
 );
 CREATE TABLE IF NOT EXISTS tasks (
-    rel_path  TEXT NOT NULL,
-    line      INTEGER NOT NULL,
-    text      TEXT NOT NULL,
-    done      INTEGER NOT NULL,
-    due       TEXT,            -- ISO date if present (📅 / due::)
-    rrule     TEXT,            -- recurrence rule if present (🔁 / repeat::)
-    tags      TEXT,            -- comma-joined #tags found on the line
+    rel_path   TEXT NOT NULL,
+    line       INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    done       INTEGER NOT NULL,
+    due        TEXT,            -- ISO date if present (📅 / due::)
+    rrule      TEXT,            -- recurrence rule if present (🔁 / repeat::)
+    tags       TEXT,            -- comma-joined #tags found on the line
+    done_dates TEXT,            -- comma-joined ISO dates of completed occurrences (✅ … list)
     PRIMARY KEY (rel_path, line)
 );
 CREATE INDEX IF NOT EXISTS idx_fields_key ON fields(key);
@@ -66,6 +67,8 @@ pub struct TaskRow {
     pub due: Option<String>,
     pub rrule: Option<String>,
     pub tags: Option<String>,
+    /// Comma-joined ISO dates of completed occurrences (the `✅ …` list). Empty when none.
+    pub done_dates: Option<String>,
 }
 
 /// Extract `#tags` from a line of text.
@@ -113,8 +116,12 @@ fn extract_wikilinks(text: &str) -> Vec<String> {
     out
 }
 
-/// Parse a single line for task syntax. Returns Some((done, text, due, rrule)) if it's a task.
-fn parse_task_line(line: &str) -> Option<(bool, String, Option<String>, Option<String>)> {
+/// Parse a single line for task syntax.
+/// Returns Some((done, text, due, rrule, done_dates)) if it's a task, where `done_dates` is the
+/// comma-joined ISO list of completed occurrences from the `✅ …` marker.
+fn parse_task_line(
+    line: &str,
+) -> Option<(bool, String, Option<String>, Option<String>, Option<String>)> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))?;
     let rest = rest.strip_prefix("[")?;
@@ -123,10 +130,87 @@ fn parse_task_line(line: &str) -> Option<(bool, String, Option<String>, Option<S
     let done = mark.eq_ignore_ascii_case("x");
 
     // Inline fields: `📅 2026-06-21`, `due:: 2026-06-21`, `🔁 every week`, `repeat:: FREQ=WEEKLY`.
-    let due = find_field(after, &["📅", "due::"]).map(|s| s.split_whitespace().next().unwrap_or("").to_string());
+    // Keep only the leading `YYYY-MM-DD` of the due value so a fused marker (`📅 2026-06-21🔁…`,
+    // no space) or trailing text can't poison the stored date.
+    let due = find_field(after, &["📅", "due::"]).and_then(|s| {
+        let token = s.split_whitespace().next().unwrap_or("");
+        let ymd: String = token.chars().take(10).collect();
+        if ymd.len() == 10 && ymd.as_bytes()[4] == b'-' && ymd.as_bytes()[7] == b'-' {
+            Some(ymd)
+        } else if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        }
+    });
     let rrule = find_field(after, &["🔁", "repeat::"]);
+    // `✅ 2026-06-22,2026-07-06` — completed-occurrence dates. The value runs to end-of-line, so we
+    // strip spaces and keep only the comma-separated ISO dates.
+    let done_dates = find_field(after, &["✅"]).map(|s| {
+        s.split(',')
+            .map(|d| d.trim())
+            .filter(|d| !d.is_empty())
+            .collect::<Vec<_>>()
+            .join(",")
+    });
 
-    Some((done, after.to_string(), due, rrule))
+    Some((done, after.to_string(), due, rrule, done_dates))
+}
+
+/// Rewrite a task line to reflect a toggle.
+///
+/// - `occurrence == None` (plain task): flip the checkbox mark `[ ]` ⇄ `[x]`.
+/// - `occurrence == Some(date)` (a specific occurrence of a recurring task): leave the checkbox
+///   alone and add/remove `date` from the trailing `✅ <iso>,<iso>` completed-dates list.
+///
+/// Returns the new line text, or `None` if `line` isn't a task line. Indentation and all other
+/// inline markers are preserved.
+pub fn toggle_task_line(line: &str, occurrence: Option<&str>) -> Option<String> {
+    // Preserve leading indentation.
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, trimmed) = line.split_at(indent_len);
+    let rest = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))?;
+    let bullet = &trimmed[..trimmed.len() - rest.len()]; // "- " or "* "
+    let rest = rest.strip_prefix('[')?;
+    let (mark, after) = rest.split_at(1);
+    let body = after.strip_prefix("] ")?;
+    let _ = mark;
+
+    match occurrence {
+        None => {
+            // Flip the checkbox mark.
+            let new_mark = if mark.eq_ignore_ascii_case("x") { " " } else { "x" };
+            Some(format!("{indent}{bullet}[{new_mark}] {body}"))
+        }
+        Some(date) => {
+            // Split off any existing `✅ …` segment; everything before it is preserved verbatim.
+            let (head, mut dates) = match body.find('✅') {
+                Some(pos) => {
+                    let list = body[pos + '✅'.len_utf8()..].trim();
+                    let dates: Vec<String> = list
+                        .split(',')
+                        .map(|d| d.trim().to_string())
+                        .filter(|d| !d.is_empty())
+                        .collect();
+                    (body[..pos].trim_end().to_string(), dates)
+                }
+                None => (body.trim_end().to_string(), Vec::new()),
+            };
+            // Toggle membership of `date`.
+            if let Some(i) = dates.iter().position(|d| d == date) {
+                dates.remove(i);
+            } else {
+                dates.push(date.to_string());
+                dates.sort();
+            }
+            let line = if dates.is_empty() {
+                format!("{indent}{bullet}[ ] {head}")
+            } else {
+                format!("{indent}{bullet}[ ] {head} ✅ {}", dates.join(","))
+            };
+            Some(line)
+        }
+    }
 }
 
 fn find_field(text: &str, markers: &[&str]) -> Option<String> {
@@ -220,12 +304,12 @@ pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Resu
         for dst in extract_wikilinks(line) {
             conn.execute("INSERT INTO links (src, dst) VALUES (?1, ?2)", params![rel, dst])?;
         }
-        if let Some((done, text, due, rrule)) = parse_task_line(line) {
+        if let Some((done, text, due, rrule, done_dates)) = parse_task_line(line) {
             let line_tags = extract_tags(&text).join(",");
             conn.execute(
-                "INSERT OR REPLACE INTO tasks (rel_path, line, text, done, due, rrule, tags)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![rel, i as i64, text, done as i64, due, rrule, line_tags],
+                "INSERT OR REPLACE INTO tasks (rel_path, line, text, done, due, rrule, tags, done_dates)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![rel, i as i64, text, done as i64, due, rrule, line_tags, done_dates],
             )?;
         }
     }
@@ -251,7 +335,7 @@ pub fn rebuild(conn: &Connection, vault_root: &Path) -> Result<usize> {
 /// Fetch all tasks (used by the Tasks view; recurrence expansion happens in the frontend).
 pub fn all_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT rel_path, line, text, done, due, rrule, tags FROM tasks ORDER BY due IS NULL, due",
+        "SELECT rel_path, line, text, done, due, rrule, tags, done_dates FROM tasks ORDER BY due IS NULL, due",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -263,6 +347,7 @@ pub fn all_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 due: r.get(4)?,
                 rrule: r.get(5)?,
                 tags: r.get(6)?,
+                done_dates: r.get(7)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
