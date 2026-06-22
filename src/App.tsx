@@ -1493,6 +1493,8 @@ export default function App() {
                 onTreeChange={refreshTree}
                 dateFormat={settings.date_format}
                 nodeIcons={settings.node_icons}
+                onSetNodeIcon={setNodeIcon}
+                onClearNodeIcon={clearNodeIcon}
               />
             ) : activeAsset ? (
               <AssetViewer relPath={activeAsset.rel_path} />

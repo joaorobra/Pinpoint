@@ -44,6 +44,10 @@ interface Props {
   dateFormat?: string;
   /** Per-node custom page icons, keyed by vault-relative path (so rows can show their icon). */
   nodeIcons?: Record<string, NodeIcon>;
+  /** Set a row page's custom icon (persists to the global node-icon map). */
+  onSetNodeIcon?: (relPath: string, icon: NodeIcon) => void;
+  /** Clear a row page's custom icon override. */
+  onClearNodeIcon?: (relPath: string) => void;
 }
 
 const VIEW_TYPE_META: { type: DbViewType; label: string; icon: PhosphorIcon }[] = [
@@ -60,13 +64,14 @@ function ensureViews(schema: DbSchema): DbView[] {
   return [{ id: "view_default", name: "Table", type: "table", filters: [], sorts: [] }];
 }
 
-export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD", nodeIcons }: Props) {
+export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD", nodeIcons, onSetNodeIcon, onClearNodeIcon }: Props) {
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [rows, setRows] = useState<DbRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeViewId, setActiveViewId] = useState<string>("");
-  // Icon picker target: a column id or a view id (disambiguated by `kind`).
-  const [iconTarget, setIconTarget] = useState<{ kind: "col" | "view"; id: string; label: string; current?: NodeIcon } | null>(null);
+  // Icon picker target, disambiguated by `kind`: a column id, the active view, or a row page
+  // (where `id` is the page's vault-relative path).
+  const [iconTarget, setIconTarget] = useState<{ kind: "col" | "view" | "page"; id: string; label: string; current?: NodeIcon } | null>(null);
 
   const dir = node.rel_path;
 
@@ -255,6 +260,10 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
 
   // Resolve a row's custom page icon (from the global node-icon map) by its file path.
   const rowIcon = useCallback((relPath: string): NodeIcon | undefined => nodeIcons?.[relPath], [nodeIcons]);
+  // Open the icon picker for a row's page, pre-selected with its current icon.
+  const openRowIcon = useCallback((row: DbRow) => {
+    setIconTarget({ kind: "page", id: row.rel_path, label: row.title || "Untitled", current: nodeIcons?.[row.rel_path] });
+  }, [nodeIcons]);
   // Page icons show unless the view has explicitly turned them off.
   const showPageIcon = activeView?.showPageIcon !== false;
 
@@ -312,6 +321,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
             dateFormat={dateFormat}
             showPageIcon={showPageIcon}
             rowIcon={rowIcon}
+            onPickRowIcon={openRowIcon}
             onUpdateView={updateView}
             onSetCell={setCell}
             onRenameRow={renameRow}
@@ -341,7 +351,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
         {activeView.type === "gallery" && (
           <DbGalleryView
             columns={visibleColumns} allColumns={schema.columns} rows={viewRows} view={activeView} dateFormat={dateFormat}
-            showPageIcon={showPageIcon} rowIcon={rowIcon}
+            showPageIcon={showPageIcon} rowIcon={rowIcon} onPickRowIcon={openRowIcon}
             onOpenRow={(p) => onOpenRow?.(p)} onAddRow={() => addRow()}
           />
         )}
@@ -354,11 +364,13 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
             current={iconTarget.current}
             onPick={(icon) => {
               if (iconTarget.kind === "col") updateColumn(iconTarget.id, { icon });
+              else if (iconTarget.kind === "page") onSetNodeIcon?.(iconTarget.id, icon);
               else updateView({ icon }); // active view
               setIconTarget(null);
             }}
             onRemove={() => {
               if (iconTarget.kind === "col") updateColumn(iconTarget.id, { icon: undefined });
+              else if (iconTarget.kind === "page") onClearNodeIcon?.(iconTarget.id);
               else updateView({ icon: undefined });
               setIconTarget(null);
             }}

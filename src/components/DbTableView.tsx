@@ -19,6 +19,8 @@ interface Props {
   showPageIcon: boolean;
   /** Resolve a row's custom page icon by its file path (undefined = use the default page glyph). */
   rowIcon: (relPath: string) => NodeIcon | undefined;
+  /** Open the icon picker for a row's page (pre-selected with its current icon). */
+  onPickRowIcon: (row: DbRow) => void;
   onUpdateView: (patch: Partial<DbView>) => void;
   onSetCell: (rowPath: string, colId: string, value: unknown) => void;
   onRenameRow: (row: DbRow, title: string) => void;
@@ -36,7 +38,7 @@ interface Props {
 const DEFAULT_W = 180;
 
 export default function DbTableView({
-  columns, rows, view, dateFormat, showPageIcon, rowIcon, onUpdateView,
+  columns, rows, view, dateFormat, showPageIcon, rowIcon, onPickRowIcon, onUpdateView,
   onSetCell, onRenameRow, onOpenRow, onDeleteRow, onAddRow,
   onUpdateColumn, onChangeColumnType, onDeleteColumn, onMoveColumn, onAddColumn, onPickColumnIcon,
 }: Props) {
@@ -99,7 +101,14 @@ export default function DbTableView({
                   {col.type === "title" ? (
                     <div className="db-title-cell">
                       {showPageIcon && (
-                        <NodeIconView icon={rowIcon(row.rel_path)} fallback={FileText} size={15} className="db-title-icon" />
+                        <button
+                          type="button"
+                          className="db-title-icon-btn"
+                          title="Change page icon"
+                          onClick={(e) => { e.stopPropagation(); onPickRowIcon(row); }}
+                        >
+                          <NodeIconView icon={rowIcon(row.rel_path)} fallback={FileText} size={15} className="db-title-icon" />
+                        </button>
                       )}
                       <DbCell col={col} row={row} dateFormat={dateFormat}
                         onChange={(v) => onSetCell(row.rel_path, col.id, v)}

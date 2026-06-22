@@ -1032,24 +1032,29 @@ code, .dsl-preview, .dsl-input {
    This is a rich-text editor, so "lines" are document blocks (paragraphs, headings, …).
    Lists are the exception: a `ul`/`ol` is one block but reads as several lines, so each list
    item gets its own number instead of one number for the whole list. */
-.show-line-numbers .ProseMirror { counter-reset: pm-line; padding-left: 3.2rem; }
-.show-line-numbers .ProseMirror > *:not(ul):not(ol) { counter-increment: pm-line; position: relative; }
-.show-line-numbers .ProseMirror > ul,
-.show-line-numbers .ProseMirror > ol { position: relative; }
-/* Each top-level list item counts as one line. */
-.show-line-numbers .ProseMirror > ul > li,
-.show-line-numbers .ProseMirror > ol > li { counter-increment: pm-line; position: relative; }
+/* `.ProseMirror` is the single positioning context for line numbers: it owns the left gutter
+   (padding-left) and is the only `position: relative` ancestor, so every number — top-level block or
+   nested list item — anchors its horizontal `left` to the SAME editor edge and forms one aligned
+   column, regardless of nesting depth or list type. */
+.show-line-numbers .ProseMirror { counter-reset: pm-line; padding-left: 3.2rem; position: relative; }
+.show-line-numbers .ProseMirror > *:not(ul):not(ol) { counter-increment: pm-line; }
+/* Every list item — at any nesting depth — reads as its own line, so each gets its own number.
+   (Matching only direct `> ul > li` children left nested/indented items uncounted, collapsing a
+   parent + its sub-items into a single line number.) Items are NOT positioned, so their number
+   resolves against the editor, not the indented item box. */
+.show-line-numbers .ProseMirror li { counter-increment: pm-line; }
 .show-line-numbers .ProseMirror > *:not(ul):not(ol)::before,
-.show-line-numbers .ProseMirror > ul > li::before,
-.show-line-numbers .ProseMirror > ol > li::before {
+.show-line-numbers .ProseMirror li::before {
   content: counter(pm-line);
-  position: absolute; left: -3.2rem; width: 2.6rem;
-  top: 0; bottom: 0;
+  /* Left-aligned in the gutter for every line. `top` tracks the item's own row because the number
+     is laid out in the item's first line box (the item is the ::before's element), then shifted to
+     the editor's left edge via the fixed left offset against the positioned editor. */
+  position: absolute; left: 0; width: 2.6rem;
   display: flex; align-items: center; justify-content: flex-end;
   padding-right: 0.6rem;
   color: var(--text-dim); opacity: 0.5;
   font-weight: 400; font-variant-numeric: tabular-nums;
-  font-size: 0.75rem; line-height: 1;
+  font-size: 0.75rem; line-height: calc(var(--font-size) * var(--line-height));
   user-select: none; pointer-events: none;
 }
 .ProseMirror h1, .ProseMirror h2, .ProseMirror h3 {
@@ -1078,9 +1083,11 @@ code, .dsl-preview, .dsl-input {
 .ProseMirror th, .ProseMirror td { border: 1px solid var(--border); padding: 8px 12px; }
 .ProseMirror th { background: var(--bg-3); font-weight: 600; text-align: left; }
 .ProseMirror hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
-.ProseMirror ul[data-type="taskList"] { list-style: none; padding-left: 2px; }
+.ProseMirror ul[data-type="taskList"] { list-style: none; margin: 0; padding-left: 2px; display: flex; flex-direction: column; gap: 2px; }
 .ProseMirror ul[data-type="taskList"] li { display: flex; gap: var(--sp-2); align-items: flex-start; }
-.ProseMirror ul[data-type="taskList"] li > div { flex: 1; }
+.ProseMirror ul[data-type="taskList"] li > div { flex: 1; min-width: 0; }
+/* A nested task list indents from its parent item's text, one level per depth. */
+.ProseMirror ul[data-type="taskList"] li > div > ul[data-type="taskList"] { padding-left: var(--sp-3); margin-top: 2px; }
 /* Center the checkbox within the first text line (height = one line-height) so it lines up with
    the label regardless of the editor's line-height setting, instead of a fixed magic-number nudge. */
 .ProseMirror ul[data-type="taskList"] li > label {
@@ -2238,7 +2245,12 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 
 /* Title cell */
 .db-title-cell { display: flex; align-items: center; gap: 6px; padding: 0 12px; height: 100%; }
-.db-title-cell .db-title-icon { flex: none; color: var(--text-faint); }
+.db-title-icon-btn {
+  display: grid; place-items: center; flex: none; width: 22px; height: 22px; padding: 0;
+  background: none; border: none; cursor: pointer; border-radius: var(--r-sm); color: var(--text-faint);
+}
+.db-title-icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.db-title-icon-btn .db-title-icon { display: block; }
 .db-title-text { flex: 1; cursor: text; font-weight: 500; padding: 8px 0; overflow: hidden; text-overflow: ellipsis; }
 .db-title-cell .db-text-input { padding-left: 0; }
 .db-row-actions { display: none; gap: 2px; }
@@ -2600,7 +2612,12 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 .db-card:hover .db-card-grip { opacity: 0.7; }
 .db-card-title { display: flex; align-items: center; gap: 6px; font-weight: 500; margin-bottom: var(--sp-1); padding-right: 16px; }
 .db-card-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.db-card-title-icon { flex: none; color: var(--text-faint); }
+.db-card-title-icon-btn {
+  display: grid; place-items: center; flex: none; width: 22px; height: 22px; padding: 0;
+  background: none; border: none; cursor: pointer; border-radius: var(--r-sm); color: var(--text-faint);
+}
+.db-card-title-icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.db-card-title-icon { display: block; }
 .db-card-field { display: flex; align-items: baseline; gap: 6px; font-size: 0.8rem; margin-top: 3px; }
 .db-card-field-label { color: var(--text-faint); flex: none; min-width: 64px; }
 .db-lane-empty {

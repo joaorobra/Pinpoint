@@ -18,11 +18,13 @@ interface Props {
   showPageIcon: boolean;
   /** Resolve a row's custom page icon by its file path (undefined = use the default page glyph). */
   rowIcon: (relPath: string) => NodeIcon | undefined;
+  /** Open the icon picker for a row's page (pre-selected with its current icon). */
+  onPickRowIcon: (row: DbRow) => void;
   onOpenRow: (relPath: string) => void;
   onAddRow: () => void;
 }
 
-export default function DbGalleryView({ columns, allColumns, rows, view, dateFormat, showPageIcon, rowIcon, onOpenRow, onAddRow }: Props) {
+export default function DbGalleryView({ columns, allColumns, rows, view, dateFormat, showPageIcon, rowIcon, onPickRowIcon, onOpenRow, onAddRow }: Props) {
   const bodyCols = columns.filter((c) => c.type !== "title");
   const coverCol = allColumns.find((c) => c.id === view.cardCover && c.type === "select");
 
@@ -41,7 +43,14 @@ export default function DbGalleryView({ columns, allColumns, rows, view, dateFor
           <div className="db-gallery-body">
             <div className="db-card-title">
               {showPageIcon && (
-                <NodeIconView icon={rowIcon(row.rel_path)} fallback={FileText} size={15} className="db-card-title-icon" />
+                <button
+                  type="button"
+                  className="db-card-title-icon-btn"
+                  title="Change page icon"
+                  onClick={(e) => { e.stopPropagation(); onPickRowIcon(row); }}
+                >
+                  <NodeIconView icon={rowIcon(row.rel_path)} fallback={FileText} size={15} className="db-card-title-icon" />
+                </button>
               )}
               <span>{row.title || "Untitled"}</span>
             </div>
