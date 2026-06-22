@@ -1492,6 +1492,7 @@ export default function App() {
                 onOpenRow={openPage}
                 onTreeChange={refreshTree}
                 dateFormat={settings.date_format}
+                nodeIcons={settings.node_icons}
               />
             ) : activeAsset ? (
               <AssetViewer relPath={activeAsset.rel_path} />

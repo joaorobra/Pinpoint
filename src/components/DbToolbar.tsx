@@ -206,9 +206,20 @@ function PropsPopover({ view, columns, onUpdateView, onClose }: Props & { onClos
     onUpdateView({ properties: next });
   };
 
+  const showPageIcon = view.showPageIcon !== false;
+
   return (
     <div className="db-popover db-props-pop" ref={ref}>
       <div className="db-popover-head"><span>Properties</span></div>
+      {(view.type === "table" || view.type === "gallery") && (
+        <button
+          className="db-prop-row db-prop-toggle"
+          onClick={() => onUpdateView({ showPageIcon: !showPageIcon })}
+        >
+          <span>Show page icon</span>
+          {showPageIcon ? <Eye size={14} /> : <EyeSlash size={14} />}
+        </button>
+      )}
       {columns.map((c) => (
         <button key={c.id} className="db-prop-row" disabled={c.type === "title"} onClick={() => toggle(c.id)}>
           <span>{c.name}</span>

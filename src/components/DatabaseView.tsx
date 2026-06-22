@@ -42,6 +42,8 @@ interface Props {
   onOpenRow?: (relPath: string) => void;
   onTreeChange?: () => void;
   dateFormat?: string;
+  /** Per-node custom page icons, keyed by vault-relative path (so rows can show their icon). */
+  nodeIcons?: Record<string, NodeIcon>;
 }
 
 const VIEW_TYPE_META: { type: DbViewType; label: string; icon: PhosphorIcon }[] = [
@@ -58,7 +60,7 @@ function ensureViews(schema: DbSchema): DbView[] {
   return [{ id: "view_default", name: "Table", type: "table", filters: [], sorts: [] }];
 }
 
-export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD" }: Props) {
+export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD", nodeIcons }: Props) {
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [rows, setRows] = useState<DbRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -251,6 +253,11 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
     return schema.columns.filter((c) => c.type === "title" || !hidden.has(c.id));
   }, [schema, activeView]);
 
+  // Resolve a row's custom page icon (from the global node-icon map) by its file path.
+  const rowIcon = useCallback((relPath: string): NodeIcon | undefined => nodeIcons?.[relPath], [nodeIcons]);
+  // Page icons show unless the view has explicitly turned them off.
+  const showPageIcon = activeView?.showPageIcon !== false;
+
   const viewRows = useMemo(() => {
     if (!schema || !activeView) return rows;
     const filtered = applyFilters(rows, activeView.filters, schema.columns, activeView.filterMatch ?? "all");
@@ -303,6 +310,8 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
             rows={viewRows}
             view={activeView}
             dateFormat={dateFormat}
+            showPageIcon={showPageIcon}
+            rowIcon={rowIcon}
             onUpdateView={updateView}
             onSetCell={setCell}
             onRenameRow={renameRow}
@@ -332,6 +341,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
         {activeView.type === "gallery" && (
           <DbGalleryView
             columns={visibleColumns} allColumns={schema.columns} rows={viewRows} view={activeView} dateFormat={dateFormat}
+            showPageIcon={showPageIcon} rowIcon={rowIcon}
             onOpenRow={(p) => onOpenRow?.(p)} onAddRow={() => addRow()}
           />
         )}

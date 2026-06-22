@@ -2,8 +2,8 @@
 // per-column icons, per-view column visibility, and the in-header type/option/icon config menu.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check, ArrowSquareOut } from "@phosphor-icons/react";
-import type { DbAggregation, DbColumn, DbColumnType, DbOption, DbView } from "../types";
+import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check, ArrowSquareOut, FileText } from "@phosphor-icons/react";
+import type { DbAggregation, DbColumn, DbColumnType, DbOption, DbView, NodeIcon } from "../types";
 import { DB_OPTION_COLORS } from "../types";
 import type { DbRow } from "../dblogic";
 import { AGG_LABELS, aggsForType, computeAggregation } from "../dblogic";
@@ -15,6 +15,10 @@ interface Props {
   rows: DbRow[];            // already filtered + sorted
   view: DbView;             // active view (for per-column footer aggregations)
   dateFormat: string;
+  /** Whether to show each row's page icon beside its title. */
+  showPageIcon: boolean;
+  /** Resolve a row's custom page icon by its file path (undefined = use the default page glyph). */
+  rowIcon: (relPath: string) => NodeIcon | undefined;
   onUpdateView: (patch: Partial<DbView>) => void;
   onSetCell: (rowPath: string, colId: string, value: unknown) => void;
   onRenameRow: (row: DbRow, title: string) => void;
@@ -32,7 +36,7 @@ interface Props {
 const DEFAULT_W = 180;
 
 export default function DbTableView({
-  columns, rows, view, dateFormat, onUpdateView,
+  columns, rows, view, dateFormat, showPageIcon, rowIcon, onUpdateView,
   onSetCell, onRenameRow, onOpenRow, onDeleteRow, onAddRow,
   onUpdateColumn, onChangeColumnType, onDeleteColumn, onMoveColumn, onAddColumn, onPickColumnIcon,
 }: Props) {
@@ -94,6 +98,9 @@ export default function DbTableView({
                 <td key={col.id} className={`db-cell db-cell-${col.type}`}>
                   {col.type === "title" ? (
                     <div className="db-title-cell">
+                      {showPageIcon && (
+                        <NodeIconView icon={rowIcon(row.rel_path)} fallback={FileText} size={15} className="db-title-icon" />
+                      )}
                       <DbCell col={col} row={row} dateFormat={dateFormat}
                         onChange={(v) => onSetCell(row.rel_path, col.id, v)}
                         onRenameTitle={(v) => onRenameRow(row, v)} />

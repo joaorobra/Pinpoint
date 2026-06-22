@@ -181,6 +181,8 @@ export interface DbView {
   sorts: DbSort[];
   /** Per-property visibility/order; columns not listed default to visible. */
   properties?: DbViewProperty[];
+  /** Show each row's page icon next to its title (table/gallery). Absent = shown. */
+  showPageIcon?: boolean;
   /** Board view: the select/multiselect column id rows are grouped into lanes by. */
   groupBy?: string;
   /** Calendar view: the date/datetime/daterange column id that places rows on the calendar. */
