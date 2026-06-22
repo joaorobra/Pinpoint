@@ -271,6 +271,13 @@ function Calendar({
   const today = new Date();
   const isSameDay = (a: Date, b: Date) =>
     a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  // Whether the viewed month is the real current month (drives the "Today" shortcut visibility).
+  const viewingThisMonth =
+    view.getFullYear() === today.getFullYear() && view.getMonth() === today.getMonth();
+  const jumpToToday = () => {
+    setView(new Date(today.getFullYear(), today.getMonth(), 1));
+    setSelected(new Date());
+  };
 
   // Build the 6-row grid: leading blanks (Mon-start), the month's days, trailing blanks.
   const cells = useMemo<(Date | null)[]>(() => {
@@ -299,6 +306,26 @@ function Calendar({
     else setSelected(day);
   };
 
+  // Arrow-key navigation across the grid: move the selection by ±1 day / ±1 week, paging the
+  // viewed month when the selection crosses its edge. Enter/Space opens the selected day.
+  const onGridKey = (e: React.KeyboardEvent) => {
+    const deltas: Record<string, number> = {
+      ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7,
+    };
+    if (e.key in deltas) {
+      e.preventDefault();
+      const next = new Date(selected);
+      next.setDate(next.getDate() + deltas[e.key]);
+      setSelected(next);
+      if (next.getMonth() !== view.getMonth() || next.getFullYear() !== view.getFullYear()) {
+        setView(new Date(next.getFullYear(), next.getMonth(), 1));
+      }
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openDay(selected);
+    }
+  };
+
   // Agenda for the selected day: its tasks (done last), plus a link to open/create the note.
   const selectedKey = dayKey(selected);
   const agendaTasks = useMemo(() => {
@@ -320,10 +347,7 @@ function Calendar({
         </button>
         <button
           className="cal-title"
-          onClick={() => {
-            setView(new Date(today.getFullYear(), today.getMonth(), 1));
-            setSelected(new Date());
-          }}
+          onClick={jumpToToday}
           title="Jump to today"
         >
           {MONTHS[view.getMonth()]} {view.getFullYear()}
@@ -335,9 +359,22 @@ function Calendar({
         >
           <CaretRight size={14} weight="bold" />
         </button>
+        {/* "Today" appears only when you've navigated away — a one-click way back, with no clutter
+            while you're already on the current month. */}
+        {!viewingThisMonth && (
+          <button className="cal-today-btn" onClick={jumpToToday} title="Back to today">
+            Today
+          </button>
+        )}
       </div>
 
-      <div className="calendar-grid">
+      <div
+        className="calendar-grid"
+        role="grid"
+        aria-label="Month calendar"
+        tabIndex={0}
+        onKeyDown={onGridKey}
+      >
         {WEEKDAYS.map((w) => (
           <div key={w} className="cal-weekday">
             {w}
@@ -363,6 +400,15 @@ function Calendar({
               onClick={() => clickDay(day)}
               onDoubleClick={() => openDay(day)}
               title={hasPage ? "Open daily note" : "Create daily note"}
+              role="gridcell"
+              tabIndex={-1}
+              aria-selected={isSameDay(day, selected)}
+              aria-current={isSameDay(day, today) ? "date" : undefined}
+              aria-label={
+                `${day.getDate()} ${MONTHS[day.getMonth()]}` +
+                (openCount > 0 ? `, ${openCount} open task${openCount > 1 ? "s" : ""}` : "") +
+                (hasPage ? ", has note" : "")
+              }
             >
               <span className="cal-day-num">{day.getDate()}</span>
               {/* Subtle load indicator: a count of open tasks due this day (if any). */}
@@ -379,14 +425,21 @@ function Calendar({
           onClick={() => openDay(selected)}
           title={selectedHasNote ? "Open daily note" : "Create daily note"}
         >
-          <span className="cal-agenda-date">{labelForDay(selected, dailyFormat)}</span>
+          <span className="cal-agenda-date">
+            {labelForDay(selected, dailyFormat)}
+            {agendaTasks.length > 0 && (
+              <span className="cal-agenda-count">{agendaTasks.length}</span>
+            )}
+          </span>
           <span className={"cal-agenda-open" + (selectedHasNote ? " exists" : "")}>
             <NotePencil size={14} weight="bold" />
             {selectedHasNote ? "Open" : "New note"}
           </span>
         </button>
         {agendaTasks.length === 0 ? (
-          <div className="cal-agenda-empty">No tasks due.</div>
+          <button className="cal-agenda-empty" onClick={() => openDay(selected)}>
+            No tasks due — open this day’s note
+          </button>
         ) : (
           <ul className="cal-agenda-list">
             {agendaTasks.map((t, i) => (

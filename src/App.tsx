@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 import {
   Plus,
@@ -35,6 +36,7 @@ const IconPicker = lazy(() => import("./components/IconPicker"));
 import { NodeIconView } from "./components/Icon";
 import AssetViewer from "./components/AssetViewer";
 import DatabaseView from "./components/DatabaseView";
+import DbPageProperties from "./components/DbPageProperties";
 import TasksView from "./components/TasksView";
 import TrashView from "./components/TrashView";
 import QueryView from "./components/QueryView";
@@ -42,6 +44,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
 import { DialogHost, dialogs } from "./components/Dialogs";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
+import PageProperties from "./components/PageProperties";
 import Titlebar from "./components/Titlebar";
 
 type RightTab = "editor" | "tasks" | "query" | "trash";
@@ -144,6 +147,8 @@ export default function App() {
       const dir = side === "left" ? 1 : -1;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
+      // Suspend the grid-track easing so the panel tracks the pointer 1:1 while dragging.
+      document.querySelector(".app")?.classList.add("resizing");
       const onMove = (ev: PointerEvent) => {
         const next = Math.min(max, Math.max(min, startW + dir * (ev.clientX - startX)));
         side === "left" ? setLeftWidth(next) : setRightWidth(next);
@@ -153,6 +158,7 @@ export default function App() {
         window.removeEventListener("pointerup", onUp);
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
+        document.querySelector(".app")?.classList.remove("resizing");
         // Read the committed width off the element via the setter's latest value.
         side === "left"
           ? setLeftWidth((w) => (localStorage.setItem("pp.leftWidth", String(w)), w))
@@ -584,6 +590,40 @@ export default function App() {
     if (tree) tree.children.forEach(visit);
     return out;
   }, [tree]);
+
+  // The database folder the active page is a row of, or null. A page is a database row when its
+  // immediate parent folder is a database; the properties panel keys off this.
+  const activePageDb = useMemo(() => {
+    if (!activePath || activeAsset || activeDb) return null;
+    const slash = activePath.lastIndexOf("/");
+    if (slash < 0) return null;
+    const parent = activePath.slice(0, slash);
+    return databases.find((d) => d.rel_path === parent) ?? null;
+  }, [activePath, activeAsset, activeDb, databases]);
+
+  // Persist a database-row page's properties (frontmatter), keeping App's frontmatter state in sync
+  // so the body-save loop never writes a stale map back over a property edit.
+  const setRowFields = useCallback(
+    (fields: Record<string, unknown>) => {
+      if (!activePath) return;
+      setFrontmatter(fields);
+      api.writePage(activePath, fields, body).catch(console.error);
+      setTaskRefresh((k) => k + 1);
+    },
+    [activePath, body]
+  );
+
+  // Rename the active database-row page from the properties panel's title field. The title of a row
+  // is its file name, so this is a path rename; reuse `commitRename` (which remaps open tabs +
+  // history and re-opens the moved page) by resolving the active node.
+  const renameRowTitle = useCallback(
+    (title: string) => {
+      if (!activePath) return;
+      const node = findNode(activePath);
+      if (node) void commitRename(node, title);
+    },
+    [activePath, findNode]
+  );
 
   // Flat list of markdown pages for the editor's `/link` slash command and wikilink resolution.
   // Declared before the callbacks below so they can reference it without a TDZ error.
@@ -1262,8 +1302,15 @@ export default function App() {
         }`,
       }}
     >
+      <AnimatePresence initial={false}>
       {leftOpen && (
-      <aside className="sidebar">
+      <motion.aside
+        className="sidebar"
+        initial={{ x: -24, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        exit={{ x: -24, opacity: 0 }}
+        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+      >
         <div className="sidebar-header">
           <button
             className="vault-name"
@@ -1312,8 +1359,9 @@ export default function App() {
           <span className="sidebar-trash-label">Trash</span>
           {trashCount > 0 && <span className="sidebar-trash-count">{trashCount}</span>}
         </button>
-      </aside>
+      </motion.aside>
       )}
+      </AnimatePresence>
 
       {leftOpen && (
         <div className="resizer" onPointerDown={startResize("left")} title="Drag to resize" />
@@ -1425,6 +1473,13 @@ export default function App() {
               <SidebarSimple size={15} weight="bold" style={{ transform: "scaleX(-1)" }} />
             </button>
           </div>
+          {activePath && !activeAsset && !activeDb && tab === "editor" && (
+            <PageProperties
+              path={activePath}
+              frontmatter={frontmatter}
+              dateFormat={settings.date_format}
+            />
+          )}
           <span className="status">{headerStatus}</span>
         </div>
 
@@ -1453,6 +1508,18 @@ export default function App() {
                 dateFormat={settings.date_format}
                 timeFormat={settings.time_format}
                 taskDateFormat={settings.task_date_format}
+                headerSlot={
+                  activePageDb ? (
+                    <DbPageProperties
+                      dbPath={activePageDb.rel_path}
+                      pagePath={activePath}
+                      frontmatter={frontmatter}
+                      onChange={setRowFields}
+                      onRenameTitle={renameRowTitle}
+                      dateFormat={settings.date_format}
+                    />
+                  ) : undefined
+                }
               />
             ) : (
               <div className="empty">
@@ -1480,20 +1547,31 @@ export default function App() {
         <div className="resizer" onPointerDown={startResize("right")} title="Drag to resize" />
       )}
 
+      <AnimatePresence initial={false}>
       {rightOpen && (
-      <RightSidebar
-        body={body}
-        hasPage={!!activePath && !activeAsset && tab === "editor"}
-        onJumpToHeading={jumpToHeading}
-        periodicFolder={settings.periodic_folder}
-        dailyFormat={settings.periodic_label_format}
-        activePath={activePath}
-        existingPaths={pagePaths}
-        onOpenPeriodic={openPeriodic}
-        onOpenPath={openPage}
-        taskRefresh={taskRefresh}
-      />
+      <motion.div
+        key="right-sidebar"
+        initial={{ x: 24, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        exit={{ x: 24, opacity: 0 }}
+        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+        style={{ gridColumn: 5, display: "flex", minHeight: 0 }}
+      >
+        <RightSidebar
+          body={body}
+          hasPage={!!activePath && !activeAsset && tab === "editor"}
+          onJumpToHeading={jumpToHeading}
+          periodicFolder={settings.periodic_folder}
+          dailyFormat={settings.periodic_label_format}
+          activePath={activePath}
+          existingPaths={pagePaths}
+          onOpenPeriodic={openPeriodic}
+          onOpenPath={openPage}
+          taskRefresh={taskRefresh}
+        />
+      </motion.div>
       )}
+      </AnimatePresence>
 
       {showSettings && (
         <SettingsPanel settings={settings} onChange={saveSettings} onClose={() => setShowSettings(false)} />

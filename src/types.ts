@@ -93,7 +93,11 @@ export type DbColumnType =
   | "multiselect"
   | "date"
   | "datetime"
-  | "daterange";
+  | "daterange"
+  // Auto-maintained, read-only timestamps mirrored from the page's `created` / `updated`
+  // frontmatter (see api.ts). They surface the always-present page metadata as columns.
+  | "created_time"
+  | "last_edited_time";
 
 /** A selectable option for `select`/`multiselect` columns. `color` is a CSS color or "". */
 export interface DbOption {

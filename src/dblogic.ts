@@ -26,6 +26,10 @@ export interface DbRow {
 /** Read a column's value from a row. The title column lives on `row.title`, not in `fields`. */
 export function cellValue(row: DbRow, col: DbColumn): unknown {
   if (col.type === "title") return row.title;
+  // Timestamp columns mirror the page's auto-maintained `created` / `updated` frontmatter
+  // (the same fixed keys api.ts stamps), not a per-column id.
+  if (col.type === "created_time") return row.fields.created;
+  if (col.type === "last_edited_time") return row.fields.updated;
   return row.fields[col.id];
 }
 
@@ -62,7 +66,14 @@ function sortKey(v: unknown, type: DbColumnType): number | string {
     case "date":
     case "datetime":
     case "daterange":
-      return primaryDate(v);
+    case "created_time":
+    case "last_edited_time":
+      // Sort timestamps by their full ISO string so same-day edits still order by time.
+      return type === "datetime" || type === "created_time" || type === "last_edited_time"
+        ? typeof v === "string"
+          ? v
+          : primaryDate(v)
+        : primaryDate(v);
     case "multiselect":
       return Array.isArray(v) ? v.join(",") : String(v);
     default:
@@ -184,6 +195,8 @@ export function opsForType(type: DbColumnType): DbFilterOp[] {
     case "date":
     case "datetime":
     case "daterange":
+    case "created_time":
+    case "last_edited_time":
       return ["is", "before", "after", "on_or_before", "on_or_after", "is_empty", "is_not_empty"];
     default:
       return ["is", "is_not", "contains", "not_contains", "is_empty", "is_not_empty"];

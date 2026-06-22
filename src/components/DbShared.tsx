@@ -13,6 +13,8 @@ import {
   CheckSquare,
   CalendarBlank,
   Clock,
+  ClockClockwise,
+  ClockCounterClockwise,
   CalendarDots,
   ListChecks,
   Tag,
@@ -33,10 +35,28 @@ export const TYPE_META: { type: DbColumnType; label: string; icon: PhosphorIcon 
   { type: "date", label: "Date", icon: CalendarBlank },
   { type: "datetime", label: "Date & time", icon: Clock },
   { type: "daterange", label: "Date range", icon: CalendarDots },
+  { type: "created_time", label: "Created time", icon: ClockClockwise },
+  { type: "last_edited_time", label: "Last edited time", icon: ClockCounterClockwise },
 ];
 
 export function typeIcon(type: DbColumnType): PhosphorIcon {
   return TYPE_META.find((t) => t.type === type)?.icon ?? TextT;
+}
+
+/** True for auto-maintained, read-only column types (their value comes from page metadata). */
+export function isReadOnlyType(type: DbColumnType): boolean {
+  return type === "created_time" || type === "last_edited_time";
+}
+
+/** Render an ISO-8601 datetime as "<date> <HH:MM>" using the vault's date pattern, or "—". */
+export function formatDateTime(iso: unknown, dateFormat: string): string {
+  if (typeof iso !== "string" || !iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const date = formatDate(parseISODate(iso.slice(0, 10)), dateFormat);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${date} ${hh}:${mm}`;
 }
 
 /** A short unique-ish id for columns/options/views/filters. */
@@ -166,6 +186,9 @@ export function CellValueView({ col, row, dateFormat }: { col: DbColumn; row: Db
       return <span>{formatDate(parseISODate(String(v)), dateFormat)}</span>;
     case "datetime":
       return <span>{String(v)}</span>;
+    case "created_time":
+    case "last_edited_time":
+      return <span>{formatDateTime(v, dateFormat)}</span>;
     case "daterange": {
       const r = v as DbDateRange;
       return (
@@ -216,6 +239,10 @@ export function DbCell({
       return <DateCell value={typeof value === "string" ? value : ""} dateFormat={dateFormat} onChange={onChange} />;
     case "datetime":
       return <DateTimeCell value={typeof value === "string" ? value : ""} onChange={onChange} />;
+    case "created_time":
+    case "last_edited_time":
+      // Auto-maintained — not editable. Show the formatted timestamp (or "—" if not yet stamped).
+      return <span className="db-readonly-cell">{formatDateTime(value, dateFormat)}</span>;
     case "daterange":
       return <DateRangeCell value={value as DbDateRange | undefined} dateFormat={dateFormat} onChange={onChange} />;
     default:

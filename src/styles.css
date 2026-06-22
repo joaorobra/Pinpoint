@@ -365,7 +365,15 @@ code, .dsl-preview, .dsl-input {
 /* ---------- Layout ---------- */
 /* grid-template-columns is set inline from React (resizable widths):
    leftWidth | resizer | 1fr | resizer | rightWidth. */
-.app { display: grid; height: 100%; }
+.app {
+  display: grid; height: 100%;
+  /* Animate the sidebar grid tracks when a panel is toggled. The Framer Motion
+     overlay (slide + fade) on the panel contents runs in concert with this. */
+  transition: grid-template-columns 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* While a sidebar is mid-drag-resize we don't want the easing to fight the
+   pointer, so the resizer disables the track transition for the duration. */
+.app.resizing { transition: none; }
 .sidebar {
   background: var(--bg-2);
   border-right: 1px solid var(--border);
@@ -389,6 +397,8 @@ code, .dsl-preview, .dsl-input {
   background: var(--bg-2);
   border-left: 1px solid var(--border);
   display: flex; flex-direction: column;
+  /* Fills the Framer Motion slide wrapper that owns the grid column. */
+  flex: 1; min-width: 0;
   overflow: hidden;
 }
 .right-tabs {
@@ -439,6 +449,15 @@ code, .dsl-preview, .dsl-input {
   padding: 4px 6px; border-radius: var(--r-sm);
 }
 .calendar-head .cal-title:hover { background: var(--bg-hover); }
+/* "Today" shortcut — appears only when viewing another month. A quiet accent pill that returns to
+   the current month without competing with the title. */
+.cal-today-btn {
+  flex: none;
+  padding: 3px 9px; font-size: 0.72em; font-weight: 600;
+  background: var(--accent-soft); border-color: transparent; color: var(--accent);
+  border-radius: 99px;
+}
+.cal-today-btn:hover { background: var(--accent-soft); color: var(--accent-hover); border-color: var(--accent-ring); }
 .cal-nav {
   display: grid; place-items: center;
   width: 26px; height: 26px; padding: 0; flex: none;
@@ -453,6 +472,13 @@ code, .dsl-preview, .dsl-input {
   grid-auto-rows: 38px;
   gap: 3px;
   width: 100%; max-width: 300px; margin: 0 auto;
+  border-radius: var(--r-md);
+}
+/* The grid owns keyboard focus (cells are tabIndex=-1); show a ring so arrow-key users see they're
+   in the calendar. */
+.calendar-grid:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .cal-weekday {
   min-width: 0;
@@ -486,10 +512,13 @@ code, .dsl-preview, .dsl-input {
   content: ""; position: absolute; bottom: 4px; left: 5px;
   width: 4px; height: 4px; border-radius: 50%; background: var(--accent);
 }
+/* Today: a hairline accent ring so it stays locatable even when another day is selected. */
+.cal-day.today { border-color: var(--accent-ring); }
 .cal-day.today .cal-day-num { font-weight: 700; color: var(--accent); }
 /* Selected day (drives the agenda): soft fill. */
 .cal-day.selected { background: var(--accent-soft); }
-/* Currently-open day: outlined, so it reads as "you are here". */
+.cal-day.selected .cal-day-num { color: var(--accent); }
+/* Currently-open day: solid accent outline, so it reads as "you are here" (wins over today's ring). */
 .cal-day.open { border-color: var(--accent); }
 .cal-day.open .cal-day-num { color: var(--accent); font-weight: 650; }
 
@@ -505,15 +534,31 @@ code, .dsl-preview, .dsl-input {
   padding: 4px 6px; color: var(--text); width: 100%;
 }
 .cal-agenda-head:hover { background: var(--bg-hover); }
-.cal-agenda-date { font-weight: 600; font-size: 0.85em; }
+.cal-agenda-date {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  font-weight: 600; font-size: 0.85em;
+}
+/* Count of tasks due on the selected day, beside its date. */
+.cal-agenda-count {
+  min-width: 16px; padding: 0 5px;
+  display: inline-grid; place-items: center;
+  font-size: 0.72em; font-weight: 700; line-height: 1;
+  border-radius: 99px; background: var(--bg-3); color: var(--text-dim);
+}
 .cal-agenda-open {
   display: flex; align-items: center; gap: 4px; flex: none;
   font-size: 0.72em; font-weight: 600; color: var(--text-dim);
 }
 .cal-agenda-open.exists { color: var(--accent); }
+/* Empty agenda doubles as a next-action: click to open/create the day's note. */
 .cal-agenda-empty {
-  color: var(--text-dim); font-size: 0.78em; padding: 2px 6px;
+  width: 100%; text-align: left;
+  color: var(--text-dim); font-size: 0.78em;
+  padding: 5px 6px; border-radius: var(--r-sm);
+  background: transparent; border: 1px solid transparent;
+  font-weight: 500;
 }
+.cal-agenda-empty:hover { background: var(--bg-hover); color: var(--text); }
 .cal-agenda-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 .cal-agenda-task {
   display: flex; align-items: center; gap: 6px;
@@ -833,6 +878,58 @@ code, .dsl-preview, .dsl-input {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 10px; border-radius: 99px; background: var(--bg-3);
 }
+
+/* ---- Page info popover (created / last-edited / path — for every page) ---- */
+.page-props { position: relative; flex-shrink: 0; display: inline-flex; }
+.page-props-btn {
+  width: 32px; height: 32px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm); background: transparent; border-color: transparent;
+  color: var(--text-dim);
+}
+.page-props-btn:hover { background: var(--bg-hover); color: var(--text); }
+/* Force the glyph size regardless of the icon component's `size` prop / cascade. */
+.page-props-btn svg { width: 20px; height: 20px; }
+.page-props-btn.active { background: var(--accent-soft); color: var(--accent); }
+.page-props-popover {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
+  min-width: 260px; max-width: 360px;
+  padding: var(--sp-3);
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.28));
+  transform-origin: top right;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.page-props-title {
+  font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 4px 6px;
+}
+.page-props-item {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4);
+  padding: 5px 4px; font-size: 0.85em;
+}
+.page-props-item-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-dim); flex-shrink: 0;
+}
+.page-props-item-value { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.page-props-path {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  background: transparent; border-color: transparent; color: var(--text);
+  padding: 2px 6px; border-radius: var(--r-sm); font-size: 1em;
+}
+.page-props-path:hover { background: var(--bg-hover); color: var(--accent); }
+.page-props-path-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
+.page-props-path svg { flex-shrink: 0; opacity: 0.6; }
+
+/* Read-only timestamp cell inside the database table (Created / Last edited time columns). */
+.db-readonly-cell {
+  display: inline-flex; align-items: center; height: 100%;
+  padding: 0 8px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+
 .content { flex: 1; overflow-y: auto; }
 .empty {
   padding: 64px var(--sp-8); color: var(--text-dim); text-align: center;
@@ -865,6 +962,70 @@ code, .dsl-preview, .dsl-input {
 }
 .editor-content :focus { outline: none; }
 .ProseMirror { min-height: 50vh; outline: none; }
+
+/* ---- Database-row properties (shown above the doc when a page lives inside a database) ---- */
+/* Shares the editor column's width + horizontal rhythm so it reads as part of the document. */
+.editor-header-slot {
+  max-width: 820px;
+  width: 100%;
+  margin: 0 auto;
+  padding: var(--sp-6) 56px 0;
+}
+.db-props {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  padding: var(--sp-2) var(--sp-3);
+}
+.db-props-toggle {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  background: transparent; border: none; color: var(--text-dim);
+  font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase;
+  cursor: pointer; border-radius: var(--r-sm);
+}
+.db-props-toggle:hover { color: var(--text); background: var(--bg-hover); }
+.db-props-caret { font-size: 0.7rem; transition: transform var(--dur) var(--ease); display: inline-block; }
+.db-props-caret.collapsed { transform: rotate(-90deg); }
+
+.db-props-grid { display: flex; flex-direction: column; gap: 1px; margin-top: var(--sp-1); }
+/* Label gutter on the left (fixed, truncating) + flexible value column, matching Notion. */
+.db-props-row {
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 34px;
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-1);
+}
+.db-props-row:hover { background: var(--bg-hover); }
+.db-props-label {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  color: var(--text-dim); font-size: 0.88rem; font-weight: 500;
+  overflow: hidden;
+}
+.db-props-label-icon { display: inline-flex; color: var(--text-faint); flex: none; }
+.db-props-label-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-props-value { min-width: 0; }
+/* Let the shared cell editors fill the value column and sit flush (no table-cell chrome here). */
+.db-props-value > .db-text-input,
+.db-props-value > .db-select-cell,
+.db-props-value > .db-date-cell { width: 100%; }
+.db-props-value .db-text-input {
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2);
+}
+.db-props-value .db-text-input:hover { border-color: var(--border); }
+.db-props-value .db-text-input:focus { border-color: var(--accent); background: var(--bg); box-shadow: none; }
+.db-props-value .db-select-trigger,
+.db-props-value .db-date-trigger,
+.db-props-value .db-currency-display {
+  border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-2); min-height: 28px;
+}
+.db-props-value .db-select-trigger:hover,
+.db-props-value .db-date-trigger:hover,
+.db-props-value .db-currency-display:hover { background: var(--bg-hover); }
 .ProseMirror > * + * { margin-top: 0.75em; }
 
 /* Line numbers: number each top-level block in the editor when the setting is on.
@@ -2300,17 +2461,20 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 }
 .db-view-tab:hover { color: var(--text); }
 .db-view-tab.active { color: var(--text); border-bottom-color: var(--accent); }
-.db-view-tab-icon { display: inline-flex; color: var(--text-faint); }
+.db-view-tab-icon { display: inline-flex; align-items: center; color: var(--text-faint); }
+.db-view-tab-icon svg { display: block; }
 .db-view-tab.active .db-view-tab-icon { color: var(--accent); }
-.db-view-tab-actions { display: inline-flex; gap: 1px; margin-left: 2px; }
+.db-view-tab-actions { display: inline-flex; gap: 2px; margin-left: 4px; }
 .db-view-tab-actions button {
-  display: grid; place-items: center; width: 18px; height: 18px;
-  background: none; border: none; color: var(--text-faint); cursor: pointer; border-radius: 4px;
+  display: grid; place-items: center; width: 20px; height: 20px; padding: 0;
+  background: none; border: none; color: var(--text-faint); cursor: pointer; border-radius: var(--r-sm);
 }
+.db-view-tab-actions button svg { display: block; }
 .db-view-tab-actions button:hover { background: var(--bg-hover); color: var(--text); }
+.db-view-tab-actions button:last-child:hover { color: #f87171; }
 .db-add-view-wrap { position: relative; }
 .db-add-view {
-  display: grid; place-items: center; width: 26px; height: 26px;
+  display: grid; place-items: center; width: 26px; height: 26px; padding: 0;
   background: none; border: none; color: var(--text-faint); cursor: pointer; border-radius: var(--r-sm);
 }
 .db-add-view:hover { background: var(--bg-hover); color: var(--text); }

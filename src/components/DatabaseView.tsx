@@ -15,7 +15,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Plus, Table, Kanban, CalendarBlank, Cards, DotsSixVertical, X, Trash, PencilSimple,
+  Plus, Table, Kanban, CalendarBlank, Cards, DotsSixVertical, X, Trash, PencilSimple, Smiley,
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
 import type {
@@ -25,7 +25,7 @@ import { api } from "../api";
 import { dialogs } from "./Dialogs";
 import type { DbRow } from "../dblogic";
 import { applyFilters, applySorts } from "../dblogic";
-import { makeId, safeLeaf } from "./DbShared";
+import { makeId, safeLeaf, TYPE_META } from "./DbShared";
 import { NodeIconView } from "./Icon";
 import DbTableView from "./DbTableView";
 import DbBoardView from "./DbBoardView";
@@ -141,7 +141,8 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
   // ---- Column mutations --------------------------------------------------------------------
   const addColumn = useCallback((type: DbColumnType) => {
     if (!schema) return;
-    const label = type === "title" ? "Name" : (type[0].toUpperCase() + type.slice(1));
+    const label =
+      type === "title" ? "Name" : TYPE_META.find((t) => t.type === type)?.label ?? type;
     const col: DbColumn = {
       id: makeId("col"), name: label, type,
       ...(type === "select" || type === "multiselect" ? { options: [] } : {}),
@@ -278,10 +279,10 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
               <span className="db-view-tab-name">{v.name}</span>
               {active && (
                 <span className="db-view-tab-actions">
-                  <button title="View icon" onClick={(e) => { e.stopPropagation(); setIconTarget({ kind: "view", id: v.id, label: v.name, current: v.icon }); }}><DotsSixVertical size={12} /></button>
-                  <button title="Rename view" onClick={(e) => { e.stopPropagation(); void renameView(v); }}><PencilSimple size={12} /></button>
+                  <button title="Set view icon" onClick={(e) => { e.stopPropagation(); setIconTarget({ kind: "view", id: v.id, label: v.name, current: v.icon }); }}><Smiley size={13} /></button>
+                  <button title="Rename view" onClick={(e) => { e.stopPropagation(); void renameView(v); }}><PencilSimple size={13} /></button>
                   {schema.views!.length > 1 && (
-                    <button title="Delete view" onClick={(e) => { e.stopPropagation(); void deleteView(v); }}><X size={12} /></button>
+                    <button title="Delete view" onClick={(e) => { e.stopPropagation(); void deleteView(v); }}><X size={13} /></button>
                   )}
                 </span>
               )}

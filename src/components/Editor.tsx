@@ -75,6 +75,11 @@ interface Props {
   timeFormat?: string;
   /** Pattern for rendering task due-dates in inline TASK query blocks. */
   taskDateFormat?: string;
+  /**
+   * Optional content rendered at the top of the scrolling editor column, above the document body
+   * (used for the database-row properties panel). Scrolls with the doc and shares its width.
+   */
+  headerSlot?: React.ReactNode;
 }
 
 /** Slash-menu command groups, in display order. */
@@ -382,6 +387,7 @@ export default function Editor({
   dateFormat = "YYYY-MM-DD",
   timeFormat = "HH:mm",
   taskDateFormat = "YYYY-MM-DD",
+  headerSlot,
 }: Props) {
   // Keep the open-page handlers in refs so node views always call the latest one without forcing
   // the editor to be re-created.
@@ -795,6 +801,7 @@ export default function Editor({
   return (
     <div className="editor-wrap">
       <Toolbar editor={editor} />
+      {headerSlot && <div className="editor-header-slot">{headerSlot}</div>}
       <EditorContent editor={editor} className="editor-content" />
       {slash && filtered.length > 0 && (
         <div className="slash-menu" style={{ left: slash.left, top: slash.top }}>

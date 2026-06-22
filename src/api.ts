@@ -103,4 +103,39 @@ const tauriApi = {
 };
 
 // One object, two backends. Shapes are identical so callers don't branch.
-export const api = isTauri() ? tauriApi : webApi;
+const backend = isTauri() ? tauriApi : webApi;
+
+// ---- Page timestamps (created / last-edited) ----
+// Every page — a database row or a plain note — carries `created` and `updated` ISO-8601
+// datetimes in its frontmatter. We stamp them here at the shared API boundary rather than in
+// either host backend, so a single implementation covers desktop + web and *every* caller
+// (the editor's /page command, periodic notes, duplicate, DB rows, …). The fields are kept out
+// of the DB column schema unless a database opts in (Created time / Last edited time columns),
+// but the data is always present regardless of whether any column surfaces it.
+export const CREATED_KEY = "created";
+export const UPDATED_KEY = "updated";
+
+/** Stamp `created` (only if absent) and always-fresh `updated` onto a frontmatter map. */
+function stampTimestamps(
+  fm: Record<string, unknown>,
+  { created }: { created: boolean }
+): Record<string, unknown> {
+  const now = new Date().toISOString();
+  const out = { ...fm };
+  if (created && !out[CREATED_KEY]) out[CREATED_KEY] = now;
+  out[UPDATED_KEY] = now;
+  return out;
+}
+
+// One object, two backends, wrapped so every page write maintains its timestamps.
+export const api = {
+  ...backend,
+  writePage: (relPath: string, frontmatter: Record<string, unknown>, body: string) =>
+    backend.writePage(relPath, stampTimestamps(frontmatter, { created: true }), body),
+  createPage: async (relPath: string, body: string) => {
+    // Seed brand-new pages with both timestamps. `create_page` only takes a body, so we create
+    // it (clobber-safe) and then immediately write the stamped frontmatter back.
+    await backend.createPage(relPath, body);
+    await backend.writePage(relPath, stampTimestamps({}, { created: true }), body);
+  },
+};

@@ -2,7 +2,7 @@
 // per-column icons, per-view column visibility, and the in-header type/option/icon config menu.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check } from "@phosphor-icons/react";
+import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check, ArrowSquareOut } from "@phosphor-icons/react";
 import type { DbAggregation, DbColumn, DbColumnType, DbOption, DbView } from "../types";
 import { DB_OPTION_COLORS } from "../types";
 import type { DbRow } from "../dblogic";
@@ -98,8 +98,8 @@ export default function DbTableView({
                         onChange={(v) => onSetCell(row.rel_path, col.id, v)}
                         onRenameTitle={(v) => onRenameRow(row, v)} />
                       <div className="db-row-actions">
-                        <button title="Open page" onClick={() => onOpenRow(row.rel_path)}><PencilSimple size={13} /></button>
-                        <button title="Delete row" className="danger" onClick={() => onDeleteRow(row)}><Trash size={13} /></button>
+                        <button title="Open page" onClick={() => onOpenRow(row.rel_path)}><ArrowSquareOut size={14} /></button>
+                        <button title="Delete row" className="danger" onClick={() => onDeleteRow(row)}><Trash size={14} /></button>
                       </div>
                     </div>
                   ) : (
