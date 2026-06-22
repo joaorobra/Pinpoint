@@ -931,6 +931,10 @@ code, .dsl-preview, .dsl-input {
 }
 
 .content { flex: 1; overflow-y: auto; }
+/* The crossfade wrapper (Framer Motion) sits between .content and each view. It must fill the
+   height so views that rely on a full-height parent (editor, empty state) lay out unchanged. */
+.content-view { min-height: 100%; display: flex; flex-direction: column; }
+.content-view > * { flex: 1; min-height: 0; }
 .empty {
   padding: 64px var(--sp-8); color: var(--text-dim); text-align: center;
   max-width: 420px; margin: 0 auto;
@@ -1095,6 +1099,31 @@ code, .dsl-preview, .dsl-input {
   height: calc(var(--font-size) * var(--line-height));
 }
 .ProseMirror ul[data-type="taskList"] p { margin: 0; line-height: var(--line-height); }
+
+/* Strike through + dim the text of completed to-do items. Gated on a root class so it can be
+   turned off in Settings → Editor → "Strike completed to-dos". Targets the item's own paragraph
+   only (`> div > p`), never its nested sub-list, so sub-items keep their own state. */
+.strike-done-tasks .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div > p {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+  color: var(--text-faint);
+}
+
+/* Semi-done parent: some — but not all — of its sub-to-dos are checked. Draw an indeterminate
+   "dash" badge over the (unchecked) checkbox so the partial state reads at a glance. */
+.ProseMirror ul[data-type="taskList"] li[data-subtasks="partial"] > label {
+  position: relative;
+}
+.ProseMirror ul[data-type="taskList"] li[data-subtasks="partial"] > label::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 8px; height: 2px;
+  transform: translate(-50%, -50%);
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
 .ProseMirror a { color: var(--accent); text-decoration-color: var(--accent-ring); text-underline-offset: 2px; }
 .ProseMirror a:hover { color: var(--accent-hover); }
 
@@ -1840,20 +1869,19 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ---------- Command palette (Ctrl/Cmd+K) ---------- */
+/* Enter/exit motion is owned by Framer Motion (see CommandPalette.tsx); no CSS keyframes here. */
 .palette-backdrop {
   position: fixed; inset: 0; z-index: 110;
   background: hsl(var(--shadow-color) / 0.45);
   backdrop-filter: blur(3px);
   display: flex; justify-content: center; align-items: flex-start;
   padding: 12vh var(--sp-4) var(--sp-4);
-  animation: fade 120ms var(--ease) both;
 }
 .palette {
   width: 100%; max-width: 560px;
   background: var(--bg-2); border: 1px solid var(--border-strong);
   border-radius: var(--r-lg); overflow: hidden;
   box-shadow: var(--shadow-lg);
-  animation: pop 160ms var(--ease) both;
   display: flex; flex-direction: column; max-height: 64vh;
 }
 .palette-search {

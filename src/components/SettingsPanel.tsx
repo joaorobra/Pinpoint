@@ -327,6 +327,19 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
                     <span className="switch-track" />
                   </label>
                 </Row>
+                <Row
+                  label="Strike completed to-dos"
+                  hint="Cross out and dim the text of checked to-do items."
+                >
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.strike_done_tasks}
+                      onChange={(e) => set("strike_done_tasks", e.target.checked)}
+                    />
+                    <span className="switch-track" />
+                  </label>
+                </Row>
               </Group>
             )}
 

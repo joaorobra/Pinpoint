@@ -273,6 +273,8 @@ export interface Settings {
   line_height: number;
   periodic_folder: string;
   show_line_numbers: boolean;
+  /** Strike through the text of completed (checked) to-do items in the editor. */
+  strike_done_tasks: boolean;
   /** Pattern (see dateformat.ts tokens) for inserting plain dates in the editor. */
   date_format: string;
   /** Pattern for inserting the current time / "now" timestamps. */
@@ -303,6 +305,7 @@ export const DEFAULT_SETTINGS: Settings = {
   line_height: 1.6,
   periodic_folder: "Periodic",
   show_line_numbers: false,
+  strike_done_tasks: true,
   date_format: "YYYY-MM-DD",
   time_format: "HH:mm",
   task_date_format: "ddd, D MMM",

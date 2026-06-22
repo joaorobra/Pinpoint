@@ -24,6 +24,7 @@ import {
   SidebarSimple,
 } from "@phosphor-icons/react";
 import { api, pickVaultFolder, resolveRecentVault, listRecentVaults } from "./api";
+import { slideFade, transition } from "./motion";
 import StartScreen from "./components/StartScreen";
 import type { NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
@@ -187,6 +188,8 @@ export default function App() {
     if (settings.text_color) root.style.setProperty("--text-override", settings.text_color);
     else root.style.removeProperty("--text-override");
     root.classList.toggle("show-line-numbers", settings.show_line_numbers);
+    // Strike through completed to-do items (and dim them) when enabled.
+    root.classList.toggle("strike-done-tasks", settings.strike_done_tasks);
     // Collapses the custom titlebar to a top-edge hover strip ("semi-fullscreen").
     root.classList.toggle("titlebar-auto-hide", settings.auto_hide_titlebar);
   }, [settings]);
@@ -1306,10 +1309,7 @@ export default function App() {
       {leftOpen && (
       <motion.aside
         className="sidebar"
-        initial={{ x: -24, opacity: 0 }}
-        animate={{ x: 0, opacity: 1 }}
-        exit={{ x: -24, opacity: 0 }}
-        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+        {...slideFade({ axis: "x", distance: -24, speed: "slow" })}
       >
         <div className="sidebar-header">
           <button
@@ -1484,6 +1484,22 @@ export default function App() {
         </div>
 
         <div className="content">
+          <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            // Key on the *view identity*, not the document body: the tab plus which doc/db/asset is
+            // open. This crossfades when you switch tabs or open a different page, but keeps the
+            // Editor mounted (key unchanged) while you type, so focus/cursor survive keystrokes.
+            key={
+              tab === "editor"
+                ? `editor:${activeDb?.rel_path ?? activeAsset?.rel_path ?? activePath ?? "empty"}`
+                : tab
+            }
+            className="content-view"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={transition("fast")}
+          >
           {tab === "editor" &&
             (activeDb ? (
               <DatabaseView
@@ -1543,6 +1559,8 @@ export default function App() {
               }}
             />
           )}
+          </motion.div>
+          </AnimatePresence>
         </div>
       </main>
 
@@ -1554,10 +1572,7 @@ export default function App() {
       {rightOpen && (
       <motion.div
         key="right-sidebar"
-        initial={{ x: 24, opacity: 0 }}
-        animate={{ x: 0, opacity: 1 }}
-        exit={{ x: 24, opacity: 0 }}
-        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+        {...slideFade({ axis: "x", distance: 24, speed: "slow" })}
         style={{ gridColumn: 5, display: "flex", minHeight: 0 }}
       >
         <RightSidebar
@@ -1619,14 +1634,16 @@ export default function App() {
         </Suspense>
       )}
 
-      {paletteOpen && (
-        <CommandPalette
-          pages={pages}
-          actions={paletteActions}
-          onOpenPage={openPage}
-          onClose={() => setPaletteOpen(false)}
-        />
-      )}
+      <AnimatePresence>
+        {paletteOpen && (
+          <CommandPalette
+            pages={pages}
+            actions={paletteActions}
+            onOpenPage={openPage}
+            onClose={() => setPaletteOpen(false)}
+          />
+        )}
+      </AnimatePresence>
 
       <DialogHost />
     </div>

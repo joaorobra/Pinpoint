@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import {
   MagnifyingGlass,
   FileText,
@@ -10,6 +11,7 @@ import {
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
 import { fuzzyScore } from "../fuzzy";
+import { transition, slideFade } from "../motion";
 
 /** A page the palette can jump to. */
 export interface PalettemPage {
@@ -121,8 +123,19 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
   };
 
   return (
-    <div className="palette-backdrop" onClick={onClose}>
-      <div className="palette" onClick={(e) => e.stopPropagation()}>
+    <motion.div
+      className="palette-backdrop"
+      onClick={onClose}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={transition("fast")}
+    >
+      <motion.div
+        className="palette"
+        onClick={(e) => e.stopPropagation()}
+        {...slideFade({ axis: "y", distance: -8, scale: 0.98, speed: "fast" })}
+      >
         <div className="palette-search">
           <MagnifyingGlass size={18} className="palette-search-icon" />
           <input
@@ -158,8 +171,8 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
             })
           )}
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }
 

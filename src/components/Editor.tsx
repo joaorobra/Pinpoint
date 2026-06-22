@@ -6,7 +6,8 @@ import TaskItem from "@tiptap/extension-task-item";
 import { WikiLink } from "./WikiLink";
 import { dialogs } from "./Dialogs";
 import { Extension } from "@tiptap/core";
-import { TextSelection } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -254,6 +255,55 @@ const MoveBlock = Extension.create({
       "Alt-ArrowDown": ({ editor }) =>
         moveBlock(editor.state, editor.view.dispatch, 1),
     };
+  },
+});
+
+/**
+ * Marks parent to-do items with a "subtask roll-up" state so they can be styled distinctly from a
+ * plain checked/unchecked item:
+ *   - `partial` — has descendant to-dos with a mix of done and not-done (semi-done).
+ *   - `done`    — has descendant to-dos and all of them are done.
+ * TipTap's TaskItem only tracks its own checkbox, so we compute the roll-up here via a node
+ * decoration that adds `data-subtasks` to the rendered `<li>`. Decorations recompute on every doc
+ * change, so the state always reflects the current children.
+ */
+const subtaskRollupKey = new PluginKey("subtaskRollup");
+const SubtaskRollup = Extension.create({
+  name: "subtaskRollup",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: subtaskRollupKey,
+        props: {
+          decorations(state) {
+            const decos: Decoration[] = [];
+            state.doc.descendants((node, pos) => {
+              if (node.type.name !== "taskItem") return;
+              // Tally only the immediately-nested to-do items (the direct sub-list). A deeper
+              // grandchild list rolls up into its own parent, which in turn rolls up here.
+              let done = 0;
+              let total = 0;
+              node.descendants((child) => {
+                if (child.type.name === "taskItem") {
+                  total++;
+                  if (child.attrs.checked) done++;
+                  return false; // don't descend past a child item; it handles its own subtree
+                }
+                return true;
+              });
+              if (total === 0) return;
+              const rollup = done === 0 ? null : done === total ? "done" : "partial";
+              if (rollup) {
+                decos.push(
+                  Decoration.node(pos, pos + node.nodeSize, { "data-subtasks": rollup }),
+                );
+              }
+            });
+            return DecorationSet.create(state.doc, decos);
+          },
+        },
+      }),
+    ];
   },
 });
 
@@ -517,6 +567,7 @@ export default function Editor({
         Link.configure({ openOnClick: false, autolink: true }),
         TaskList,
         TaskItem.configure({ nested: true }),
+        SubtaskRollup,
         WikiLink.configure({ onOpen: (name) => onOpenPageRef.current?.(name) }),
         QueryBlock.configure({
           onEdit: (getPos, dsl) => editQueryRef.current(getPos, dsl),

@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { Info, Path, ClockClockwise, ClockCounterClockwise, Copy } from "@phosphor-icons/react";
 import { motion, AnimatePresence } from "framer-motion";
+import { slideFade } from "../motion";
 import { CREATED_KEY, UPDATED_KEY } from "../api";
 import { formatDateTime } from "./DbShared";
 import { useDismiss } from "./DbShared";
@@ -42,10 +43,7 @@ export default function PageProperties({ path, frontmatter, dateFormat }: Props)
         {open && (
           <motion.div
             className="page-props-popover"
-            initial={{ opacity: 0, y: -6, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -6, scale: 0.98 }}
-            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+            {...slideFade({ axis: "y", distance: -6, scale: 0.98, speed: "fast" })}
           >
             <div className="page-props-title">Page info</div>
 
