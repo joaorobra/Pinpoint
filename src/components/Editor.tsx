@@ -49,9 +49,10 @@ import {
   CheckCircle,
   Flag,
   CaretRight,
+  ArrowBendUpRight,
   type Icon,
 } from "@phosphor-icons/react";
-import ContextMenu, { type MenuItem } from "./ContextMenu";
+import ContextMenu, { type MenuItem, type MenuEntry, type MenuFormatButton } from "./ContextMenu";
 import DatePicker from "./DatePicker";
 import QueryHelper from "./QueryHelper";
 import { QueryBlock } from "./QueryBlock";
@@ -788,6 +789,24 @@ const COMMANDS: SlashCommand[] = [
  * directly after a non-space character. Without it the marker fuses to the preceding word
  * (`Task📅 …`), which muddies the task text and the indexer's field parsing.
  */
+/** Local-midnight ISO date (YYYY-MM-DD) `days` from today — for the due-date / send-to presets. */
+function isoFromOffset(days: number): string {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + days);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Day-offset from today to the coming Saturday (0 if today is already Saturday). */
+function isoOffsetToWeekend(): number {
+  const d = new Date();
+  // 6 = Saturday; wrap so a result is always in [0, 6].
+  return (6 - d.getDay() + 7) % 7;
+}
+
 function insertMarker(editor: any, marker: string): void {
   const { state } = editor;
   const { from } = state.selection;
@@ -797,35 +816,90 @@ function insertMarker(editor: any, marker: string): void {
 }
 
 /**
- * Set (or clear, with `level: null`) the `priority:: <level>` field on the task the caret is in.
- * Removes any existing `priority:: …` token from the task's text first so toggling between levels
- * doesn't stack markers, then appends the new one. Operates on the enclosing `taskItem`'s first text
- * block; a no-op if the caret isn't inside a task.
+ * Locate the enclosing `taskItem` of the current selection's anchor. Returns the position bounds of
+ * its first text block (the paragraph holding the task text) plus that text, or null when the caret
+ * isn't inside a task. Lets the marker setters edit a task line by position — independent of the
+ * selection — so they append/replace markers without ever overwriting selected text.
  */
-function setPriorityInEditor(editor: any, level: string | null): void {
-  const { state } = editor;
-  const { $from } = state.selection;
+function taskParaRange(editor: any): { start: number; end: number; text: string } | null {
+  const { $from } = editor.state.selection;
   let taskDepth = -1;
   for (let d = $from.depth; d > 0; d--) {
     if ($from.node(d).type.name === "taskItem") { taskDepth = d; break; }
   }
-  if (taskDepth < 0) return;
+  if (taskDepth < 0) return null;
   const itemPos = $from.before(taskDepth);
   const para = $from.node(taskDepth).firstChild;
-  // Range of the task's first text block (the paragraph holding the task text).
-  const paraStart = itemPos + 1 + 1; // +1 into taskItem, +1 into the paragraph
-  const paraText = para?.textContent ?? "";
+  const start = itemPos + 1 + 1; // +1 into taskItem, +1 into the paragraph
+  const size = para?.content.size ?? 0;
+  return { start, end: start + size, text: para?.textContent ?? "" };
+}
 
-  let chain = editor.chain().focus();
-  // Strip an existing `priority:: <word>` (with any leading space) from the paragraph text.
-  const re = /\s*\bpriority::\s*\S+/i;
-  const m = re.exec(paraText);
-  if (m) {
-    const from = paraStart + m.index;
-    chain = chain.deleteRange({ from, to: from + m[0].length });
+/**
+ * The task-line property markers, in the canonical trailing order we always normalize to:
+ * priority, then due date (📅), then recurrence (🔁). Each entry knows how to match itself in the
+ * paragraph text. Editing any one re-emits all present markers in this order at the line's end.
+ */
+type MarkerKind = "priority" | "due" | "repeat";
+const MARKERS: { kind: MarkerKind; re: RegExp; render: (v: string) => string }[] = [
+  { kind: "priority", re: /\bpriority::\s*(\S+)/i, render: (v) => `priority:: ${v}` },
+  { kind: "due",      re: /📅\s*([^\s📅🔁]+)/u,    render: (v) => `📅 ${v}` },
+  { kind: "repeat",   re: /🔁\s*([^📅🔁]*?)(?=\s*(?:📅|🔁|$))/u, render: (v) => `🔁 ${v}` },
+];
+
+/**
+ * Apply one property change to the task under the caret, then rewrite ALL of its priority / due /
+ * recurrence markers at the END of the line in the canonical order (priority → due → recurrence).
+ * `value` is the new value for `kind`; `null` removes that marker. Works by position so a non-empty
+ * selection is never overwritten, and de-duplicates/reorders any pre-existing markers. No-op off-task.
+ */
+function setTaskMarker(editor: any, kind: MarkerKind, value: string | null): void {
+  const range = taskParaRange(editor);
+  if (!range) return;
+  const { start, end, text } = range;
+
+  // Read each marker's current value, and the earliest offset any marker begins at, so we only
+  // rewrite the trailing marker region and leave the task body (and its inline formatting) intact.
+  const values: Record<MarkerKind, string | null> = { priority: null, due: null, repeat: null };
+  let markersAt = text.length;
+  for (const m of MARKERS) {
+    const hit = m.re.exec(text);
+    if (hit) {
+      values[m.kind] = hit[1].trim();
+      markersAt = Math.min(markersAt, hit.index);
+    }
   }
-  chain.run();
-  if (level) insertMarker(editor, `priority:: ${level}`);
+  values[kind] = value && value.trim() ? value.trim() : null;
+
+  // Re-emit present markers in canonical order: priority → due → recurrence.
+  const tail = MARKERS
+    .filter((m) => values[m.kind])
+    .map((m) => m.render(values[m.kind] as string))
+    .join(" ");
+
+  // Keep everything before the first existing marker (right-trimmed) — its formatted nodes survive —
+  // and replace only [bodyEnd .. paraEnd] with the normalized marker tail.
+  const body = text.slice(0, markersAt).replace(/\s+$/, "");
+  const replaceFrom = start + body.length;
+  const insert = tail ? (body ? ` ${tail}` : tail) : "";
+
+  editor.chain()
+    .insertContentAt({ from: replaceFrom, to: end }, insert)
+    .run();
+}
+
+/** Set (or clear, with `level: null`) the `priority:: <level>` field on the task under the caret. */
+function setPriorityInEditor(editor: any, level: string | null): void {
+  setTaskMarker(editor, "priority", level);
+}
+
+/**
+ * Set (or refresh) an emoji-prefixed marker — due date (`📅`) or recurrence (`🔁`) — on the task under
+ * the caret. `emoji` selects the kind; an empty `value` clears it. Markers are always re-normalized to
+ * the canonical trailing order (priority → due → recurrence). A no-op outside a task.
+ */
+function setMarkerInEditor(editor: any, emoji: string, value: string): void {
+  setTaskMarker(editor, emoji === "📅" ? "due" : "repeat", value);
 }
 
 /**
@@ -1003,6 +1077,29 @@ function selectionHasTasks(state: any): boolean {
 }
 
 /**
+ * Is the caret/selection in or on at least ONE task? True when either endpoint sits inside a
+ * `taskItem`, or the selection spans one or more task items. Unlike `selectionHasTasks` (which needs
+ * ≥2 siblings for "Sort by done"), this powers the per-task actions — Priority / Due date / Send to —
+ * that are meaningful on a single task under the caret.
+ */
+function selectionTouchesTask(state: any): boolean {
+  const { $from, $to } = state.selection;
+  for (const $pos of [$from, $to]) {
+    for (let d = $pos.depth; d > 0; d--) {
+      if ($pos.node(d).type.name === "taskItem") return true;
+    }
+  }
+  // A wider selection that contains task items even if its endpoints aren't inside one.
+  let found = false;
+  state.doc.nodesBetween($from.pos, $to.pos, (node: any) => {
+    if (found) return false;
+    if (node.type.name === "taskItem") { found = true; return false; }
+    return true;
+  });
+  return found;
+}
+
+/**
  * Reorder ONLY the sibling items/blocks the selection actually spans, in one transaction (single
  * undo). Two rules make this match what the user highlighted:
  *  - Scope = exactly the selected siblings. We sort the items from the one the selection starts in
@@ -1142,7 +1239,7 @@ export default function Editor({
   const [priorityOpen, setPriorityOpen] = useState(false);
   // Right-click context menu (text formatting + sort lines). Open when non-null; positioned at the
   // pointer in viewport coords (ContextMenu clamps to the viewport itself).
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuEntry[]; formatRow?: MenuFormatButton[] } | null>(null);
 
   // Caret position in editor-wrap-relative coords, for anchoring popups (mirrors detectSlash).
   const caretCoords = useCallback((ed: any): { left: number; top: number } => {
@@ -1791,55 +1888,117 @@ export default function Editor({
       // sortSelectedLines will reorder, so the affordance never promises more than it delivers.
       const canSort = !!selectedSiblings(ed.state);
 
-      const toggle = (label: string, icon: React.ReactNode, fn: () => void, isActive: boolean, shortcut?: string): MenuItem => ({
-        label, icon, shortcut, active: isActive, onClick: fn,
-      });
+      // Two task signals: `onTask` (caret in / selection on ≥1 task) gates the per-task actions;
+      // `multiTasks` (≥2 task siblings) gates the done-sorts, which need more than one row to reorder.
+      const onTask = selectionTouchesTask(ed.state);
+      const multiTasks = selectionHasTasks(ed.state);
 
-      const items: MenuItem[] = [
-        toggle("Bold", <TextB size={16} />, () => ed.chain().focus().toggleBold().run(), ed.isActive("bold"), "Ctrl+B"),
-        toggle("Italic", <TextItalic size={16} />, () => ed.chain().focus().toggleItalic().run(), ed.isActive("italic"), "Ctrl+I"),
-        toggle("Strikethrough", <TextStrikethrough size={16} />, () => ed.chain().focus().toggleStrike().run(), ed.isActive("strike"), "Ctrl+Shift+S"),
-        toggle("Inline code", <Code size={16} />, () => ed.chain().focus().toggleCode().run(), ed.isActive("code"), "Ctrl+E"),
-        toggle("Link", <LinkSimpleHorizontal size={16} />, async () => {
-          const prev = ed.getAttributes("link").href ?? "";
-          const href = await dialogs.prompt({ title: "Link", placeholder: "https://…", defaultValue: prev });
-          if (href === null) return;
-          if (href === "") ed.chain().focus().unsetLink().run();
-          else ed.chain().focus().setLink({ href }).run();
-        }, ed.isActive("link")),
+      // Top formatting cluster: compact B / I / S / code / link buttons (each shows its on-state).
+      const formatRow: MenuFormatButton[] = [
+        { label: "Bold", icon: <TextB size={16} weight="bold" />, active: ed.isActive("bold"), shortcut: "Ctrl+B",
+          onClick: () => ed.chain().focus().toggleBold().run() },
+        { label: "Italic", icon: <TextItalic size={16} />, active: ed.isActive("italic"), shortcut: "Ctrl+I",
+          onClick: () => ed.chain().focus().toggleItalic().run() },
+        { label: "Strikethrough", icon: <TextStrikethrough size={16} />, active: ed.isActive("strike"), shortcut: "Ctrl+Shift+S",
+          onClick: () => ed.chain().focus().toggleStrike().run() },
+        { label: "Inline code", icon: <Code size={16} />, active: ed.isActive("code"), shortcut: "Ctrl+E",
+          onClick: () => ed.chain().focus().toggleCode().run() },
+        { label: "Link", icon: <LinkSimpleHorizontal size={16} />, active: ed.isActive("link"),
+          onClick: async () => {
+            const prev = ed.getAttributes("link").href ?? "";
+            const href = await dialogs.prompt({ title: "Link", placeholder: "https://…", defaultValue: prev });
+            if (href === null) return;
+            if (href === "") ed.chain().focus().unsetLink().run();
+            else ed.chain().focus().setLink({ href }).run();
+          } },
       ];
 
-      // Sort actions — disabled (shown but dimmed) when there's nothing multi-line to sort, so the
-      // menu's shape stays stable and the affordance is discoverable.
-      const sort = (label: string, icon: React.ReactNode, mode: SortMode): MenuItem => ({
-        label, icon, separator: label === "Sort A → Z", disabled: !canSort,
-        onClick: () => sortSelectedLines(ed, mode),
-      });
-      items.push(
-        sort("Sort A → Z", <SortAscending size={16} />, "asc"),
-        sort("Sort Z → A", <SortDescending size={16} />, "desc"),
-        sort("Sort by date", <CalendarCheck size={16} />, "date"),
-        sort("Sort by length", <Minus size={16} />, "length"),
-      );
+      // Sort — only shown when the selection spans ≥2 sibling lines (sorting one line is a no-op), so
+      // the entry never appears disabled. The two done-sorts only make sense over multiple tasks.
+      const items: MenuEntry[] = [];
+      if (canSort) {
+        const sortItem = (label: string, icon: React.ReactNode, mode: SortMode): MenuItem => ({
+          label, icon, onClick: () => sortSelectedLines(ed, mode),
+        });
+        const sortSubmenu: MenuEntry[] = [
+          sortItem("A → Z", <SortAscending size={16} />, "asc"),
+          sortItem("Z → A", <SortDescending size={16} />, "desc"),
+          sortItem("By date", <CalendarCheck size={16} />, "date"),
+          sortItem("By length", <Minus size={16} />, "length"),
+        ];
+        if (multiTasks) {
+          sortSubmenu.push(
+            { label: "Done — to-do first", icon: <Circle size={16} />, separator: true,
+              onClick: () => sortSelectedLines(ed, "done") },
+            { label: "Done — done first", icon: <CheckCircle size={16} />,
+              onClick: () => sortSelectedLines(ed, "done-desc") },
+          );
+        }
+        items.push({ label: "Sort", icon: <SortAscending size={16} />, submenu: sortSubmenu });
+      }
 
-      // Done-sort: only over a selection of task items. Unchecked-first, then a checked-first
-      // variant — handy for pushing finished to-dos to the bottom (or surfacing them on top).
-      if (selectionHasTasks(ed.state)) {
+      // Tasks section — whenever the caret is in (or the selection touches) a task. Priority, Due
+      // date, Recurrence, and Send to mutate the task line in place via the same markers the slash
+      // commands write, so behavior matches `/due`, `/repeat`, and the + menu's priority picker.
+      if (onTask) {
+        const prio = (level: string | null, label: string): MenuItem => ({
+          label, icon: <Flag size={15} weight={level ? "fill" : "regular"} />,
+          className: level ? `prio-${level}` : undefined,
+          onClick: () => setPriorityInEditor(ed, level),
+        });
+        const due = (label: string, offsetDays: number): MenuItem => ({
+          label, icon: <CalendarBlank size={15} />,
+          onClick: () => setMarkerInEditor(ed, "📅", isoFromOffset(offsetDays)),
+        });
+
         items.push(
+          { section: "Tasks" },
           {
-            label: "Sort by done — to-do first", icon: <Circle size={16} />, separator: true,
-            onClick: () => sortSelectedLines(ed, "done"),
+            label: "Priority", icon: <Flag size={16} />,
+            submenu: [prio("high", "High"), prio("medium", "Medium"), prio("low", "Low"), prio(null, "None")],
           },
           {
-            label: "Sort by done — done first", icon: <CheckCircle size={16} />,
-            onClick: () => sortSelectedLines(ed, "done-desc"),
+            label: "Due date", icon: <CalendarPlus size={16} />,
+            submenu: [
+              due("Today", 0),
+              due("Tomorrow", 1),
+              due("In 2 days", 2),
+              due("Next week", 7),
+              { label: "Pick a date…", icon: <CalendarBlank size={15} />, separator: true,
+                onClick: async () => { const iso = await requestDate(); if (iso) setMarkerInEditor(ed, "📅", iso); } },
+              { label: "Clear due date", icon: <Minus size={15} />,
+                onClick: () => setMarkerInEditor(ed, "📅", "") },
+            ],
+          },
+          {
+            label: "Recurrence", icon: <Repeat size={16} />,
+            onClick: async () => {
+              const rule = await dialogs.prompt({
+                title: "Recurrence",
+                message: "e.g. “every week”, “every 2 days”, or an RRULE like FREQ=WEEKLY",
+                placeholder: "every week",
+              });
+              if (rule !== null) setMarkerInEditor(ed, "🔁", rule);
+            },
+          },
+          {
+            label: "Send to", icon: <ArrowBendUpRight size={16} />,
+            submenu: [
+              due("Today", 0),
+              due("Tomorrow", 1),
+              due("This weekend", isoOffsetToWeekend()),
+              due("Next week", 7),
+              due("In 2 weeks", 14),
+              { label: "Pick a date…", icon: <CalendarBlank size={15} />, separator: true,
+                onClick: async () => { const iso = await requestDate(); if (iso) setMarkerInEditor(ed, "📅", iso); } },
+            ],
           },
         );
       }
 
-      setCtxMenu({ x: e.clientX, y: e.clientY, items });
+      setCtxMenu({ x: e.clientX, y: e.clientY, items, formatRow });
     },
-    []
+    [requestDate]
   );
 
   if (!editor) return null;
@@ -2026,6 +2185,7 @@ export default function Editor({
           x={ctxMenu.x}
           y={ctxMenu.y}
           items={ctxMenu.items}
+          formatRow={ctxMenu.formatRow}
           onClose={() => setCtxMenu(null)}
         />
       )}

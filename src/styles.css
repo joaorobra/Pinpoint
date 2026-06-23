@@ -1853,6 +1853,19 @@ code, .dsl-preview, .dsl-input {
 .ctx-check { flex-shrink: 0; color: var(--accent); }
 .ctx-sep { height: 1px; background: var(--border); margin: var(--sp-1) 4px; }
 
+/* ---- Formatting button row (B / I / S / code / link), pinned to the top of the menu ---- */
+.ctx-format-row { display: flex; gap: 2px; padding: 2px; }
+.ctx-format-btn {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center;
+  height: 30px; min-width: 34px;
+  border-radius: var(--r-sm); border-color: transparent;
+  background: transparent; color: var(--text-dim);
+}
+.ctx-format-btn:hover { background: var(--accent-soft); color: var(--accent); }
+/* "On" = the mark is active in the selection (e.g. bold while bold) — accent-tinted, like .ctx-item.on. */
+.ctx-format-btn.on { background: var(--accent-soft); color: var(--accent); }
+.ctx-format-btn:active { transform: scale(0.94); }
+
 /* ---- Task action menu (right-click a task: priority + send-to) ---- */
 .task-action-menu { min-width: 200px; }
 /* Small uppercase section label inside the menu. */
@@ -1865,9 +1878,28 @@ code, .dsl-preview, .dsl-input {
 /* Trailing caret on a row that opens a nested panel. */
 .ctx-submenu-caret { flex-shrink: 0; opacity: 0.5; }
 .ctx-item:hover .ctx-submenu-caret, .ctx-item.hl .ctx-submenu-caret { opacity: 0.9; }
-/* "Back" row at the top of a nested panel. */
-.ctx-item.ctx-back { color: var(--text-dim); font-weight: 500; }
-.ctx-back-caret { transform: rotate(180deg); flex-shrink: 0; opacity: 0.7; }
+/* A submenu parent row stays accent-tinted while its flyout is open. */
+.ctx-item.sub-open { background: var(--accent-soft); color: var(--accent); }
+.ctx-item.sub-open .ctx-submenu-caret { opacity: 0.9; }
+
+/* ---- Nested submenu flyouts (open on hover, parent stays open) ---- */
+.ctx-list { display: flex; flex-direction: column; }
+/* Each row anchors its own flyout. */
+.ctx-row { position: relative; }
+.ctx-flyout {
+  position: absolute; z-index: 92;
+  /* Sit to the row's right, slightly overlapping so the diagonal hover gap is bridged. The top
+     aligns with the row; a small negative offset accounts for the menu's padding. */
+  left: 100%; top: -5px; margin-left: 3px;
+  min-width: 184px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-1);
+  box-shadow: var(--shadow-lg);
+  animation: fade 90ms var(--ease) both;
+}
+/* Flip to the left side when the flyout would overflow the right edge (set by measurement). */
+.ctx-flyout.flip { left: auto; right: 100%; margin-left: 0; margin-right: 3px; }
+
 /* Priority rows tint their flag icon to the level color even when not hovered. */
 .ctx-item.prio-high .ctx-icon { color: var(--prio-high); opacity: 1; }
 .ctx-item.prio-medium .ctx-icon { color: var(--prio-medium); opacity: 1; }
