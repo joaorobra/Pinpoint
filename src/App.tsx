@@ -30,6 +30,8 @@ import { getTheme, seedStarterThemes } from "./themes-store";
 import { applyTheme, resolveMode } from "./theme-apply";
 import type { Theme } from "./types";
 import { slideFade, transition } from "./motion";
+import { useViewport } from "./hooks/useViewport";
+import Breadcrumb from "./components/Breadcrumb";
 import StartScreen from "./components/StartScreen";
 import type { NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS, extForMime } from "./types";
@@ -195,6 +197,25 @@ export default function App() {
     () => setRightOpen((v) => (localStorage.setItem("pp.rightOpen", v ? "0" : "1"), !v)),
     []
   );
+
+  // ---- Responsive layout ----
+  // Drives the desktop↔mobile switch: on a narrow viewport the grid collapses to a single column,
+  // the sidebars become overlay drawers, the table view falls back to cards, and a breadcrumb
+  // replaces the always-on sidebars as the orientation cue. `data-vp` on <body> lets styles.css
+  // target the breakpoint where a plain @media query is awkward.
+  const vp = useViewport();
+  useEffect(() => {
+    document.body.dataset.vp = vp.breakpoint;
+  }, [vp.breakpoint]);
+  // Tapping the scrim (or selecting an item) dismisses whichever drawer is open on mobile.
+  const closeDrawers = useCallback(() => {
+    setLeftOpen((v) => (v ? (localStorage.setItem("pp.leftOpen", "0"), false) : v));
+    setRightOpen((v) => (v ? (localStorage.setItem("pp.rightOpen", "0"), false) : v));
+  }, []);
+  // Auto-close the left drawer after navigating to a file on mobile, so the editor is revealed.
+  const closeLeftOnMobile = useCallback(() => {
+    if (vp.isMobile) setLeftOpen((v) => (v ? (localStorage.setItem("pp.leftOpen", "0"), false) : v));
+  }, [vp.isMobile]);
 
   // Begin dragging a sidebar divider. `side` picks which edge; the handler tracks the pointer
   // until release, clamps the new width, and persists it.
@@ -437,8 +458,9 @@ export default function App() {
       setDirty(false);
       addTab(relPath, "page");
       pushHistory(relPath);
+      closeLeftOnMobile();
     },
-    [addTab, pushHistory]
+    [addTab, pushHistory, closeLeftOnMobile]
   );
 
   // An inline TASK query block toggled a checkbox on disk. Refresh task-derived views, and if the
@@ -461,8 +483,9 @@ export default function App() {
       setTab("editor");
       addTab(node.rel_path, "asset");
       pushHistory(node.rel_path);
+      closeLeftOnMobile();
     },
-    [addTab, pushHistory]
+    [addTab, pushHistory, closeLeftOnMobile]
   );
 
   // Open a database folder in the table view (a third "doc" kind alongside pages and assets).
@@ -476,8 +499,9 @@ export default function App() {
       setDirty(false);
       addTab(node.rel_path, "db");
       pushHistory(node.rel_path);
+      closeLeftOnMobile();
     },
-    [addTab, pushHistory]
+    [addTab, pushHistory, closeLeftOnMobile]
   );
 
   // Find a node anywhere in the tree by rel_path (used to re-open an asset tab/history entry,
@@ -1680,17 +1704,37 @@ export default function App() {
     <Titlebar title={vaultName} autoHide={settings.auto_hide_titlebar} />
     <div
       className="app"
+      data-mobile={vp.isMobile ? "" : undefined}
       style={{
-        gridTemplateColumns: `${leftOpen ? `${leftWidth}px 6px` : "0px 0px"} 1fr ${
-          rightOpen ? `6px ${rightWidth}px` : "0px 0px"
-        }`,
+        // On mobile the grid collapses to a single column; the sidebars become fixed overlay
+        // drawers (positioned by CSS) instead of grid tracks, so they no longer reserve space.
+        gridTemplateColumns: vp.isMobile
+          ? "1fr"
+          : `${leftOpen ? `${leftWidth}px 6px` : "0px 0px"} 1fr ${
+              rightOpen ? `6px ${rightWidth}px` : "0px 0px"
+            }`,
       }}
     >
+      {/* Dim, tap-to-dismiss backdrop behind an open drawer on mobile. */}
+      <AnimatePresence>
+        {vp.isMobile && (leftOpen || rightOpen) && (
+          <motion.div
+            key="drawer-scrim"
+            className="drawer-scrim"
+            onClick={closeDrawers}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={transition("fast")}
+          />
+        )}
+      </AnimatePresence>
+
       <AnimatePresence initial={false}>
       {leftOpen && (
       <motion.aside
         className="sidebar"
-        {...slideFade({ axis: "x", distance: -24, speed: "slow" })}
+        {...slideFade({ axis: "x", distance: vp.isMobile ? -340 : -24, speed: "slow" })}
       >
         <div className="sidebar-header">
           <button
@@ -1756,14 +1800,24 @@ export default function App() {
       )}
       </AnimatePresence>
 
-      {leftOpen && (
+      {leftOpen && !vp.isMobile && (
         <div className="resizer" onPointerDown={startResize("left")} title="Drag to resize" />
       )}
 
-      {/* Pin main to the 3rd grid column. The sidebars/resizers are conditionally
+      {/* Pin main to the 3rd grid column on desktop. The sidebars/resizers are conditionally
           rendered, so without an explicit placement `main` would auto-flow into the
-          first (0px) column when the left panel is hidden, blanking the screen. */}
-      <main className="main" style={{ gridColumn: 3 }}>
+          first (0px) column when the left panel is hidden, blanking the screen. On mobile the
+          grid is a single column, so main lives in column 1 and the sidebars overlay it. */}
+      <main className="main" style={{ gridColumn: vp.isMobile ? 1 : 3 }}>
+        {vp.isMobile && (
+          <Breadcrumb
+            path={activePath ?? ""}
+            onToggleLeft={toggleLeft}
+            onToggleRight={toggleRight}
+            leftOpen={leftOpen}
+            rightOpen={rightOpen}
+          />
+        )}
         <div className="tabs">
           <div className="nav-arrows">
             {!leftOpen && (
@@ -2002,7 +2056,7 @@ export default function App() {
         </div>
       </main>
 
-      {rightOpen && (
+      {rightOpen && !vp.isMobile && (
         <div className="resizer" onPointerDown={startResize("right")} title="Drag to resize" />
       )}
 
@@ -2010,8 +2064,9 @@ export default function App() {
       {rightOpen && (
       <motion.div
         key="right-sidebar"
-        {...slideFade({ axis: "x", distance: 24, speed: "slow" })}
-        style={{ gridColumn: 5, display: "flex", minHeight: 0 }}
+        className="right-sidebar-wrap"
+        {...slideFade({ axis: "x", distance: vp.isMobile ? 340 : 24, speed: "slow" })}
+        style={{ gridColumn: vp.isMobile ? 1 : 5, display: "flex", minHeight: 0 }}
       >
         <RightSidebar
           body={body}

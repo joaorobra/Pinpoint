@@ -36,6 +36,7 @@ import DbCalendarView from "./DbCalendarView";
 import DbGalleryView from "./DbGalleryView";
 import DbToolbar from "./DbToolbar";
 import ViewTabMenu from "./ViewTabMenu";
+import { useViewport } from "../hooks/useViewport";
 
 // Lazy so the heavy icon registry only loads when the user actually picks a column/view icon.
 const IconPicker = lazy(() => import("./IconPicker"));
@@ -73,6 +74,7 @@ function ensureViews(schema: DbSchema): DbView[] {
 }
 
 export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD", nodeIcons, onSetNodeIcon, onClearNodeIcon, templates = [], onApplyTemplate }: Props) {
+  const { isMobile } = useViewport();
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [rows, setRows] = useState<DbRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -377,6 +379,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
       <div className="db-view-body">
         {activeView.type === "table" && (
           <DbTableView
+            isMobile={isMobile}
             columns={visibleColumns}
             rows={viewRows}
             view={activeView}

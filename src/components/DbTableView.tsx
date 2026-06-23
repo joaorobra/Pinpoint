@@ -33,6 +33,8 @@ interface Props {
   onMoveColumn: (id: string, delta: number) => void;
   onAddColumn: (type: DbColumnType) => void;
   onPickColumnIcon: (col: DbColumn) => void;
+  /** On a narrow viewport the spreadsheet grid is replaced by a stacked card-per-row layout. */
+  isMobile?: boolean;
 }
 
 const DEFAULT_W = 180;
@@ -41,7 +43,21 @@ export default function DbTableView({
   columns, rows, view, dateFormat, showPageIcon, rowIcon, onPickRowIcon, onUpdateView,
   onSetCell, onRenameRow, onOpenRow, onDeleteRow, onAddRow,
   onUpdateColumn, onChangeColumnType, onDeleteColumn, onMoveColumn, onAddColumn, onPickColumnIcon,
+  isMobile,
 }: Props) {
+  // Mobile: fixed-width columns can't fit a phone, so fall back to one card per row showing each
+  // property as a label:value pair. Column resize / config / footer aggregations are desktop-only
+  // power features and are intentionally dropped here. All cell rendering reuses <DbCell>.
+  if (isMobile) {
+    return (
+      <DbTableCards
+        columns={columns} rows={rows} dateFormat={dateFormat}
+        showPageIcon={showPageIcon} rowIcon={rowIcon} onPickRowIcon={onPickRowIcon}
+        onSetCell={onSetCell} onRenameRow={onRenameRow}
+        onOpenRow={onOpenRow} onDeleteRow={onDeleteRow} onAddRow={onAddRow}
+      />
+    );
+  }
   const [menu, setMenu] = useState<string | null>(null);
   // While a column is being dragged we disable the width transition so it tracks the cursor 1:1;
   // on release the transition re-enables and the committed width animates smoothly into place.
@@ -147,6 +163,69 @@ export default function DbTableView({
           </tr>
         </tfoot>
       </table>
+    </div>
+  );
+}
+
+/* ---- Mobile card fallback ------------------------------------------------------------------ */
+function DbTableCards({
+  columns, rows, dateFormat, showPageIcon, rowIcon, onPickRowIcon,
+  onSetCell, onRenameRow, onOpenRow, onDeleteRow, onAddRow,
+}: {
+  columns: DbColumn[];
+  rows: DbRow[];
+  dateFormat: string;
+  showPageIcon: boolean;
+  rowIcon: (relPath: string) => NodeIcon | undefined;
+  onPickRowIcon: (row: DbRow) => void;
+  onSetCell: (rowPath: string, colId: string, value: unknown) => void;
+  onRenameRow: (row: DbRow, title: string) => void;
+  onOpenRow: (relPath: string) => void;
+  onDeleteRow: (row: DbRow) => void;
+  onAddRow: () => void;
+}) {
+  const titleCol = columns.find((c) => c.type === "title");
+  const propCols = columns.filter((c) => c.type !== "title");
+  return (
+    <div className="db-cards">
+      {rows.map((row) => (
+        <article key={row.rel_path} className="db-card-row">
+          {titleCol && (
+            <div className="db-card-title db-cell-title">
+              {showPageIcon && (
+                <button
+                  type="button"
+                  className="db-title-icon-btn"
+                  title="Change page icon"
+                  onClick={(e) => { e.stopPropagation(); onPickRowIcon(row); }}
+                >
+                  <NodeIconView icon={rowIcon(row.rel_path)} fallback={FileText} size={16} className="db-title-icon" />
+                </button>
+              )}
+              <DbCell col={titleCol} row={row} dateFormat={dateFormat}
+                onChange={(v) => onSetCell(row.rel_path, titleCol.id, v)}
+                onRenameTitle={(v) => onRenameRow(row, v)} />
+              <div className="db-row-actions">
+                <button title="Open page" onClick={() => onOpenRow(row.rel_path)}><ArrowSquareOut size={16} /></button>
+                <button title="Delete row" className="danger" onClick={() => onDeleteRow(row)}><Trash size={16} /></button>
+              </div>
+            </div>
+          )}
+          {propCols.map((col) => (
+            <div key={col.id} className={`db-card-prop db-cell-${col.type}`}>
+              <span className="db-card-prop-label">{col.name}</span>
+              <div className="db-card-prop-value">
+                <DbCell col={col} row={row} dateFormat={dateFormat}
+                  onChange={(v) => onSetCell(row.rel_path, col.id, v)}
+                  onRenameTitle={(v) => onRenameRow(row, v)} />
+              </div>
+            </div>
+          ))}
+        </article>
+      ))}
+      <button className="db-card-addrow" onClick={onAddRow}>
+        <Plus size={15} weight="bold" /> New row
+      </button>
     </div>
   );
 }

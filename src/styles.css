@@ -49,6 +49,19 @@
   --sp-6: 24px;
   --sp-8: 32px;
 
+  /* ---- responsive / touch ---- */
+  /* Minimum comfortable tap target (WCAG 2.5.5). Applied to icon buttons on touch devices. */
+  --touch-target: 44px;
+  /* Overlay-drawer width on mobile: most of the screen, capped so the editor stays peeking. */
+  --drawer-w: min(86vw, 320px);
+  /* Dim backdrop behind an open drawer / bottom sheet. Derived from --bg so it tracks the theme. */
+  --scrim: color-mix(in srgb, var(--bg) 40%, transparent);
+  /* Safe-area insets (notches, home indicators). 0 on devices without them. */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+
   /* ---- radii ---- */
   --r-sm: 6px;
   --r-md: 9px;
@@ -2340,12 +2353,27 @@ textarea.sr-to { resize: vertical; min-height: 30px; line-height: 1.45; }
 .switch input:focus-visible + .switch-track { box-shadow: 0 0 0 2px var(--accent-ring); }
 
 @media (max-width: 680px) {
-  .modal.settings-modal { grid-template-columns: 1fr; height: 86vh; }
-  .settings-nav {
-    flex-direction: row; flex-wrap: wrap; border-right: none;
-    border-bottom: 1px solid var(--border);
+  .modal.settings-modal {
+    grid-template-columns: 1fr;
+    width: 100%; max-width: none; height: 100%; max-height: 100%;
+    border-radius: 0;
+    padding-bottom: var(--safe-b);
   }
+  .settings-nav {
+    flex-direction: row; flex-wrap: nowrap; border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto; scrollbar-width: none;
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .settings-nav::-webkit-scrollbar { height: 0; }
   .settings-nav-title { display: none; }
+  .settings-tab { flex: 0 0 auto; white-space: nowrap; min-height: var(--touch-target); }
+
+  /* Stack each row: label on top, full-width control beneath. */
+  .settings-row { flex-direction: column; align-items: stretch; gap: var(--sp-2); }
+  .settings-row-control { width: 100%; }
+  .settings-row-control > .select,
+  .settings-row-control > .setting-input { width: 100%; min-width: 0; }
 }
 
 /* ---------- Command palette (Ctrl/Cmd+K) ---------- */
@@ -2790,6 +2818,47 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 .db-row-actions button svg { display: block; }
 .db-row-actions button:hover { background: var(--bg-hover); color: var(--text); }
 .db-row-actions button.danger:hover { color: #f87171; }
+
+/* ---- Mobile card fallback for the table view ---- */
+.db-cards {
+  display: flex; flex-direction: column; gap: var(--sp-3);
+  padding: var(--sp-3) max(var(--sp-3), var(--safe-l)) calc(var(--sp-6) + var(--safe-b)) max(var(--sp-3), var(--safe-r));
+}
+.db-card-row {
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+/* Scoped to .db-card-row so it doesn't collide with the kanban card's own .db-card-title. */
+.db-card-row .db-card-title {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.db-card-row .db-card-title .db-title-text { font-weight: 600; padding: 4px 0; }
+/* Row actions are always shown in card mode (no hover on touch). */
+.db-card-row .db-card-title .db-row-actions { display: flex; margin-left: auto; }
+.db-card-prop {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+}
+.db-card-prop + .db-card-prop { border-top: 1px solid var(--border); }
+.db-card-prop-label {
+  font-size: 0.8em; color: var(--text-faint);
+  text-transform: uppercase; letter-spacing: 0.03em;
+}
+.db-card-prop-value { min-height: 1.6em; }
+.db-card-addrow {
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  min-height: var(--touch-target);
+  background: transparent; border: 1px dashed var(--border);
+  border-radius: var(--r-md); color: var(--text-dim);
+}
+.db-card-addrow:active { background: var(--bg-hover); color: var(--text); }
 
 /* Checkbox cell */
 .db-check { display: grid; place-items: center; height: 100%; cursor: pointer; }
@@ -3279,14 +3348,21 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   position: relative; background: var(--surface); border: 1px solid var(--border);
   border-left: 3px solid var(--border); border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3); cursor: pointer;
+  /* Allow vertical lane scrolling to start from the card; a long-press promotes to a drag, at
+     which point pointermove calls preventDefault() to take over. */
+  touch-action: pan-y;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 .db-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-sm); transform: translateY(-1px); }
 .db-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
-.db-card.dragging { opacity: 0.4; box-shadow: none; transform: none; }
+/* Lifted card: raised and slightly enlarged so the drag reads clearly on touch. */
+.db-card.dragging {
+  border-color: var(--accent); box-shadow: var(--shadow-lg);
+  transform: scale(1.03); z-index: 2;
+}
 .db-card-grip {
   position: absolute; top: 8px; right: 6px; color: var(--text-faint);
-  opacity: 0; cursor: grab; transition: opacity var(--dur) var(--ease);
+  opacity: 0; cursor: grab; touch-action: none; transition: opacity var(--dur) var(--ease);
 }
 .db-card:hover .db-card-grip { opacity: 0.7; }
 .db-card-title { display: flex; align-items: center; gap: 6px; font-weight: 500; margin-bottom: var(--sp-1); padding-right: 16px; }
@@ -3467,4 +3543,163 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 @media (max-width: 720px) {
   .tags-body { grid-template-columns: 1fr; }
   .tags-list { position: static; }
+}
+
+/* ============================================================
+   MOBILE / TOUCH RESPONSIVENESS
+   Breakpoints mirror src/hooks/useViewport.ts (mobile <=639,
+   tablet <=959). On mobile the grid collapses to one column,
+   the sidebars become fixed overlay drawers over the editor,
+   and a breadcrumb provides the persistent orientation cue.
+   ============================================================ */
+
+/* ---- Breadcrumb (mobile only; rendered by App when vp.isMobile) ---- */
+.breadcrumb {
+  position: sticky; top: 0; z-index: 6;
+  display: flex; align-items: center; gap: var(--sp-1);
+  padding: var(--safe-t) max(var(--sp-1), var(--safe-r)) 0 max(var(--sp-1), var(--safe-l));
+  min-height: var(--touch-target);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.breadcrumb-toggle {
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  width: var(--touch-target); height: var(--touch-target);
+  border-radius: var(--r-sm);
+  background: transparent; border: 1px solid transparent; color: var(--text-dim);
+}
+.breadcrumb-toggle:active { background: var(--bg-hover); color: var(--text); }
+.breadcrumb-toggle.active { background: var(--accent-soft); color: var(--accent); }
+.breadcrumb-trail {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center;
+  overflow-x: auto; scrollbar-width: none;
+  white-space: nowrap;
+}
+.breadcrumb-trail::-webkit-scrollbar { height: 0; }
+.breadcrumb-seg { display: inline-flex; align-items: center; }
+.breadcrumb-sep { color: var(--text-faint); padding: 0 2px; flex-shrink: 0; }
+.breadcrumb-crumb {
+  background: transparent; border: none; color: var(--text-dim);
+  padding: 4px 4px; border-radius: var(--r-sm);
+  font-size: 0.9em; max-width: 40vw;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.breadcrumb-crumb.leaf { color: var(--text); font-weight: 600; }
+.breadcrumb-crumb:not(.leaf):active { background: var(--bg-hover); }
+.breadcrumb-empty { color: var(--text-faint); font-size: 0.9em; padding: 0 var(--sp-1); }
+
+/* ---- Drawer scrim (rendered while a drawer is open on mobile) ---- */
+.drawer-scrim {
+  position: fixed; inset: 0; z-index: 49;
+  background: var(--scrim);
+}
+
+/* ---- Mobile layout: single column + overlay drawers ---- */
+@media (max-width: 639px) {
+  /* The grid is forced to one column inline by App; nothing else needs to claim tracks. */
+  .app { grid-template-columns: 1fr !important; }
+
+  /* Left file-tree drawer and right outline/calendar drawer both slide over the editor. */
+  .sidebar,
+  .right-sidebar-wrap {
+    position: fixed; top: 0; bottom: 0; z-index: 50;
+    width: var(--drawer-w);
+    padding-top: var(--safe-t); padding-bottom: var(--safe-b);
+  }
+  .sidebar {
+    left: 0;
+    padding-left: var(--safe-l);
+    box-shadow: var(--shadow-lg);
+  }
+  .right-sidebar-wrap {
+    right: 0;
+    padding-right: var(--safe-r);
+    box-shadow: var(--shadow-lg);
+  }
+  .right-sidebar { border-left: none; }
+  .sidebar { border-right: none; }
+
+  /* The main column owns the full width; hide the desktop "show sidebar" nav button (the
+     breadcrumb toggles cover it) and let the document tabs scroll horizontally. */
+  .nav-arrows .nav-arrow:first-child:not(:only-child) { display: none; }
+  .doc-tabs { overflow-x: auto; }
+
+  /* Editor content gets full width with comfortable, safe-area-aware side padding. */
+  .editor-content {
+    max-width: none;
+    padding: var(--sp-5) max(var(--sp-4), var(--safe-l)) 30vh max(var(--sp-4), var(--safe-r));
+  }
+  .page-ruler { display: none; }
+
+  /* Editor toolbar: one horizontally-scrollable row (wrapping wastes vertical space on a phone),
+     with comfortably tall buttons. */
+  .toolbar {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    padding: var(--sp-1) max(var(--sp-2), var(--safe-l));
+  }
+  .toolbar::-webkit-scrollbar { height: 0; }
+  .tb-btn { height: 38px; min-width: 38px; flex: 0 0 auto; }
+
+  /* ---- Overlays become bottom sheets ---- */
+
+  /* Command palette docks to the bottom, rounded top, full width. */
+  .palette-backdrop { align-items: flex-end; padding: 0; }
+  .palette {
+    max-width: none; max-height: 80vh;
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+    border-bottom: none;
+    padding-bottom: var(--safe-b);
+  }
+
+  /* Dialogs (prompt / confirm / alert) and create/picker modals dock to the bottom. */
+  .modal-backdrop { place-items: end stretch; padding: 0; }
+  .modal,
+  .modal.dialog {
+    width: 100%; max-width: none; max-height: 86vh;
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+    padding-bottom: calc(var(--sp-6) + var(--safe-b));
+  }
+
+  /* Context menu: ignore its inline x/y anchor and present as a full-width bottom sheet. */
+  .ctx-menu {
+    top: auto !important; bottom: 0 !important;
+    left: 0 !important; right: 0 !important;
+    width: 100%; min-width: 0;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding: var(--sp-2) var(--sp-2) calc(var(--sp-2) + var(--safe-b));
+  }
+  .ctx-item { min-height: var(--touch-target); }
+
+  /* ---- Other database views ---- */
+  /* Gallery cards shrink so two fit a phone width without overflowing. */
+  .db-gallery { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  /* Kanban lanes get a scroll-snap so each lane settles into view when swiping the board. */
+  .db-board { scroll-snap-type: x proximity; }
+  .db-lane { scroll-snap-align: start; }
+}
+
+/* ---- Touch devices: reveal hover-only affordances, enlarge tap targets ---- */
+@media (hover: none) {
+  /* Controls that are normally revealed on hover must be always visible without a pointer. */
+  .recent-row .recent-go,
+  .theme-card-actions,
+  .db-row-actions { opacity: 1 !important; visibility: visible; }
+  .theme-card-actions { pointer-events: auto; transform: none; }
+
+  /* The kanban grip is the explicit drag handle on touch — always show it, with a real tap target. */
+  .db-card-grip { opacity: 0.6; padding: 4px; top: 4px; right: 2px; }
+
+  /* Hover highlights don't fire on touch — mirror them on :active so taps still feel responsive. */
+  .breadcrumb-toggle:hover { background: transparent; }
+
+  /* Bump icon-button hit areas to the minimum comfortable touch target. */
+  .sidebar-actions button,
+  .nav-arrow,
+  .right-tabs button,
+  .breadcrumb-toggle {
+    min-width: var(--touch-target);
+    min-height: var(--touch-target);
+  }
 }
