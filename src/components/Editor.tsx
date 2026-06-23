@@ -3,7 +3,12 @@ import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
+import { Table as TableExt } from "@tiptap/extension-table";
+import TableRow from "@tiptap/extension-table-row";
+import TableHeader from "@tiptap/extension-table-header";
+import TableCell from "@tiptap/extension-table-cell";
 import { WikiLink } from "./WikiLink";
+import { ImageNode } from "./ImageNode";
 import { dialogs } from "./Dialogs";
 import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
@@ -54,6 +59,8 @@ interface Props {
   reloadKey: string;
   /** Pages available for the `/link` slash command (wikilink references). */
   pages?: PageRef[];
+  /** Existing tags in the vault, suggested by the `#` autocomplete (Obsidian-style). */
+  tags?: string[];
   /**
    * Create a new page from the `/page` slash command. Receives an optional name (prompted by the
    * editor) and resolves to the created page's display name, or null if creation was cancelled.
@@ -70,6 +77,14 @@ interface Props {
   onOpenPage?: (name: string) => void;
   /** Open a page by its vault-relative path (used by inline TASK query results). */
   onOpenPath?: (relPath: string) => void;
+  /** Open a tag in the Tags view when its inline pill is clicked. */
+  onOpenTag?: (tag: string) => void;
+  /**
+   * Persist a pasted/dropped image into the vault (the `.attachments` folder) and resolve to its
+   * vault-relative path, which is inserted as a markdown image. Resolves to null on failure (the
+   * image is then skipped). When absent, image paste/drop falls back to the editor's default.
+   */
+  onAddAttachment?: (file: { bytes: Uint8Array; mime: string; name?: string }) => Promise<string | null>;
   /**
    * Called after an inline TASK query block toggles a task on disk, with that task's vault-relative
    * path. The host reloads the editor when the path is the open document so its own checkboxes
@@ -313,6 +328,64 @@ const SubtaskRollup = Extension.create({
   },
 });
 
+// Visually render inline `#tags` as pill chips WITHOUT touching the document model: the text stays
+// literal `#tag`, so the markdown round-trip (the source of truth) is completely untouched. This is
+// the same decoration-overlay pattern as SubtaskRollup — a styling layer, not a content change.
+//
+// We match the index's tag rule (alphanumerics, `-`, `_`, `/`), require the `#` to start a text node
+// or follow whitespace (so `a#b` and `#rrggbb` colours mid-word never pill), and skip code so `#`
+// inside code spans/blocks stays literal.
+const tagPillKey = new PluginKey("tagPill");
+const TAG_DECO_RE = /(^|\s)(#[A-Za-z0-9_/-]*[A-Za-z][A-Za-z0-9_/-]*)/g;
+interface TagPillOptions {
+  /** Open a tag in the Tags view when its pill is clicked. */
+  onOpenTag?: (tag: string) => void;
+}
+const TagPill = Extension.create<TagPillOptions>({
+  name: "tagPill",
+  addOptions() {
+    return { onOpenTag: undefined };
+  },
+  addProseMirrorPlugins() {
+    const { onOpenTag } = this.options;
+    return [
+      new Plugin({
+        key: tagPillKey,
+        props: {
+          decorations(state) {
+            const decos: Decoration[] = [];
+            state.doc.descendants((node, pos) => {
+              if (!node.isText || !node.text) return;
+              // Don't pill `#` inside code (inline code mark or a code block).
+              if (node.marks.some((m) => m.type.name === "code")) return;
+              const text = node.text;
+              TAG_DECO_RE.lastIndex = 0;
+              let m: RegExpExecArray | null;
+              while ((m = TAG_DECO_RE.exec(text))) {
+                // m[1] is the leading boundary (start or whitespace); the tag itself is m[2].
+                const start = pos + m.index + m[1].length;
+                const end = start + m[2].length;
+                decos.push(Decoration.inline(start, end, { class: "tag-pill" }));
+              }
+            });
+            return DecorationSet.create(state.doc, decos);
+          },
+          // Click a pill to open that tag in the Tags view. We read the tag from the rendered text
+          // (the decoration span wraps the literal `#tag`), so there's no doc-model coupling.
+          handleClick(_view, _pos, event) {
+            const el = (event.target as HTMLElement | null)?.closest(".tag-pill");
+            if (!el || !onOpenTag) return false;
+            const tag = (el.textContent || "").replace(/^#/, "").trim();
+            if (!tag) return false;
+            onOpenTag(tag);
+            return true;
+          },
+        },
+      }),
+    ];
+  },
+});
+
 const COMMANDS: SlashCommand[] = [
   { id: "h1", label: "Heading 1", hint: "Big section heading", keywords: "h1 heading title big",
     group: "Basic blocks", icon: TextHOne,
@@ -431,15 +504,51 @@ function insertMarker(editor: any, marker: string): void {
   editor.chain().focus().insertContent((needsSpace ? " " : "") + marker).run();
 }
 
+/**
+ * Pull image files out of a paste/drop payload. Screenshots and copied images arrive under
+ * `items` (kind "file"); dragged files arrive under `files`. We prefer `items` so a rich paste
+ * that also carries `text/html` still yields the image, and only fall back to `files`.
+ */
+function imageFilesFromDataTransfer(dt: DataTransfer | null): File[] {
+  if (!dt) return [];
+  const out: File[] = [];
+  for (const it of Array.from(dt.items ?? [])) {
+    if (it.kind === "file" && it.type.startsWith("image/")) {
+      const f = it.getAsFile();
+      if (f) out.push(f);
+    }
+  }
+  if (!out.length) {
+    for (const f of Array.from(dt.files ?? [])) {
+      if (f.type.startsWith("image/")) out.push(f);
+    }
+  }
+  return out;
+}
+
+/**
+ * Heuristic: does this plain text contain markdown block/inline syntax worth parsing? Used to
+ * decide whether a text/plain paste (e.g. the contents of a .md file) should be rendered as
+ * formatted blocks instead of dropped in literally. Conservative — a line of prose with a stray
+ * asterisk won't trip it; we look for structural markers at line starts plus common inline marks.
+ */
+function looksLikeMarkdown(text: string): boolean {
+  return /^\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|---\s*$|\|.*\|)/m.test(text) ||
+    /\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|!\[[^\]]*\]\([^)]+\)/.test(text);
+}
+
 export default function Editor({
   value,
   onChange,
   reloadKey,
   pages = [],
+  tags = [],
   onCreatePage,
   onCreateDatabase,
   onOpenPage,
   onOpenPath,
+  onOpenTag,
+  onAddAttachment,
   onTaskToggled,
   dateFormat = "YYYY-MM-DD",
   timeFormat = "HH:mm",
@@ -452,6 +561,10 @@ export default function Editor({
   onOpenPageRef.current = onOpenPage;
   const onOpenPathRef = useRef(onOpenPath);
   onOpenPathRef.current = onOpenPath;
+  const onOpenTagRef = useRef(onOpenTag);
+  onOpenTagRef.current = onOpenTag;
+  const onAddAttachmentRef = useRef(onAddAttachment);
+  onAddAttachmentRef.current = onAddAttachment;
   const onTaskToggledRef = useRef(onTaskToggled);
   onTaskToggledRef.current = onTaskToggled;
   const lastEmitted = useRef<string>(value);
@@ -460,6 +573,9 @@ export default function Editor({
   // `[[wikilink]]` autocomplete: triggered when the caret sits in an open `[[query`.
   const [link, setLink] = useState<{ query: string; left: number; top: number } | null>(null);
   const [linkIndex, setLinkIndex] = useState(0);
+  // `#tag` autocomplete (Obsidian-style): triggered when the caret sits in a `#partial` token.
+  const [tag, setTag] = useState<{ query: string; left: number; top: number } | null>(null);
+  const [tagIndex, setTagIndex] = useState(0);
   // Inline date picker (the `/due` command). Open when non-null; `resolve` feeds the picked
   // ISO date back to the awaiting command.
   const [datePicker, setDatePicker] = useState<{ left: number; top: number } | null>(null);
@@ -487,6 +603,33 @@ export default function Editor({
   // The editor instance, mirrored in a ref so callbacks defined before `useEditor` (requestDate,
   // runTaskProp) can reach the live editor without a use-before-declaration cycle.
   const editorRef = useRef<any>(null);
+
+  // Save each pasted/dropped image to the vault (via onAddAttachment) and insert it as a block
+  // image at `at` (a doc position; the drop point) or at the caret when omitted. The work is async
+  // but the ProseMirror paste/drop handler must answer synchronously, so this is fire-and-forget.
+  const insertImagesFromFiles = useCallback((files: File[], at?: number) => {
+    const save = onAddAttachmentRef.current;
+    if (!save) return;
+    void (async () => {
+      let pos = at;
+      for (const f of files) {
+        try {
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          const rel = await save({ bytes, mime: f.type, name: f.name });
+          if (!rel) continue;
+          const ed = editorRef.current;
+          if (!ed) return;
+          const content = { type: "image", attrs: { src: rel, alt: "" } };
+          if (pos != null) ed.chain().focus().insertContentAt(pos, content).run();
+          else ed.chain().focus().insertContent(content).run();
+          // Subsequent images in the same batch follow the caret rather than stacking at `at`.
+          pos = undefined;
+        } catch (e) {
+          console.error("Failed to attach pasted image:", e);
+        }
+      }
+    })();
+  }, []);
 
   // Open the date picker at the caret and return a promise that resolves to the chosen date
   // (or null if dismissed). Used by the `/due` slash command.
@@ -576,7 +719,13 @@ export default function Editor({
         Link.configure({ openOnClick: false, autolink: true }),
         TaskList,
         TaskItem.configure({ nested: true }),
+        TableExt.configure({ resizable: true }),
+        TableRow,
+        TableHeader,
+        TableCell,
         SubtaskRollup,
+        TagPill.configure({ onOpenTag: (tag) => onOpenTagRef.current?.(tag) }),
+        ImageNode,
         WikiLink.configure({ onOpen: (name) => onOpenPageRef.current?.(name) }),
         QueryBlock.configure({
           onEdit: (getPos, dsl) => editQueryRef.current(getPos, dsl),
@@ -590,6 +739,50 @@ export default function Editor({
       editorProps: {
         handleTextInput: handleAutoClose,
         handleKeyDown: (_view, e) => handlePopupKeyRef.current(e),
+        // Paste an image (screenshot, copied image) → save it to `.attachments` and insert it.
+        // Only intercept when there's actually an image and a handler; otherwise let the default
+        // text/html paste run.
+        handlePaste: (view, event) => {
+          const data = event.clipboardData;
+          if (onAddAttachmentRef.current) {
+            const files = imageFilesFromDataTransfer(data);
+            if (files.length) {
+              event.preventDefault();
+              insertImagesFromFiles(files);
+              return true;
+            }
+          }
+          // Pasting the *text* of a .md file (or any raw markdown) arrives as text/plain. The
+          // browser would drop it in verbatim, leaving `# Heading` as literal characters. When the
+          // clipboard has no rich text/html (so we're not stomping on a real rich-text copy) but
+          // the plain text contains markdown syntax, parse it through our md→HTML bridge and let
+          // ProseMirror render real headings, lists, bold, etc.
+          if (data) {
+            const html = data.getData("text/html");
+            const text = data.getData("text/plain");
+            if (text && !html && looksLikeMarkdown(text)) {
+              event.preventDefault();
+              editorRef.current
+                ?.chain()
+                .focus()
+                .insertContent(markdownToHtml(text))
+                .run();
+              return true;
+            }
+          }
+          return false;
+        },
+        // Drop image files from the OS → same handling, inserted at the drop point. Internal
+        // drags (`moved`) fall through to ProseMirror's own node move.
+        handleDrop: (view, event, _slice, moved) => {
+          if (moved || !onAddAttachmentRef.current) return false;
+          const files = imageFilesFromDataTransfer(event.dataTransfer);
+          if (!files.length) return false;
+          event.preventDefault();
+          const at = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
+          insertImagesFromFiles(files, at);
+          return true;
+        },
       },
       onUpdate: ({ editor }) => {
         const md = docToMarkdown(editor.getJSON() as any);
@@ -597,9 +790,11 @@ export default function Editor({
         onChange(md);
         detectSlash(editor);
         detectLink(editor);
+        detectTag(editor);
         detectTaskHint(editor);
       },
       onSelectionUpdate: ({ editor }) => {
+        detectTag(editor);
         detectTaskHint(editor);
       },
     },
@@ -649,6 +844,30 @@ export default function Editor({
     setLinkIndex(0);
   }, []);
 
+  // Detect a `#partial` tag token at the caret and position the suggestion menu under it. Mirrors
+  // the index's tag rule (alphanumerics, `-`, `_`, `/`); the `#` must start the line or follow
+  // whitespace so we never fire inside `a#b`, a heading `# `, or a `#rrggbb` colour.
+  const detectTag = useCallback((ed: any) => {
+    const { state } = ed;
+    const { from, empty } = state.selection;
+    if (!empty) return setTag(null);
+    const lineStart = state.doc.resolve(from).start();
+    const textBefore = state.doc.textBetween(lineStart, from, "\n", "\n");
+    const m = textBefore.match(/(?:^|\s)#([A-Za-z0-9_/-]*)$/);
+    // Require a letter to have been typed before suggesting, so a lone `#` (e.g. starting a heading
+    // in plain markdown) doesn't pop the menu until it's clearly a tag.
+    if (!m || m[1] === "") return setTag(null);
+    const coords = ed.view.coordsAtPos(from);
+    const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
+    const rect = wrap?.getBoundingClientRect();
+    setTag({
+      query: m[1],
+      left: coords.left - (rect?.left ?? 0),
+      top: coords.bottom - (rect?.top ?? 0) + 4,
+    });
+    setTagIndex(0);
+  }, []);
+
   // Show the "+ add task property" affordance when the caret sits inside a task-list item, anchored
   // just left of that line. Cleared otherwise (and the little menu collapses with it).
   const detectTaskHint = useCallback((ed: any) => {
@@ -667,26 +886,35 @@ export default function Editor({
       setTaskMenuOpen(false);
       return;
     }
-    // Anchor just to the RIGHT of the task text. We use the right edge of the line's first text
-    // row (coordsAtPos at the end of the item's first paragraph) so the `+` trails the text rather
-    // than sitting over the checkbox on the left. Falls back to the item's DOM right edge.
+    // Anchor the `+` exactly where the caret sits at the END of the task's text — i.e. right after
+    // the last typed character (the gap of "one character" is the CSS margin-left). coordsAtPos is
+    // the SAME measurement ProseMirror uses to place its own caret, so the `+` tracks the text end
+    // precisely and stays glued to it under any browser/webview zoom (it scales with the caret).
+    //
+    // We align the button's TOP to the caret's top (top: coords.top, no translate) so it sits on the
+    // text baseline like a trailing character, rather than centered on the whole (possibly wrapped)
+    // block. The position recomputes on every selection/content change, so as you type it follows
+    // the last character along.
     const itemPos = $from.before(taskDepth);
     const item = $from.node(taskDepth);
     const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
     const rect = wrap?.getBoundingClientRect();
-    // End of the task item's first text block (its paragraph), where the visible text ends.
+    const baseLeft = rect?.left ?? 0;
+    const baseTop = rect?.top ?? 0;
+    // End of the task item's first text block (its paragraph) = position just past the last char.
     const textEnd = itemPos + 1 + (item.firstChild?.nodeSize ?? 2) - 1;
     let left: number;
     let top: number;
     try {
       const coords = ed.view.coordsAtPos(textEnd);
-      left = coords.right - (rect?.left ?? 0);
-      top = coords.top - (rect?.top ?? 0);
+      left = coords.left - baseLeft;
+      top = coords.top - baseTop;
     } catch {
-      const dom = ed.view.nodeDOM(itemPos) as HTMLElement | null;
-      const box = dom?.getBoundingClientRect?.();
-      left = (box?.right ?? 0) - (rect?.left ?? 0);
-      top = (box?.top ?? 0) - (rect?.top ?? 0);
+      // Fallback: trail the line's DOM right edge if the position can't be resolved.
+      const li = ed.view.nodeDOM(itemPos) as HTMLElement | null;
+      const box = li?.getBoundingClientRect?.();
+      left = (box?.right ?? 0) - baseLeft;
+      top = (box?.top ?? 0) - baseTop;
     }
     setTaskHint({ left, top });
   }, []);
@@ -774,18 +1002,57 @@ export default function Editor({
     [editor, link]
   );
 
+  // Ranked tag matches for the `#` autocomplete. When the query isn't already an exact tag, offer it
+  // as a "new tag" so the user can coin one on the spot (tags are just text — no node type needed).
+  const tagQuery = tag?.query.trim() ?? "";
+  const tagMatches = tag
+    ? tags
+        .map((t) => ({ t, s: fuzzyScore(tagQuery, t) }))
+        .filter((x) => x.s >= 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 20)
+        .map((x) => x.t)
+    : [];
+  const tagHasExact = tagMatches.some((t) => t.toLowerCase() === tagQuery.toLowerCase());
+  const tagItems: Array<{ name: string; create?: boolean }> = tag
+    ? [
+        ...tagMatches.map((t) => ({ name: t })),
+        ...(tagQuery && !tagHasExact ? [{ name: tagQuery, create: true }] : []),
+      ]
+    : [];
+
+  // Replace the open `#query` with the chosen `#tag` as plain text (plus a trailing space so typing
+  // continues naturally). Unlike wikilinks, tags aren't a node — they're matched from the body text.
+  const runTag = useCallback(
+    (item: { name: string }) => {
+      if (!editor) return;
+      const { state } = editor;
+      const { from } = state.selection;
+      const start = from - ((tag?.query.length ?? 0) + 1); // back up over `#query`
+      editor
+        .chain()
+        .focus()
+        .deleteRange({ from: start, to: from })
+        .insertContent(`#${item.name} `)
+        .run();
+      setTag(null);
+    },
+    [editor, tag]
+  );
+
   // Close the slash / link popups when clicking anywhere outside them. The menu items run on
   // `onMouseDown` and stop here via the `.slash-menu` ancestor check, so picking an item still works.
   useEffect(() => {
-    if (!slash && !link) return;
+    if (!slash && !link && !tag) return;
     const onDown = (e: MouseEvent) => {
       if ((e.target as HTMLElement)?.closest(".slash-menu")) return;
       setSlash(null);
       setLink(null);
+      setTag(null);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [slash, link]);
+  }, [slash, link, tag]);
 
   // Keep the keyboard-highlighted slash item scrolled into view (groups add headers, so the active
   // row can fall outside the visible area).
@@ -808,6 +1075,26 @@ export default function Editor({
   // Menu key handling at the ProseMirror level so it runs before the editor inserts a newline on
   // Enter. Returns true when a popup consumed the key (suppressing the default editor behaviour).
   const handlePopupKey = (e: KeyboardEvent): boolean => {
+    // The `#` tag autocomplete takes priority when open.
+    if (tag && tagItems.length) {
+      if (e.key === "ArrowDown") {
+        setTagIndex((i) => (i + 1) % tagItems.length);
+      } else if (e.key === "ArrowUp") {
+        setTagIndex((i) => (i - 1 + tagItems.length) % tagItems.length);
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        runTag(tagItems[Math.min(tagIndex, tagItems.length - 1)]);
+      } else if (e.key === "Escape") {
+        setTag(null);
+      } else {
+        return false;
+      }
+      return true;
+    }
+    if (tag && e.key === "Escape") {
+      setTag(null);
+      return true;
+    }
+
     // The `[[` autocomplete takes priority when open.
     if (link && linkItems.length) {
       if (e.key === "ArrowDown") {
@@ -910,6 +1197,24 @@ export default function Editor({
             >
               <span className="slash-label">{it.create ? `Create “${it.name}”` : it.name}</span>
               <span className="slash-hint">{it.create ? "New page" : "Link to page"}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {tag && tagItems.length > 0 && (
+        <div className="slash-menu" style={{ left: tag.left, top: tag.top }}>
+          {tagItems.map((it, i) => (
+            <button
+              key={(it.create ? "+" : "") + it.name}
+              className={`slash-item${i === tagIndex ? " active" : ""}`}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                runTag(it);
+              }}
+              onMouseEnter={() => setTagIndex(i)}
+            >
+              <span className="slash-label">#{it.name}</span>
+              <span className="slash-hint">{it.create ? "New tag" : "Tag"}</span>
             </button>
           ))}
         </div>

@@ -967,6 +967,35 @@ code, .dsl-preview, .dsl-input {
 .editor-content :focus { outline: none; }
 .ProseMirror { min-height: 50vh; outline: none; }
 
+/* ---- Block images (pasted / dropped into the editor) ---- */
+.editor-image {
+  margin: var(--sp-3) 0;
+  line-height: 0; /* trim the inline-box gap under the image */
+}
+.editor-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  display: block;
+}
+/* Selected (clicked) image gets the same accent ring as other focused controls. */
+.editor-image.selected img {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+/* Placeholder shown while the asset resolves, or if it can't be loaded. */
+.editor-image-fallback {
+  display: inline-block;
+  line-height: 1.4;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  color: var(--text-dim, var(--text));
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
 /* ---- Database-row properties (shown above the doc when a page lives inside a database) ---- */
 /* Shares the editor column's width + horizontal rhythm so it reads as part of the document. */
 .editor-header-slot {
@@ -1153,6 +1182,30 @@ code, .dsl-preview, .dsl-input {
 .page-link:hover {
   color: color-mix(in srgb, var(--page-link, #a472ff) 80%, #fff);
   background: color-mix(in srgb, var(--page-link, #a472ff) 22%, transparent);
+}
+
+/* Inline #tag pills inside the editor. Drawn by the TagPill decoration over literal `#tag` text
+   (the doc/markdown is unchanged). A fully-rounded pill distinguishes a tag from the squarer
+   wikilink chip. Colour derives from --accent via --tag-pill so themes/the theme editor recolour
+   it automatically; box-decoration-break keeps the pill intact if it wraps across lines. */
+.tag-pill {
+  --tag-pill: var(--accent);
+  color: var(--tag-pill);
+  background: color-mix(in srgb, var(--tag-pill) 13%, transparent);
+  border-radius: 99px;
+  padding: 0.05em 0.5em;
+  font-size: 0.88em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.tag-pill:hover {
+  background: color-mix(in srgb, var(--tag-pill) 22%, transparent);
+  color: color-mix(in srgb, var(--tag-pill) 82%, white 18%);
 }
 
 /* ---------- Panels (tasks/query) ---------- */
@@ -1430,7 +1483,8 @@ code, .dsl-preview, .dsl-input {
 /* ---------- "+ add task property" affordance on task lines ---------- */
 .task-hint {
   position: absolute; z-index: 40;
-  /* Sit just to the right of the task text (anchored at the text's right edge). */
+  /* Anchored at the caret position right after the last character (`top` = the caret's top, so the
+     button sits on the text line like a trailing glyph). margin-left = the "one character" gap. */
   margin-left: var(--sp-2);
 }
 .task-hint-btn {
@@ -1922,6 +1976,25 @@ input[type="range"]::-moz-range-thumb {
 }
 .palette-item-enter { color: var(--accent); flex: none; opacity: 0.8; }
 .palette-empty { padding: var(--sp-6); text-align: center; color: var(--text-dim); font-size: 0.9em; }
+
+/* Body-content ("found in pages") results: a section header, a snippet line, and matched-word marks. */
+.palette-row { display: contents; }
+.palette-section {
+  display: flex; align-items: center; gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3) var(--sp-1);
+  margin-top: var(--sp-1);
+  font-size: 0.7em; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+}
+.palette-item-snippet {
+  font-size: 0.76em; color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.palette-mark {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--text); border-radius: 2px; padding: 0 1px;
+}
 
 /* ---------- Trash tab ---------- */
 /* A subtle ghost button for the destructive "Empty Trash" header action. */
@@ -2712,3 +2785,108 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 }
 .db-cal-event:hover { background: var(--accent-soft); }
 .db-cal-day.marked::after { content: ""; position: absolute; }
+
+/* ============================================================
+   Tags view — an Obsidian-style tag browser. A searchable rail
+   of every tag (with page counts) on the left; the selected
+   tag's connected tags + pages on the right.
+   ============================================================ */
+.tags-view .tags-count { font-size: 0.85em; font-weight: 600; }
+
+.tags-body {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: var(--sp-6);
+  align-items: start;
+}
+
+/* ---- left rail: the full tag list ---- */
+.tags-list {
+  position: sticky; top: var(--sp-2);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  min-width: 0;
+}
+.tags-search {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--text-faint);
+}
+.tags-search input {
+  flex: 1; min-width: 0;
+  border: none; background: none; padding: 7px 0; color: var(--text);
+}
+.tags-search input:focus { outline: none; box-shadow: none; }
+.tags-list ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.tags-empty { padding: var(--sp-2); font-size: 0.88em; }
+
+.tag-row {
+  display: flex; align-items: center; gap: var(--sp-2);
+  width: 100%; text-align: left;
+  padding: 6px 8px; border-radius: var(--r-sm);
+  background: transparent; border-color: transparent; color: var(--text-dim);
+}
+.tag-row:hover { background: var(--bg-hover); color: var(--text); }
+.tag-row.active { background: var(--accent-soft); color: var(--accent); }
+.tag-row .tag-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-row .tag-count {
+  flex: none; font-size: 0.78em; font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  background: var(--bg-3); border-radius: 99px; padding: 1px 7px;
+}
+.tag-row.active .tag-count { color: var(--accent); background: var(--accent-tint); }
+
+/* ---- right pane: the selected tag's detail ---- */
+.tags-detail { min-width: 0; }
+.tags-detail-header {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  margin-bottom: var(--sp-5);
+}
+.tags-detail-header h3 {
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin: 0; font-size: 1.25em; font-weight: 700; color: var(--accent); letter-spacing: -0.01em;
+}
+.tag-query-btn {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  padding: 5px 10px; border-radius: var(--r-sm);
+  background: var(--bg-2); border: 1px solid var(--border); color: var(--text-dim);
+  font-size: 0.85em;
+}
+.tag-query-btn:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+
+.tags-section { margin-bottom: var(--sp-6); }
+.tags-section h4 {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 var(--sp-3); font-size: 0.74em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+}
+
+/* connected-tag chips */
+.tag-chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.tag-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 9px; border-radius: 99px;
+  background: var(--accent-tint); border: 1px solid var(--accent-ring); color: var(--text);
+  font-size: 0.86em;
+}
+.tag-chip:hover { background: var(--accent-soft); border-color: var(--accent); }
+.tag-chip-count {
+  font-size: 0.82em; font-variant-numeric: tabular-nums; color: var(--text-dim);
+  background: var(--bg); border-radius: 99px; padding: 0 6px;
+}
+
+/* pages carrying the tag */
+.tag-pages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.tag-page {
+  display: flex; align-items: center; gap: var(--sp-2);
+  width: 100%; text-align: left;
+  padding: 7px 8px; border-radius: var(--r-sm);
+  background: transparent; border-color: transparent; color: var(--text-dim);
+}
+.tag-page:hover { background: var(--bg-hover); color: var(--text); }
+.tag-page .tag-page-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 720px) {
+  .tags-body { grid-template-columns: 1fr; }
+  .tags-list { position: static; }
+}

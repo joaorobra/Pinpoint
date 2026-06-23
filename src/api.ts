@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AssetData, DbSchema, ParsedDoc, QueryResult, RecentVault, Settings, TaskRow, TreeNode, TrashEntry } from "./types";
+import type { AssetData, DbSchema, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
 import { assetKindFor } from "./types";
 import {
   webApi,
@@ -18,6 +18,20 @@ import {
 /** True when running inside the Tauri webview (its globals are injected on the window). */
 function isTauri(): boolean {
   return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+}
+
+/**
+ * Base64-encode raw bytes for the native `write_asset` IPC call. We chunk through `fromCharCode`
+ * so a multi-megabyte image doesn't blow the call stack (spreading the whole array would), and
+ * pass base64 rather than a JSON number array so the payload stays ~1.3x instead of ~4x.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 /** Whether the current host can open a local vault at all (Tauri, or a Chromium browser). */
@@ -72,6 +86,9 @@ const tauriApi = {
   },
   writePage: (relPath: string, frontmatter: Record<string, unknown>, body: string) =>
     invoke<void>("write_page", { relPath, frontmatter, body }),
+  /** Persist a binary asset (pasted/dropped image) at `relPath` (vault-relative). */
+  writeAsset: (relPath: string, bytes: Uint8Array) =>
+    invoke<void>("write_asset", { relPath, dataBase64: bytesToBase64(bytes) }),
   createPage: (relPath: string, body: string) => invoke<void>("create_page", { relPath, body }),
   /** Create a database folder (`.pinpoint-db.json` schema) at `relPath`; `name` seeds the schema. */
   createDatabase: (relPath: string, name: string) =>
@@ -90,7 +107,15 @@ const tauriApi = {
   renamePath: (fromRel: string, toRel: string) => invoke<void>("rename_path", { fromRel, toRel }),
   reindex: () => invoke<number>("reindex"),
   runQuery: (dsl: string) => invoke<QueryResult>("run_query", { dsl }),
+  /** Full-text search over page titles + bodies (command palette "found inside pages"). */
+  searchPages: (query: string) => invoke<SearchHit[]>("search_pages", { query }),
   listTasks: () => invoke<TaskRow[]>("list_tasks"),
+  /** All tags in the vault with per-tag page counts (Tags view sidebar). */
+  listTags: () => invoke<TagInfo[]>("list_tags"),
+  /** Pages carrying a given tag. */
+  tagPages: (tag: string) => invoke<TagPage[]>("tag_pages", { tag }),
+  /** Tags that co-occur with a given tag on shared pages (connection graph). */
+  tagConnections: (tag: string) => invoke<TagConnection[]>("tag_connections", { tag }),
   /**
    * Toggle a task's done state by rewriting its source line. `occurrence` is null for a plain task
    * (flips its checkbox) or an ISO date for one occurrence of a recurring task (toggles that date in

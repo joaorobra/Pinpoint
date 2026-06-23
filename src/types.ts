@@ -28,6 +28,24 @@ export function assetKindFor(ext: string): AssetKind {
   return "other";
 }
 
+/**
+ * File extension (no dot) for an image MIME type, used to name pasted/dropped attachments.
+ * Returns "" for unrecognised types so callers can fall back to the source file's own extension.
+ */
+export function extForMime(mime: string): string {
+  switch (mime.toLowerCase().split(";")[0].trim()) {
+    case "image/png": return "png";
+    case "image/jpeg":
+    case "image/jpg": return "jpg";
+    case "image/gif": return "gif";
+    case "image/webp": return "webp";
+    case "image/svg+xml": return "svg";
+    case "image/bmp": return "bmp";
+    case "image/avif": return "avif";
+    default: return "";
+  }
+}
+
 export interface ParsedDoc {
   frontmatter: Record<string, unknown>;
   body: string;
@@ -65,6 +83,19 @@ export interface QueryResult {
   rows: Record<string, unknown>[];
 }
 
+/**
+ * A full-text search hit: a page whose title or body contains the query. Powers the command
+ * palette's "found inside pages" results so Ctrl+K reaches into every `.md` file's contents,
+ * not just its name. `line` is the 0-based body line the snippet came from (null for a title-only
+ * hit); `snippet` is a short window of body text around the first match.
+ */
+export interface SearchHit {
+  rel_path: string;
+  title: string;
+  snippet: string;
+  line: number | null;
+}
+
 export interface TaskRow {
   rel_path: string;
   line: number;
@@ -75,6 +106,30 @@ export interface TaskRow {
   tags: string | null;
   /** Comma-joined ISO dates of completed occurrences (the `✅ …` list). Null when none. */
   done_dates: string | null;
+}
+
+// ---- Tags ------------------------------------------------------------------------------------
+// Tags work like Obsidian's: `#inline` tags anywhere in a page body plus a frontmatter `tags:`
+// list, both indexed together. The Tags view queries pages by tag and surfaces how pages connect
+// to each other through shared tags.
+
+/** A tag with the number of distinct pages that carry it. */
+export interface TagInfo {
+  tag: string;
+  count: number;
+}
+
+/** A page that carries a tag (shown in the Tags view's page list). */
+export interface TagPage {
+  rel_path: string;
+  title: string;
+}
+
+/** A tag that co-occurs with the selected tag on shared pages — one edge of the connection graph. */
+export interface TagConnection {
+  tag: string;
+  /** Number of pages carrying both the selected tag and this one. */
+  shared: number;
 }
 
 // ---- Databases -------------------------------------------------------------------------------

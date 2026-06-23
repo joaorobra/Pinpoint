@@ -27,7 +27,7 @@ import { api, pickVaultFolder, resolveRecentVault, listRecentVaults } from "./ap
 import { slideFade, transition } from "./motion";
 import StartScreen from "./components/StartScreen";
 import type { NodeIcon, Settings, TreeNode } from "./types";
-import { DEFAULT_SETTINGS } from "./types";
+import { DEFAULT_SETTINGS, extForMime } from "./types";
 import Editor from "./components/Editor";
 import FileTree, { type SelectMods } from "./components/FileTree";
 import ContextMenu from "./components/ContextMenu";
@@ -41,6 +41,7 @@ import DbPageProperties from "./components/DbPageProperties";
 import TasksView from "./components/TasksView";
 import TrashView from "./components/TrashView";
 import QueryView from "./components/QueryView";
+import TagsView from "./components/TagsView";
 import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
 import { DialogHost, dialogs } from "./components/Dialogs";
@@ -48,10 +49,39 @@ import CommandPalette, { type PaletteAction } from "./components/CommandPalette"
 import PageProperties from "./components/PageProperties";
 import Titlebar from "./components/Titlebar";
 
-type RightTab = "editor" | "tasks" | "query" | "trash";
+type RightTab = "editor" | "tasks" | "query" | "tags" | "trash";
 
 /** The three kinds of document an open tab can hold. */
 type DocKind = "page" | "asset" | "db";
+
+// Pasted/dropped images live in a single vault-root `.attachments` folder (a dotfolder, so it
+// stays out of the file tree like `.obsidian`). The markdown stores a vault-relative path into it
+// and the editor's image node resolves that back through the API.
+const ATTACHMENTS_DIR = ".attachments";
+
+// Same-second pastes get a numeric suffix so two images in one batch never collide. The seconds
+// timestamp already separates pastes across time; the counter only disambiguates within a second.
+let lastAttachStamp = "";
+let attachStampSeq = 0;
+
+/** Build a unique vault-relative path under `.attachments` for a pasted image of the given type. */
+function attachmentRelPath(mime: string, sourceName?: string): string {
+  const ext = extForMime(mime) || sourceName?.split(".").pop()?.toLowerCase() || "png";
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const stamp =
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  if (stamp === lastAttachStamp) attachStampSeq += 1;
+  else {
+    lastAttachStamp = stamp;
+    attachStampSeq = 0;
+  }
+  const dedup = attachStampSeq > 0 ? `-${attachStampSeq}` : "";
+  // Hyphenated, no spaces: a CommonMark image destination can't contain raw spaces, and the
+  // editor stores images as plain `![](path)` markdown (the locked strict-round-trip constraint).
+  return `${ATTACHMENTS_DIR}/Pasted-image-${stamp}${dedup}.${ext}`;
+}
 
 export default function App() {
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -87,6 +117,11 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [taskRefresh, setTaskRefresh] = useState(0);
+  // When the Tags view sends a tag to the Query panel, we seed the builder's FROM with `#tag`.
+  // Bumped alongside the value so re-querying the same tag still re-seeds. Null = no pending seed.
+  const [queryTagSeed, setQueryTagSeed] = useState<{ tag: string; n: number } | null>(null);
+  // A tag to focus in the Tags view, set when an inline `#tag` pill is clicked in the editor.
+  const [tagFocus, setTagFocus] = useState<{ tag: string; n: number } | null>(null);
   // Bumped whenever the trash contents change, so the Trash view re-fetches its list.
   const [trashRefresh, setTrashRefresh] = useState(0);
   // Count of trashed items, shown as a badge on the sidebar's Trash entry.
@@ -559,6 +594,23 @@ export default function App() {
     [refreshTree, openPage]
   );
 
+  // Save a pasted/dropped image into the vault's `.attachments` folder and hand the editor back its
+  // vault-relative path (inserted as a markdown image). No tree refresh: `.attachments` is a
+  // dotfolder, hidden from the tree, so nothing visible changes.
+  const addAttachment = useCallback(
+    async ({ bytes, mime, name }: { bytes: Uint8Array; mime: string; name?: string }): Promise<string | null> => {
+      try {
+        const rel = attachmentRelPath(mime, name);
+        await api.writeAsset(rel, bytes);
+        return rel;
+      } catch (e) {
+        console.error("Failed to save attachment:", e);
+        return null;
+      }
+    },
+    []
+  );
+
   // Create a database (folder + `.pinpoint-db.json` schema). When `name` is omitted we prompt
   // (sidebar use); when provided (the editor's `/database` command) we skip the prompt. Returns the
   // created database's rel_path so the editor can link to it, or null if nothing was created.
@@ -654,6 +706,17 @@ export default function App() {
   // Set of all existing markdown page rel_paths, so the calendar can show which days already
   // have a daily note (and which don't).
   const pagePaths = useMemo(() => new Set(pages.map((p) => p.rel_path)), [pages]);
+
+  // Every tag in the vault, fed to the editor's `#` autocomplete. Refreshed on the same signal as
+  // tasks (saves, reindex, file-watcher), so newly-typed tags become suggestable across pages.
+  const [allTags, setAllTags] = useState<string[]>([]);
+  useEffect(() => {
+    if (!tree) return;
+    api
+      .listTags()
+      .then((ts) => setAllTags(ts.map((t) => t.tag)))
+      .catch(console.error);
+  }, [tree, taskRefresh]);
 
   // Resolve a `[[wikilink]]` name to a page and open it, creating the page if it doesn't exist yet.
   const openPageByName = useCallback(
@@ -1475,6 +1538,9 @@ export default function App() {
             <button className={tab === "query" ? "active" : ""} onClick={() => setTab("query")}>
               Query
             </button>
+            <button className={tab === "tags" ? "active" : ""} onClick={() => setTab("tags")}>
+              Tags
+            </button>
             <button
               className={`right-toggle${rightOpen ? " active" : ""}`}
               onClick={toggleRight}
@@ -1531,10 +1597,16 @@ export default function App() {
                 onChange={onEditorChange}
                 reloadKey={reloadKey}
                 pages={pages}
+                tags={allTags}
                 onCreatePage={newPage}
                 onCreateDatabase={newDatabase}
                 onOpenPage={openPageByName}
                 onOpenPath={openPage}
+                onOpenTag={(t) => {
+                  setTagFocus((s) => ({ tag: t, n: (s?.n ?? 0) + 1 }));
+                  setTab("tags");
+                }}
+                onAddAttachment={addAttachment}
                 onTaskToggled={onTaskToggled}
                 dateFormat={settings.date_format}
                 timeFormat={settings.time_format}
@@ -1560,7 +1632,18 @@ export default function App() {
           {tab === "tasks" && (
             <TasksView onOpen={openPage} refreshKey={taskRefresh} dateFormat={settings.task_date_format} />
           )}
-          {tab === "query" && <QueryView />}
+          {tab === "query" && <QueryView seedFrom={queryTagSeed} />}
+          {tab === "tags" && (
+            <TagsView
+              onOpen={openPage}
+              refreshKey={taskRefresh}
+              focusTag={tagFocus}
+              onQueryTag={(tag) => {
+                setQueryTagSeed((s) => ({ tag, n: (s?.n ?? 0) + 1 }));
+                setTab("query");
+              }}
+            />
+          )}
           {tab === "trash" && (
             <TrashView
               refreshKey={trashRefresh}

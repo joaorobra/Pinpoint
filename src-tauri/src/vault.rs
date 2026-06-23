@@ -216,6 +216,16 @@ pub fn build_tree(root: &Path) -> Result<TreeNode> {
     Ok(node_for(root, root))
 }
 
+/// Write a binary asset (a pasted/dropped image, …) to disk, creating parent dirs as needed.
+/// Used for the editor's `.attachments` folder so pasted images live alongside the vault.
+pub fn write_asset(abs_path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = abs_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(abs_path, bytes).with_context(|| format!("write {}", abs_path.display()))?;
+    Ok(())
+}
+
 /// Read a non-markdown asset (image/pdf/…) as a base64 data URL the webview can render directly.
 pub fn read_asset(abs_path: &Path) -> Result<String> {
     use base64::Engine;

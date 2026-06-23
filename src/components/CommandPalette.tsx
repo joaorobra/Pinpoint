@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import {
   MagnifyingGlass,
   FileText,
+  TextAa,
   Plus,
   ArrowsClockwise,
   GearSix,
@@ -11,6 +12,8 @@ import {
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
 import { fuzzyScore } from "../fuzzy";
+import { api } from "../api";
+import type { SearchHit } from "../types";
 import { transition, slideFade } from "../motion";
 
 /** A page the palette can jump to. */
@@ -36,25 +39,76 @@ interface Props {
   onClose: () => void;
 }
 
-/** A flattened, rankable palette entry — either a page jump or a command. */
+/** A flattened, rankable palette entry — a page jump, a command, or a body-content hit. */
 type Entry =
   | { kind: "page"; key: string; label: string; sub: string; icon: PhosphorIcon; run: () => void }
-  | { kind: "action"; key: string; label: string; sub: string; icon: PhosphorIcon; run: () => void };
+  | { kind: "action"; key: string; label: string; sub: string; icon: PhosphorIcon; run: () => void }
+  | { kind: "hit"; key: string; label: string; sub: string; snippet: string; icon: PhosphorIcon; run: () => void };
+
+/** Escape a string for safe use inside a RegExp (search terms are arbitrary user text). */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Wrap each occurrence of the query's terms in a snippet with <mark> so the matched words stand
+ * out. Splits the query on whitespace (mirrors the backend's AND-of-terms matching) and matches
+ * case-insensitively. Returns an array of strings/elements suitable for rendering inline.
+ */
+function highlight(text: string, query: string): React.ReactNode {
+  const terms = query.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
+  if (terms.length === 0) return text;
+  // Split on the terms with a capturing group so matches land on odd indices; `split` returns the
+  // captured delimiters interleaved with the surrounding text, so we don't need a stateful `.test`.
+  const re = new RegExp(`(${terms.join("|")})`, "ig");
+  const lc = new Set(terms.map((t) => t.toLowerCase().replace(/\\(.)/g, "$1")));
+  return text.split(re).map((part, i) =>
+    lc.has(part.toLowerCase()) ? <mark key={i} className="palette-mark">{part}</mark> : part
+  );
+}
 
 /**
  * Cmd/Ctrl+K command palette. Fuzzy-searches the vault's pages and a small set of global actions,
- * keyboard-driven (↑/↓ to move, Enter to run, Esc to close). Reuses the same `fuzzyScore` ranking
- * as the editor's slash/wikilink menus so matching feels consistent across the app.
+ * and runs a full-text search across every `.md` body so typed words also surface pages that
+ * mention them. Keyboard-driven (↑/↓ to move, Enter to run, Esc to close). Reuses the same
+ * `fuzzyScore` ranking as the editor's slash/wikilink menus so matching feels consistent.
  */
 export default function CommandPalette({ pages, actions, onOpenPage, onClose }: Props) {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
+  // Body-content matches for the current query, fetched async from the backend (debounced).
+  const [hits, setHits] = useState<SearchHit[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  // Full-text search across every `.md` body in the vault. Debounced so each keystroke doesn't hit
+  // the index, and guarded so a slow response for a stale query can't overwrite a newer one.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setHits([]);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api
+        .searchPages(q)
+        .then((r) => {
+          if (!cancelled) setHits(r);
+        })
+        .catch(() => {
+          if (!cancelled) setHits([]);
+        });
+    }, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [query]);
 
   const entries = useMemo<Entry[]>(() => {
     const actionEntries: Entry[] = actions.map((a) => ({
@@ -79,14 +133,31 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
       // Empty query: show actions first, then a slice of pages so the palette is never blank.
       return [...actionEntries, ...pageEntries.slice(0, 50)];
     }
-    // Rank everything by the best score across its label and sub-text, drop non-matches.
-    return [...actionEntries, ...pageEntries]
+    // Rank actions + pages by the best fuzzy score across label and sub-text, drop non-matches.
+    const ranked = [...actionEntries, ...pageEntries]
       .map((e) => ({ e, s: Math.max(fuzzyScore(q, e.label), fuzzyScore(q, e.sub) - 1) }))
       .filter((x) => x.s >= 0)
       .sort((a, b) => b.s - a.s)
       .slice(0, 50)
       .map((x) => x.e);
-  }, [query, pages, actions, onOpenPage]);
+
+    // Append body-content hits below the name/path matches, skipping pages already shown above so
+    // the same page isn't listed twice. This is what lets Ctrl+K find text *inside* any `.md` file.
+    const shownPaths = new Set(ranked.filter((e) => e.kind === "page").map((e) => e.key));
+    const hitEntries: Entry[] = hits
+      .filter((h) => !shownPaths.has("p:" + h.rel_path))
+      .map((h) => ({
+        kind: "hit",
+        key: "h:" + h.rel_path,
+        label: h.title,
+        sub: h.rel_path,
+        snippet: h.snippet,
+        icon: FileText,
+        run: () => onOpenPage(h.rel_path),
+      }));
+
+    return [...ranked, ...hitEntries];
+  }, [query, pages, actions, hits, onOpenPage]);
 
   // Keep the selection in range as the result set shrinks.
   useEffect(() => {
@@ -141,7 +212,7 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
           <input
             ref={inputRef}
             className="palette-input"
-            placeholder="Jump to a page or run a command…"
+            placeholder="Search pages and their contents, or run a command…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
@@ -153,20 +224,32 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
           ) : (
             entries.map((entry, i) => {
               const Ico = entry.icon;
+              // Header above the first content hit, separating "found inside pages" from name matches.
+              const firstHit = entry.kind === "hit" && (i === 0 || entries[i - 1].kind !== "hit");
               return (
-                <button
-                  key={entry.key}
-                  className={`palette-item${i === index ? " active" : ""}`}
-                  onMouseEnter={() => setIndex(i)}
-                  onClick={() => run(entry)}
-                >
-                  <span className="palette-item-icon"><Ico size={17} /></span>
-                  <span className="palette-item-text">
-                    <span className="palette-item-label">{entry.label}</span>
-                    <span className="palette-item-sub">{entry.sub}</span>
-                  </span>
-                  {i === index && <ArrowElbowDownLeft size={14} className="palette-item-enter" />}
-                </button>
+                <div key={entry.key} className="palette-row">
+                  {firstHit && (
+                    <div className="palette-section">
+                      <TextAa size={12} /> Found in pages
+                    </div>
+                  )}
+                  <button
+                    className={`palette-item${i === index ? " active" : ""}`}
+                    onMouseEnter={() => setIndex(i)}
+                    onClick={() => run(entry)}
+                  >
+                    <span className="palette-item-icon"><Ico size={17} /></span>
+                    <span className="palette-item-text">
+                      <span className="palette-item-label">{entry.label}</span>
+                      {entry.kind === "hit" && entry.snippet ? (
+                        <span className="palette-item-snippet">{highlight(entry.snippet, query)}</span>
+                      ) : (
+                        <span className="palette-item-sub">{entry.sub}</span>
+                      )}
+                    </span>
+                    {i === index && <ArrowElbowDownLeft size={14} className="palette-item-enter" />}
+                  </button>
+                </div>
               );
             })
           )}

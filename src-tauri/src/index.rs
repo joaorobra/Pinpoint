@@ -59,6 +59,84 @@ pub fn open(vault_root: &Path) -> Result<Connection> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SearchHit {
+    pub rel_path: String,
+    pub title: String,
+    /// Short window of body text around the first match (or empty for a title-only hit).
+    pub snippet: String,
+    /// 0-based body line the snippet came from, or null when only the title matched.
+    pub line: Option<i64>,
+}
+
+/// Full-text search over page titles + bodies for the command palette.
+///
+/// The index already stores every page's full `body`, so we scan it here rather than re-reading
+/// files. Matching is case-insensitive substring (each whitespace-separated term must appear
+/// somewhere in title or body — AND semantics), which is forgiving enough for a "find inside my
+/// notes" box without needing SQLite FTS. For each page we surface the first body line containing
+/// a term as a trimmed snippet. Results are capped at `limit`.
+pub fn search_pages(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare("SELECT rel_path, title, body FROM pages")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+
+    let mut hits = Vec::new();
+    for row in rows {
+        let (rel_path, title, body) = row?;
+        let title_lc = title.to_lowercase();
+        let body_lc = body.to_lowercase();
+        // Every term must appear somewhere in the page (title or body).
+        if !terms.iter().all(|t| title_lc.contains(t) || body_lc.contains(t)) {
+            continue;
+        }
+        let (snippet, line) = body_snippet(&body, &body_lc, &terms);
+        hits.push(SearchHit { rel_path, title, snippet, line });
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    Ok(hits)
+}
+
+/// Find the first body line containing any term and return a trimmed snippet of it plus its
+/// 0-based line index. Returns ("", None) when no term is in the body (title-only match).
+fn body_snippet(body: &str, body_lc: &str, terms: &[String]) -> (String, Option<i64>) {
+    // Locate the earliest match position across all terms in the lowercased body.
+    let first = terms.iter().filter_map(|t| body_lc.find(t.as_str())).min();
+    let Some(pos) = first else {
+        return (String::new(), None);
+    };
+    // Map the byte offset to a line index + that line's text.
+    let line_start = body[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = body[pos..].find('\n').map(|i| pos + i).unwrap_or(body.len());
+    let line_no = body[..pos].matches('\n').count() as i64;
+    let snippet = body[line_start..line_end].trim();
+    // Keep snippets short so a long paragraph doesn't blow up the palette row.
+    const MAX: usize = 160;
+    let snippet = if snippet.chars().count() > MAX {
+        let truncated: String = snippet.chars().take(MAX).collect();
+        format!("{}…", truncated.trim_end())
+    } else {
+        snippet.to_string()
+    };
+    (snippet, Some(line_no))
+}
+
+#[derive(Debug, Serialize)]
 pub struct TaskRow {
     pub rel_path: String,
     pub line: i64,
@@ -354,6 +432,92 @@ pub fn all_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 rrule: r.get(5)?,
                 tags: r.get(6)?,
                 done_dates: r.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagInfo {
+    pub tag: String,
+    /// How many distinct pages carry this tag.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagPage {
+    pub rel_path: String,
+    pub title: String,
+}
+
+/// One edge of a tag's connection graph: another tag that co-occurs on shared pages.
+#[derive(Debug, Serialize)]
+pub struct TagConnection {
+    pub tag: String,
+    /// Number of pages carrying BOTH the focus tag and this one.
+    pub shared: i64,
+}
+
+/// All tags in the vault with the count of distinct pages each appears on, most-used first.
+///
+/// The `tags` table holds duplicates (a tag can come from frontmatter *and* several body lines),
+/// so we count `DISTINCT rel_path` per tag.
+pub fn all_tags(conn: &Connection) -> Result<Vec<TagInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT tag, COUNT(DISTINCT rel_path) AS c
+         FROM tags
+         GROUP BY tag
+         ORDER BY c DESC, tag ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(TagInfo {
+                tag: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The distinct pages carrying `tag`, as (rel_path, title), title-sorted.
+pub fn tag_pages(conn: &Connection, tag: &str) -> Result<Vec<TagPage>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT p.rel_path, p.title
+         FROM tags t JOIN pages p ON p.rel_path = t.rel_path
+         WHERE t.tag = ?1
+         ORDER BY p.title ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![tag], |r| {
+            Ok(TagPage {
+                rel_path: r.get(0)?,
+                title: r.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Tags that co-occur with `tag` on shared pages — the "connections" surfaced in the Tags view.
+///
+/// For every page carrying the focus `tag`, find the *other* distinct tags on those same pages and
+/// count how many shared pages each appears on. This is the graph of how pages link up through tags.
+pub fn tag_connections(conn: &Connection, tag: &str) -> Result<Vec<TagConnection>> {
+    let mut stmt = conn.prepare(
+        "SELECT other.tag, COUNT(DISTINCT other.rel_path) AS shared
+         FROM tags other
+         WHERE other.tag != ?1
+           AND other.rel_path IN (SELECT rel_path FROM tags WHERE tag = ?1)
+         GROUP BY other.tag
+         ORDER BY shared DESC, other.tag ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![tag], |r| {
+            Ok(TagConnection {
+                tag: r.get(0)?,
+                shared: r.get(1)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;

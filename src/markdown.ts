@@ -120,6 +120,10 @@ export function docToMarkdown(doc: Node): string {
         // Inline query → a fenced `query` block, so it round-trips as plain markdown.
         blocks.push("```query\n" + (node.attrs?.dsl ?? "") + "\n```");
         break;
+      case "image":
+        // Block image (pasted/dropped) → standard markdown. `src` is the raw vault-relative path.
+        blocks.push(`![${node.attrs?.alt ?? ""}](${node.attrs?.src ?? ""})`);
+        break;
       case "horizontalRule":
         blocks.push("---");
         break;
@@ -232,6 +236,13 @@ export function markdownToHtml(md: string): string {
     }
     if (/^(---|\*\*\*|___)\s*$/.test(line)) {
       html.push("<hr>");
+      i++;
+      continue;
+    }
+    // A line that is solely an image → a block image node (avoids an empty wrapping paragraph).
+    const imgOnly = line.match(/^!\[([^\]]*)\]\(([^)]+)\)\s*$/);
+    if (imgOnly) {
+      html.push(`<img alt="${escapeHtml(imgOnly[1])}" src="${imgOnly[2].replace(/"/g, "&quot;")}">`);
       i++;
       continue;
     }

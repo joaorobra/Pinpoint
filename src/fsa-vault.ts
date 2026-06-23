@@ -9,7 +9,7 @@
 //
 // Supported in Chromium browsers (Chrome/Edge/Opera). Firefox/Safari lack the API — see isWebFsSupported.
 
-import type { AssetData, DbSchema, ParsedDoc, QueryResult, RecentVault, Settings, TaskRow, TreeNode, TrashEntry } from "./types";
+import type { AssetData, DbSchema, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
 import { DEFAULT_SETTINGS, assetKindFor } from "./types";
 
 /* ---------------------------------------------------------------------------
@@ -896,6 +896,20 @@ export const webApi = {
     return { frontmatter, body };
   },
 
+  // Persist a binary asset (pasted/dropped image). Writes the bytes straight through the FSA
+  // writable stream — no base64 round-trip needed in the browser host.
+  writeAsset: async (relPath: string, bytes: Uint8Array): Promise<void> => {
+    const fh = await fileAt(relPath, true);
+    const w = await fh.createWritable();
+    // Copy into a fresh, plain-ArrayBuffer-backed view before writing. A bare Uint8Array is typed
+    // as Uint8Array<ArrayBufferLike> (which includes SharedArrayBuffer) and the FSA / Blob typings
+    // reject that; a freshly-allocated Uint8Array is backed by a concrete ArrayBuffer.
+    const buf = new Uint8Array(bytes.length);
+    buf.set(bytes);
+    await w.write(buf);
+    await w.close();
+  },
+
   writePage: async (relPath: string, frontmatter: Record<string, unknown>, body: string): Promise<void> => {
     await writeFileText(relPath, serializeDoc(frontmatter, body));
     pageCache.set(relPath, {
@@ -1051,6 +1065,77 @@ export const webApi = {
     const out: TaskRow[] = [];
     for (const p of pageCache.values()) out.push(...extractTasks(p.rel_path, p.body));
     return out;
+  },
+
+  // Full-text search over page titles + bodies (mirror of index::search_pages). Each
+  // whitespace-separated term must appear in the title or body (AND); the snippet is the first
+  // body line carrying a term. Capped to keep parity with the Rust host.
+  searchPages: async (query: string): Promise<SearchHit[]> => {
+    if (pageCache.size === 0) await scan();
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return [];
+    const MAX_SNIPPET = 160;
+    const out: SearchHit[] = [];
+    for (const p of pageCache.values()) {
+      const titleLc = p.name.toLowerCase();
+      const bodyLc = p.body.toLowerCase();
+      if (!terms.every((t) => titleLc.includes(t) || bodyLc.includes(t))) continue;
+
+      // Earliest term match in the body → its line + a trimmed snippet (title-only hit otherwise).
+      let pos = -1;
+      for (const t of terms) {
+        const i = bodyLc.indexOf(t);
+        if (i !== -1 && (pos === -1 || i < pos)) pos = i;
+      }
+      let snippet = "";
+      let line: number | null = null;
+      if (pos !== -1) {
+        const lineStart = p.body.lastIndexOf("\n", pos - 1) + 1;
+        const nl = p.body.indexOf("\n", pos);
+        const lineEnd = nl === -1 ? p.body.length : nl;
+        line = pos === 0 ? 0 : (p.body.slice(0, pos).match(/\n/g)?.length ?? 0);
+        const raw = p.body.slice(lineStart, lineEnd).trim();
+        snippet = raw.length > MAX_SNIPPET ? raw.slice(0, MAX_SNIPPET).trimEnd() + "…" : raw;
+      }
+      out.push({ rel_path: p.rel_path, title: p.name, snippet, line });
+      if (out.length >= 50) break;
+    }
+    return out;
+  },
+
+  // ---- Tags (mirror of the Rust index queries) ----
+  // The Rust host counts over the `tags` table; here we recompute from pageTags() over the cache.
+  listTags: async (): Promise<TagInfo[]> => {
+    if (pageCache.size === 0) await scan();
+    const counts = new Map<string, number>();
+    for (const p of pageCache.values())
+      for (const tag of pageTags(p)) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  },
+
+  tagPages: async (tag: string): Promise<TagPage[]> => {
+    if (pageCache.size === 0) await scan();
+    const out: TagPage[] = [];
+    for (const p of pageCache.values())
+      if (pageTags(p).has(tag)) out.push({ rel_path: p.rel_path, title: p.name });
+    return out.sort((a, b) => a.title.localeCompare(b.title));
+  },
+
+  tagConnections: async (tag: string): Promise<TagConnection[]> => {
+    if (pageCache.size === 0) await scan();
+    // For each page carrying `tag`, count the *other* tags it shares.
+    const shared = new Map<string, number>();
+    for (const p of pageCache.values()) {
+      const tags = pageTags(p);
+      if (!tags.has(tag)) continue;
+      for (const other of tags)
+        if (other !== tag) shared.set(other, (shared.get(other) ?? 0) + 1);
+    }
+    return [...shared.entries()]
+      .map(([t, n]) => ({ tag: t, shared: n }))
+      .sort((a, b) => b.shared - a.shared || a.tag.localeCompare(b.tag));
   },
 
   // Toggle a task's done state by rewriting its source line in place (mirrors the Rust command).

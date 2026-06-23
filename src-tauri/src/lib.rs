@@ -124,6 +124,25 @@ fn read_asset(rel_path: String, state: State<AppState>) -> Result<String, String
     vault::read_asset(&session.root.join(&rel_path)).map_err(err)
 }
 
+/// Write a binary asset (a pasted/dropped image) into the vault. `data_base64` is the image
+/// bytes base64-encoded (mirrors how `read_asset` returns them) so they cross the IPC boundary
+/// compactly. `rel_path` is vault-relative, typically `.attachments/<name>`.
+#[tauri::command]
+fn write_asset(
+    rel_path: String,
+    data_base64: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    use base64::Engine;
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(err)?;
+    vault::write_asset(&session.root.join(&rel_path), &bytes).map_err(err)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn write_page(
     rel_path: String,
@@ -324,6 +343,39 @@ fn list_tasks(state: State<AppState>) -> Result<Vec<index::TaskRow>, String> {
     index::all_tasks(&session.conn).map_err(err)
 }
 
+/// Full-text search over page titles + bodies (the command palette's "found inside pages"
+/// results). Capped server-side so a broad query can't return the whole vault.
+#[tauri::command]
+fn search_pages(query: String, state: State<AppState>) -> Result<Vec<index::SearchHit>, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    index::search_pages(&session.conn, &query, 50).map_err(err)
+}
+
+/// All tags in the vault, each with how many distinct pages carry it (Tags view sidebar).
+#[tauri::command]
+fn list_tags(state: State<AppState>) -> Result<Vec<index::TagInfo>, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    index::all_tags(&session.conn).map_err(err)
+}
+
+/// The pages carrying a given tag (Tags view: pages list for the selected tag).
+#[tauri::command]
+fn tag_pages(tag: String, state: State<AppState>) -> Result<Vec<index::TagPage>, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    index::tag_pages(&session.conn, &tag).map_err(err)
+}
+
+/// Tags that co-occur with a given tag on shared pages (Tags view: connections graph).
+#[tauri::command]
+fn tag_connections(tag: String, state: State<AppState>) -> Result<Vec<index::TagConnection>, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    index::tag_connections(&session.conn, &tag).map_err(err)
+}
+
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Result<settings::Settings, String> {
     let guard = state.inner.lock().unwrap();
@@ -349,6 +401,7 @@ pub fn run() {
             get_tree,
             read_page,
             read_asset,
+            write_asset,
             write_page,
             create_page,
             create_database,
@@ -363,7 +416,11 @@ pub fn run() {
             rename_path,
             reindex,
             run_query,
+            search_pages,
             list_tasks,
+            list_tags,
+            tag_pages,
+            tag_connections,
             toggle_task,
             get_settings,
             save_settings,

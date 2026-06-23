@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { QueryResult } from "../types";
@@ -9,7 +9,16 @@ import QueryResultView from "./QueryResultView";
 const OP_OPTIONS: SelectOption[] = OPS.map((o) => ({ value: o, label: o }));
 const KIND_OPTIONS: SelectOption[] = KINDS.map((k) => ({ value: k, label: k }));
 
-export default function QueryView() {
+interface Props {
+  /**
+   * A tag handed over from the Tags view to query. Setting it switches to the builder, seeds the
+   * FROM clause with `#tag`, and runs immediately. `n` bumps on every hand-off so re-querying the
+   * same tag re-triggers the effect.
+   */
+  seedFrom?: { tag: string; n: number } | null;
+}
+
+export default function QueryView({ seedFrom }: Props) {
   const [mode, setMode] = useState<"builder" | "dsl">("builder");
   const [kind, setKind] = useState("TABLE");
   const [cols, setCols] = useState("file.name, status");
@@ -22,15 +31,28 @@ export default function QueryView() {
 
   const effectiveDsl = mode === "builder" ? compile({ kind, cols, from, filters, sort }) : dsl;
 
-  const run = async () => {
+  const run = async (overrideDsl?: string) => {
     setError(null);
     try {
-      setResult(await api.runQuery(effectiveDsl));
+      setResult(await api.runQuery(overrideDsl ?? effectiveDsl));
     } catch (e) {
       setError(String(e));
       setResult(null);
     }
   };
+
+  // A tag sent over from the Tags view: list pages FROM that tag and run right away. We compile the
+  // DSL here (rather than waiting for state to settle) so the first run reflects the new FROM.
+  useEffect(() => {
+    if (!seedFrom) return;
+    const fromExpr = `#${seedFrom.tag}`;
+    setMode("builder");
+    setKind("LIST");
+    setFrom(fromExpr);
+    setFilters([{ field: "", op: "=", value: "" }]);
+    run(compile({ kind: "LIST", cols, from: fromExpr, filters: [], sort }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedFrom?.tag, seedFrom?.n]);
 
   return (
     <div className="panel query-view">
@@ -101,7 +123,7 @@ export default function QueryView() {
 
       <div className="row">
         <code className="dsl-preview">{effectiveDsl.replace(/\n/g, " ")}</code>
-        <button className="primary" onClick={run}>
+        <button className="primary" onClick={() => run()}>
           Run
         </button>
       </div>
@@ -116,7 +138,7 @@ export default function QueryView() {
             onToggle={(t) =>
               api
                 .toggleTask(t.rel_path, t.line, t.occurrence ?? null)
-                .then(run)
+                .then(() => run())
                 .catch((e) => setError(String(e)))
             }
           />
