@@ -90,9 +90,14 @@ const tauriApi = {
   writeAsset: (relPath: string, bytes: Uint8Array) =>
     invoke<void>("write_asset", { relPath, dataBase64: bytesToBase64(bytes) }),
   createPage: (relPath: string, body: string) => invoke<void>("create_page", { relPath, body }),
+  /** Create a plain (possibly empty) folder at `relPath`. */
+  createFolder: (relPath: string) => invoke<void>("create_folder", { relPath }),
   /** Create a database folder (`.pinpoint-db.json` schema) at `relPath`; `name` seeds the schema. */
   createDatabase: (relPath: string, name: string) =>
     invoke<void>("create_database", { relPath, name }),
+  /** Convert an existing folder at `relPath` into a database; its `.md` files become rows. */
+  convertToDatabase: (relPath: string, name: string) =>
+    invoke<void>("convert_to_database", { relPath, name }),
   /** Read a database folder's schema (`.pinpoint-db.json`). */
   readDbSchema: (relPath: string) => invoke<DbSchema>("read_db_schema", { relPath }),
   /** Persist a database folder's schema. */
@@ -125,6 +130,13 @@ const tauriApi = {
     invoke<void>("toggle_task", { relPath, line, occurrence }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (s: Settings) => invoke<void>("save_settings", { s }),
+  // Themes: raw JSON blobs stored under `.themes/`. The frontend owns the `Theme` shape.
+  listThemes: () => invoke<string[]>("list_themes"),
+  readTheme: (name: string) => invoke<string>("read_theme", { name }),
+  writeTheme: (name: string, json: string) => invoke<void>("write_theme", { name, json }),
+  deleteTheme: (name: string) => invoke<void>("delete_theme", { name }),
+  renameTheme: (from: string, to: string) => invoke<void>("rename_theme", { from, to }),
+  seedThemes: (starters: [string, string][]) => invoke<number>("seed_themes", { starters }),
 };
 
 // One object, two backends. Shapes are identical so callers don't branch.

@@ -614,6 +614,104 @@ async function writeSettings(s: Settings): Promise<void> {
 }
 
 /* ---------------------------------------------------------------------------
+   Themes — `.themes/<name>.json` inside the vault. Stored as raw JSON strings;
+   the caller (theme editor) owns the `Theme` shape. Mirrors themes.rs.
+--------------------------------------------------------------------------- */
+
+/** Reject names that aren't a plain file stem (parity with the Rust `safe_stem`). */
+function safeThemeStem(name: string): string {
+  const n = name.trim();
+  if (!n || n.includes("/") || n.includes("\\") || n.includes("..") || n.startsWith(".")) {
+    throw new Error(`invalid theme name: ${name}`);
+  }
+  return n;
+}
+
+/** Raw JSON of every `.themes/*.json` file, in directory order. Missing folder → empty list. */
+async function listThemesWeb(): Promise<string[]> {
+  const out: string[] = [];
+  let dir: FsDirHandle;
+  try {
+    dir = await dirAt(".themes", false);
+  } catch {
+    return out;
+  }
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind === "file" && name.toLowerCase().endsWith(".json")) {
+      try {
+        out.push(await readFileText(handle as FsFileHandle));
+      } catch {
+        /* skip unreadable theme files */
+      }
+    }
+  }
+  return out;
+}
+
+async function readThemeWeb(name: string): Promise<string> {
+  const stem = safeThemeStem(name);
+  const fh = await fileAt(`.themes/${stem}.json`, false);
+  return readFileText(fh);
+}
+
+async function writeThemeWeb(name: string, json: string): Promise<void> {
+  const stem = safeThemeStem(name);
+  const fh = await fileAt(`.themes/${stem}.json`, true);
+  const w = await fh.createWritable();
+  await w.write(json);
+  await w.close();
+}
+
+async function deleteThemeWeb(name: string): Promise<void> {
+  const stem = safeThemeStem(name);
+  try {
+    const dir = await dirAt(".themes", false);
+    await dir.removeEntry(`${stem}.json`);
+  } catch {
+    /* already gone — succeed quietly, like the Rust side */
+  }
+}
+
+async function renameThemeWeb(from: string, to: string): Promise<void> {
+  if (from === to) return;
+  // No native rename in FSA; copy the body to the new stem then drop the old file.
+  const body = await readThemeWeb(from);
+  await writeThemeWeb(to, body);
+  await deleteThemeWeb(from);
+}
+
+/**
+ * Seed starter themes whose files are missing, leaving existing ones untouched (parity with
+ * `seed_if_empty`). New built-in starters reach vaults opened before they shipped, without ever
+ * clobbering a theme the user has edited.
+ */
+async function seedThemesWeb(starters: [string, string][]): Promise<number> {
+  // Existing theme names (lower-cased stems) so we only write the ones that are missing.
+  const existing = new Set<string>();
+  try {
+    const dir = await dirAt(".themes", false);
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === "file" && name.toLowerCase().endsWith(".json")) {
+        existing.add(name.slice(0, -".json".length).toLowerCase());
+      }
+    }
+  } catch {
+    /* no folder yet — nothing exists, write all starters below */
+  }
+  let n = 0;
+  for (const [name, json] of starters) {
+    if (existing.has(name.toLowerCase())) continue;
+    try {
+      await writeThemeWeb(name, json);
+      n++;
+    } catch {
+      /* skip a bad starter */
+    }
+  }
+  return n;
+}
+
+/* ---------------------------------------------------------------------------
    Public adapter — same shape as the Tauri `api` object + pickVaultFolder.
 --------------------------------------------------------------------------- */
 
@@ -933,6 +1031,21 @@ export const webApi = {
     await writeFileText(relPath, body);
   },
 
+  // Create a plain folder. Mirrors the Rust `create_folder`: refuse to merge into an existing one.
+  createFolder: async (relPath: string): Promise<void> => {
+    const slash = relPath.lastIndexOf("/");
+    const parent = await dirAt(slash >= 0 ? relPath.slice(0, slash) : "", true);
+    const leaf = slash >= 0 ? relPath.slice(slash + 1) : relPath;
+    let exists = true;
+    try {
+      await parent.getDirectoryHandle(leaf);
+    } catch {
+      exists = false;
+    }
+    if (exists) throw new Error(`Folder already exists: ${relPath}`);
+    await parent.getDirectoryHandle(leaf, { create: true });
+  },
+
   // Create a database: a folder containing a `.pinpoint-db.json` schema. Mirrors the Rust
   // `create_database` default schema so a DB made on either host is recognised by the other.
   createDatabase: async (relPath: string, name: string): Promise<void> => {
@@ -945,6 +1058,22 @@ export const webApi = {
       exists = false;
     }
     if (exists) throw new Error(`Folder already exists: ${relPath}`);
+    await writeFileText(`${relPath}/.pinpoint-db.json`, JSON.stringify(defaultDbSchema(name), null, 2));
+  },
+
+  // Convert an *existing* folder into a database by dropping a default `.pinpoint-db.json` into it.
+  // Mirrors the Rust `convert_to_database`: the folder must already exist and not already be a DB.
+  convertToDatabase: async (relPath: string, name: string): Promise<void> => {
+    const slash = relPath.lastIndexOf("/");
+    const parent = await dirAt(slash >= 0 ? relPath.slice(0, slash) : "", false);
+    await parent.getDirectoryHandle(slash >= 0 ? relPath.slice(slash + 1) : relPath); // throws if missing
+    try {
+      await fileAt(`${relPath}/.pinpoint-db.json`, false);
+      throw new Error(`Folder is already a database: ${relPath}`);
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Folder is already a database")) throw e;
+      // schema file absent — good, proceed to write it
+    }
     await writeFileText(`${relPath}/.pinpoint-db.json`, JSON.stringify(defaultDbSchema(name), null, 2));
   },
 
@@ -1162,4 +1291,11 @@ export const webApi = {
 
   getSettings: (): Promise<Settings> => readSettings(),
   saveSettings: (s: Settings): Promise<void> => writeSettings(s),
+
+  listThemes: (): Promise<string[]> => listThemesWeb(),
+  readTheme: (name: string): Promise<string> => readThemeWeb(name),
+  writeTheme: (name: string, json: string): Promise<void> => writeThemeWeb(name, json),
+  deleteTheme: (name: string): Promise<void> => deleteThemeWeb(name),
+  renameTheme: (from: string, to: string): Promise<void> => renameThemeWeb(from, to),
+  seedThemes: (starters: [string, string][]): Promise<number> => seedThemesWeb(starters),
 };

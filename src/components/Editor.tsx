@@ -10,7 +10,7 @@ import TableCell from "@tiptap/extension-table-cell";
 import { WikiLink } from "./WikiLink";
 import { ImageNode } from "./ImageNode";
 import { dialogs } from "./Dialogs";
-import { Extension } from "@tiptap/core";
+import { Extension, InputRule } from "@tiptap/core";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type React from "react";
@@ -32,6 +32,7 @@ import {
   Repeat,
   Clock,
   FilePlus,
+  FileText,
   LinkSimple,
   Plus,
   Table,
@@ -43,6 +44,7 @@ import QueryHelper from "./QueryHelper";
 import { QueryBlock } from "./QueryBlock";
 import { docToMarkdown, markdownToHtml } from "../markdown";
 import { formatDate } from "../dateformat";
+import { CURSOR_SENTINEL } from "../templates";
 
 /** A page the `/link` command can reference. */
 export interface PageRef {
@@ -59,6 +61,14 @@ interface Props {
   reloadKey: string;
   /** Pages available for the `/link` slash command (wikilink references). */
   pages?: PageRef[];
+  /** Templates available for the `/template` slash command. */
+  templates?: { rel_path: string; name: string }[];
+  /**
+   * Resolve a chosen template (by rel_path) to its variable-filled markdown body, prompting the
+   * host for any custom {{variables}}. Resolves null if cancelled. The editor inserts the body at
+   * the caret. When absent, `/template` is hidden from the slash menu.
+   */
+  onInsertTemplate?: (relPath: string) => Promise<string | null>;
   /** Existing tags in the vault, suggested by the `#` autocomplete (Obsidian-style). */
   tags?: string[];
   /**
@@ -86,6 +96,12 @@ interface Props {
    */
   onAddAttachment?: (file: { bytes: Uint8Array; mime: string; name?: string }) => Promise<string | null>;
   /**
+   * Called when a selected image whose file lives in `.attachments` is deleted (Delete/Backspace),
+   * once no other reference to that file remains in the document. The host decides the file's fate
+   * (keep it, move it to Trash, or delete it permanently). `relPath` is the orphaned file's path.
+   */
+  onAttachmentRemoved?: (relPath: string) => void;
+  /**
    * Called after an inline TASK query block toggles a task on disk, with that task's vault-relative
    * path. The host reloads the editor when the path is the open document so its own checkboxes
    * refresh without a manual F5.
@@ -97,11 +113,30 @@ interface Props {
   timeFormat?: string;
   /** Pattern for rendering task due-dates in inline TASK query blocks. */
   taskDateFormat?: string;
+  /** Current editor page-column width in px (drives the draggable ruler and the column max-width). */
+  pageWidth?: number;
+  /**
+   * Persist a new page width (px) chosen via the ruler. Applies to all pages — the host clamps and
+   * saves it to settings. Omit to disable the ruler entirely.
+   */
+  onPageWidthChange?: (px: number) => void;
   /**
    * Optional content rendered at the top of the scrolling editor column, above the document body
    * (used for the database-row properties panel). Scrolls with the doc and shares its width.
    */
   headerSlot?: React.ReactNode;
+  /**
+   * Imperative "insert this text at the caret" signal, used by the template builder's chips. Bump
+   * `n` (with the new `text`) to insert; the editor inserts once per distinct `n`. A signal rather
+   * than a callback so the host stays declarative and React de-dupes re-renders.
+   */
+  insertText?: { text: string; n: number };
+  /** As-you-type symbol replacements: trigger → output (e.g. `"->": "→"`). From settings. */
+  smartReplacements?: Record<string, string>;
+  /** Text-expansion snippets: name → inserted text, fired as `<delimiter>name<delimiter>`. */
+  snippets?: Record<string, string>;
+  /** Delimiter that wraps a snippet name to fire it (default `_`). */
+  snippetDelimiter?: string;
 }
 
 /** Slash-menu command groups, in display order. */
@@ -131,6 +166,10 @@ interface SlashContext {
   requestDate: () => Promise<string | null>;
   /** Open the inline query-helper popup to compose a query and insert it as a query block. */
   requestQuery: () => void;
+  /** Templates available for `/template` (empty hides the command). */
+  templates: { rel_path: string; name: string }[];
+  /** Resolve a template to its filled markdown body (prompting for variables), or null if cancelled. */
+  onInsertTemplate?: (relPath: string) => Promise<string | null>;
 }
 
 /**
@@ -183,15 +222,41 @@ const CLOSERS = new Set(Object.values(PAIRS));
  *  - typing an opener inserts the matching closer and leaves the caret between them;
  *  - with a non-empty selection, the opener/closer wrap the selection;
  *  - typing a closer right before the same auto-inserted closer just steps over it.
+ *
+ * `getReplacements` lets the step-over path also apply a symbol replacement, so triggers that end in
+ * an auto-closed bracket (e.g. `(tm)` → `™`, `(c)` → `©`) still fire: stepping over the `)` isn't a
+ * text-input transaction, so the SmartReplace input rule never sees it — we resolve it here instead.
  */
-function handleAutoClose(view: any, from: number, to: number, text: string): boolean {
+function handleAutoClose(
+  view: any,
+  from: number,
+  to: number,
+  text: string,
+  getReplacements: () => Record<string, string>
+): boolean {
   const { state } = view;
   const close = PAIRS[text];
   const nextChar = state.doc.textBetween(to, Math.min(to + 1, state.doc.content.size));
 
   // Step over an existing closing char instead of inserting a duplicate.
   if (from === to && CLOSERS.has(text) && nextChar === text) {
-    view.dispatch(state.tr.setSelection(TextSelection.near(state.doc.resolve(to + 1))));
+    const tr = state.tr;
+    // Resolve a symbol whose trigger ends with this just-stepped-over closer (e.g. `(tm)` → `™`).
+    // The trigger = up-to-5 chars before the caret + the closer being typed. `windowStart` anchors
+    // those preceding chars so we can map resolveSymbol's `back` count to a real doc range.
+    const windowStart = Math.max(0, from - 5);
+    const before = state.doc.textBetween(windowStart, from) + text;
+    const prevChar = windowStart > 0 ? state.doc.textBetween(windowStart - 1, windowStart) : "";
+    const hit = resolveSymbol(before, prevChar, getReplacements());
+    if (hit) {
+      // `back` counts trigger chars from the END of `before` (… + the closer). The closer occupies
+      // [to, to+1]; the preceding `back-1` chars occupy [from-(back-1), from]. Replace the whole span.
+      tr.insertText(hit.output, from - (hit.back - 1), to + 1);
+      view.dispatch(tr);
+      return true;
+    }
+    // No trigger — just step over the closer.
+    view.dispatch(tr.setSelection(TextSelection.near(state.doc.resolve(to + 1))));
     return true;
   }
 
@@ -276,6 +341,153 @@ const MoveBlock = Extension.create({
       "Alt-ArrowDown": ({ editor }) =>
         moveBlock(editor.state, editor.view.dispatch, 1),
     };
+  },
+});
+
+/** Escape a literal trigger string for use inside a RegExp. */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface SmartReplaceConfig {
+  /** Symbol replacements: trigger → output (e.g. `"->": "→"`). */
+  replacements: Record<string, string>;
+  /** Snippets: name → inserted text. Fired as `<delim>name<delim>`. */
+  snippets: Record<string, string>;
+  /** Delimiter wrapping a snippet name (default `_`). */
+  delimiter: string;
+}
+
+interface SmartReplaceOptions {
+  /**
+   * Returns the live config. A getter (not a static object) so Settings edits apply without
+   * re-creating the editor — the input-rule handlers read through it on every keystroke.
+   */
+  getConfig: () => SmartReplaceConfig;
+}
+
+/**
+ * As-you-type replacements, Notion-style:
+ *   - SYMBOLS: type `->` and it becomes `→`, `(tm)` → `™`, etc. (configurable in Settings).
+ *   - SNIPPETS: type `_mycnpj_` and it expands to a predefined string (configurable in Settings).
+ *   - DASHES: `word--word` → em dash, `1900--2000` → en dash (built-in, position-sensitive).
+ *
+ * All run as TipTap InputRules, so each swap is undoable: a single Backspace immediately after a
+ * swap reverts it to the literal text you typed (see the Backspace shortcut below), and Ctrl+Z does
+ * the same. Outputs are CommonMark-safe literals, so the markdown round-trip (src/markdown.ts) is
+ * unaffected. Triggers are matched at the caret by longest suffix, and a trigger that's a prefix of
+ * a longer one (`<-` vs `<->`) re-extends on the next char (see the symbol rule's handler).
+ */
+/**
+ * Resolve a symbol replacement at the caret. `before` is the text immediately preceding the caret;
+ * `prevChar` is the single char before that (for the re-extend case). Returns how many characters to
+ * delete back from the caret and the `output` to insert, or null if nothing matches. Pure, so it's
+ * shared between the input rule (typing) and the auto-close step-over (typing a closer).
+ */
+function resolveSymbol(
+  before: string,
+  prevChar: string,
+  replacements: Record<string, string>
+): { back: number; output: string } | null {
+  // Longest suffix of the trailing run first.
+  for (let i = 0; i < before.length; i++) {
+    const cand = before.slice(i);
+    const out = replacements[cand];
+    if (out != null && out !== "") return { back: cand.length, output: out };
+  }
+  // Re-extend: the char before the run is a prior replacement's output we can grow into a longer one.
+  if (prevChar) {
+    let prevTrigger: string | undefined;
+    for (const [trig, o] of Object.entries(replacements)) {
+      if (o === prevChar) { prevTrigger = trig; break; }
+    }
+    if (prevTrigger) {
+      const combined = prevTrigger + before;
+      for (let i = 0; i < combined.length; i++) {
+        const cand = combined.slice(i);
+        const out = replacements[cand];
+        if (out != null && out !== "" && cand.length > before.length) {
+          return { back: before.length + 1, output: out };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+const SmartReplace = Extension.create<SmartReplaceOptions>({
+  name: "smartReplace",
+  addOptions() {
+    return { getConfig: () => ({ replacements: {}, snippets: {}, delimiter: "_" }) };
+  },
+  addInputRules() {
+    const getConfig = this.options.getConfig;
+    const rules: InputRule[] = [];
+
+    // ONE symbol rule. Rather than a rule per trigger (which would freeze the trigger set at mount),
+    // we match a trailing run of symbol-ish chars and resolve the LONGEST trigger that's a suffix of
+    // it against the live map — so adding/removing symbols in Settings takes effect immediately, with
+    // no editor re-create. Symbol chars are the punctuation our triggers use (arrows, (), /, etc.).
+    //
+    // Re-extend: a trigger that is a prefix of a longer one (`<-` vs `<->`) fires first as you type,
+    // so the longer one would never complete. To fix it we also peek at the ONE char before the run:
+    // if it's the output of a prior replacement (e.g. `←`), we reconstruct the original trigger
+    // (`<-`) + the new chars and re-resolve. So typing `<-` → `←`, then `>` → `↔` (the `←` is undone
+    // and `<->` fires). A reverse output→trigger map makes this O(1).
+    rules.push(
+      new InputRule({
+        find: /[-<>=!+~.()/\w]{1,6}$/,
+        handler: ({ state, range, match }) => {
+          const { replacements } = getConfig();
+          const tail = match[0];
+          const prevChar = range.from > 0 ? state.doc.textBetween(range.from - 1, range.from) : "";
+          const hit = resolveSymbol(tail, prevChar, replacements);
+          if (!hit) return null; // no trigger matched — leave the text as typed
+          state.tr.insertText(hit.output, range.to - hit.back, range.to);
+        },
+      })
+    );
+
+    // Snippet rule — `<delim>name<delim>` looks `name` up in the live map. Fires on the closing
+    // delimiter, so `_mycnpj_` expands the instant you type the trailing `_`.
+    rules.push(
+      new InputRule({
+        find: /(?:[_;/~|])([\w.-]+)(?:[_;/~|])$/,
+        handler: ({ state, range, match }) => {
+          const { snippets, delimiter } = getConfig();
+          const d = delimiter || "_";
+          // Only honor the user's configured delimiter (the find regex is permissive for perf).
+          if (!match[0].startsWith(d) || !match[0].endsWith(d)) return null;
+          const text = snippets[match[1]];
+          if (text == null) return null; // unknown name → leave literal text untouched
+          state.tr.insertText(text, range.from, range.to);
+        },
+      })
+    );
+
+    // Em/en dash, fired by the character that follows `--` (Notion-style). These don't shadow a
+    // `-->` arrow: that's triggered by `>` (not a word char), so the dash patterns don't match it.
+    rules.push(
+      new InputRule({
+        find: /(\d)--(\d)$/,
+        handler: ({ state, range, match }) => {
+          state.tr.insertText(`${match[1]}–${match[2]}`, range.from, range.to);
+        },
+      }),
+      new InputRule({
+        find: /(\w)--(\w)$/,
+        handler: ({ state, range, match }) => {
+          state.tr.insertText(`${match[1]}—${match[2]}`, range.from, range.to);
+        },
+      })
+    );
+    return rules;
+  },
+  addKeyboardShortcuts() {
+    // Backspace right after a replacement reverts it to the literal text (Notion behavior). TipTap
+    // tracks the last input-rule transform; `undoInputRule` rolls just that back. Returning false
+    // when there's nothing to undo lets Backspace fall through to its normal delete.
+    return { Backspace: () => this.editor.commands.undoInputRule() };
   },
 });
 
@@ -472,6 +684,27 @@ const COMMANDS: SlashCommand[] = [
     group: "Insert", icon: Table,
     // The `/query` token is already removed when this runs; the helper popup inserts the block.
     run: (_e, ctx) => ctx.requestQuery() },
+  { id: "template", label: "Template", hint: "Insert a template", keywords: "template snippet boilerplate variable insert reuse",
+    group: "Insert", icon: FileText,
+    run: async (e, ctx) => {
+      if (!ctx.templates.length || !ctx.onInsertTemplate) return;
+      const names = ctx.templates.map((t) => t.name);
+      const pick = await dialogs.prompt({
+        title: "Insert template",
+        message: names.slice(0, 30).join(", "),
+        placeholder: "Template name",
+        defaultValue: names[0],
+      });
+      if (!pick) return;
+      const t = ctx.templates.find((x) => x.name.toLowerCase() === pick.toLowerCase());
+      if (!t) return;
+      const body = await ctx.onInsertTemplate(t.rel_path);
+      if (body == null) return; // cancelled a variable prompt
+      // Convert the filled markdown to HTML so multi-block templates insert as real blocks.
+      e.chain().focus().insertContent(markdownToHtml(body)).run();
+      // Honor a {{cursor}} marker, if the template had one.
+      placeCursorAtSentinel(e);
+    } },
   // Task properties — insert the inline markers the indexer parses (📅 due, 🔁 recurrence).
   { id: "due", label: "Due date", hint: "Set a 📅 due date", keywords: "due date deadline task 📅 schedule when",
     group: "Task", icon: CalendarPlus,
@@ -505,6 +738,25 @@ function insertMarker(editor: any, marker: string): void {
 }
 
 /**
+ * After inserting a filled template, move the caret to its {{cursor}} marker (the CURSOR_SENTINEL
+ * text) and delete the marker. If the template had no {{cursor}}, the caret stays where insert left
+ * it. Walks the doc once for the sentinel text; safe to call unconditionally.
+ */
+function placeCursorAtSentinel(editor: any): void {
+  let found: { from: number; to: number } | null = null;
+  editor.state.doc.descendants((node: any, pos: number) => {
+    if (found || !node.isText) return;
+    const idx = (node.text as string).indexOf(CURSOR_SENTINEL);
+    if (idx >= 0) found = { from: pos + idx, to: pos + idx + CURSOR_SENTINEL.length };
+    return !found;
+  });
+  if (!found) return;
+  const { from, to } = found;
+  // Delete the sentinel, then drop the caret where it was.
+  editor.chain().focus().deleteRange({ from, to }).setTextSelection(from).run();
+}
+
+/**
  * Pull image files out of a paste/drop payload. Screenshots and copied images arrive under
  * `items` (kind "file"); dragged files arrive under `files`. We prefer `items` so a rich paste
  * that also carries `text/html` still yields the image, and only fall back to `files`.
@@ -526,6 +778,21 @@ function imageFilesFromDataTransfer(dt: DataTransfer | null): File[] {
   return out;
 }
 
+/** Does any image node currently in the document use this src? (Used to decide whether deleting an
+ *  image orphaned its file, or whether other references to the same file remain.) */
+function docReferencesImage(editor: any, src: string): boolean {
+  let found = false;
+  editor.state.doc.descendants((n: any) => {
+    if (found) return false;
+    if (n.type.name === "image" && n.attrs?.src === src) {
+      found = true;
+      return false;
+    }
+    return true;
+  });
+  return found;
+}
+
 /**
  * Heuristic: does this plain text contain markdown block/inline syntax worth parsing? Used to
  * decide whether a text/plain paste (e.g. the contents of a .md file) should be rendered as
@@ -543,18 +810,37 @@ export default function Editor({
   reloadKey,
   pages = [],
   tags = [],
+  templates = [],
+  onInsertTemplate,
   onCreatePage,
   onCreateDatabase,
   onOpenPage,
   onOpenPath,
   onOpenTag,
   onAddAttachment,
+  onAttachmentRemoved,
   onTaskToggled,
   dateFormat = "YYYY-MM-DD",
   timeFormat = "HH:mm",
   taskDateFormat = "YYYY-MM-DD",
+  pageWidth = 820,
+  onPageWidthChange,
   headerSlot,
+  insertText,
+  smartReplacements,
+  snippets,
+  snippetDelimiter = "_",
 }: Props) {
+  // The page-width ruler is toggled with Ctrl+R; hidden by default so it never crowds the toolbar.
+  const [rulerOpen, setRulerOpen] = useState(false);
+  // Live smart-replace config in a ref, so editing symbols/snippets in Settings takes effect on the
+  // next keystroke without re-creating the editor (the input-rule handlers read through this).
+  const smartCfgRef = useRef<SmartReplaceConfig>({ replacements: {}, snippets: {}, delimiter: "_" });
+  smartCfgRef.current = {
+    replacements: smartReplacements ?? {},
+    snippets: snippets ?? {},
+    delimiter: snippetDelimiter || "_",
+  };
   // Keep the open-page handlers in refs so node views always call the latest one without forcing
   // the editor to be re-created.
   const onOpenPageRef = useRef(onOpenPage);
@@ -565,6 +851,8 @@ export default function Editor({
   onOpenTagRef.current = onOpenTag;
   const onAddAttachmentRef = useRef(onAddAttachment);
   onAddAttachmentRef.current = onAddAttachment;
+  const onAttachmentRemovedRef = useRef(onAttachmentRemoved);
+  onAttachmentRemovedRef.current = onAttachmentRemoved;
   const onTaskToggledRef = useRef(onTaskToggled);
   onTaskToggledRef.current = onTaskToggled;
   const lastEmitted = useRef<string>(value);
@@ -699,8 +987,8 @@ export default function Editor({
   }, []);
 
   // Keep ctx in a ref so command closures always see current props without re-creating the editor.
-  const ctxRef = useRef<SlashContext>({ pages, onCreatePage, onCreateDatabase, dateFormat, timeFormat, requestDate, requestQuery });
-  ctxRef.current = { pages, onCreatePage, onCreateDatabase, dateFormat, timeFormat, requestDate, requestQuery };
+  const ctxRef = useRef<SlashContext>({ pages, onCreatePage, onCreateDatabase, dateFormat, timeFormat, requestDate, requestQuery, templates, onInsertTemplate });
+  ctxRef.current = { pages, onCreatePage, onCreateDatabase, dateFormat, timeFormat, requestDate, requestQuery, templates, onInsertTemplate };
 
   // The query block's edit button calls the latest handler through this ref (the QueryBlock
   // extension is configured once, so it can't close over a fresh `editQuery`).
@@ -711,6 +999,25 @@ export default function Editor({
   // once; it must run before ProseMirror's own handling so it can swallow Enter (no newline) when a
   // menu is open. Returns true when it handled the key.
   const handlePopupKeyRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
+
+  // Intercept Delete/Backspace on a *selected* image so we can offer to clean up its `.attachments`
+  // file. Returns true when it handled the key (the node is deleted here); false to fall through to
+  // ProseMirror's default deletion (non-image selections, non-attachment images, no host handler).
+  const handleImageDeleteKey = useCallback((e: KeyboardEvent): boolean => {
+    if (e.key !== "Backspace" && e.key !== "Delete") return false;
+    const ed = editorRef.current;
+    if (!ed) return false;
+    const node = (ed.state.selection as any).node; // set only on a NodeSelection
+    if (!node || node.type.name !== "image") return false;
+    const src: string = node.attrs?.src ?? "";
+    // Only manage files we own (pasted into `.attachments`) and only when a host handler exists;
+    // otherwise let ProseMirror delete the node normally.
+    if (!onAttachmentRemovedRef.current || !src.startsWith(".attachments/")) return false;
+    ed.chain().focus().deleteSelection().run();
+    // Prompt only when this was the last reference to the file in the document.
+    if (!docReferencesImage(ed, src)) onAttachmentRemovedRef.current(src);
+    return true;
+  }, []);
 
   const editor = useEditor(
     {
@@ -734,11 +1041,13 @@ export default function Editor({
           dateFormat: taskDateFormat,
         }),
         MoveBlock,
+        SmartReplace.configure({ getConfig: () => smartCfgRef.current }),
       ],
       content: markdownToHtml(value),
       editorProps: {
-        handleTextInput: handleAutoClose,
-        handleKeyDown: (_view, e) => handlePopupKeyRef.current(e),
+        handleTextInput: (view, from, to, text) =>
+          handleAutoClose(view, from, to, text, () => smartCfgRef.current.replacements),
+        handleKeyDown: (_view, e) => handleImageDeleteKey(e) || handlePopupKeyRef.current(e),
         // Paste an image (screenshot, copied image) → save it to `.attachments` and insert it.
         // Only intercept when there's actually an image and a handler; otherwise let the default
         // text/html paste run.
@@ -930,9 +1239,11 @@ export default function Editor({
   const filtered = slash
     ? COMMANDS.filter(
         (c) =>
-          !slash.query ||
-          c.keywords.includes(slash.query.toLowerCase()) ||
-          c.id.startsWith(slash.query.toLowerCase())
+          // Hide `/template` until the vault has templates and a host handler is wired.
+          (c.id !== "template" || (templates.length > 0 && !!onInsertTemplate)) &&
+          (!slash.query ||
+            c.keywords.includes(slash.query.toLowerCase()) ||
+            c.id.startsWith(slash.query.toLowerCase()))
       )
     : [];
 
@@ -1072,6 +1383,20 @@ export default function Editor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
+  // Insert plain text at the caret when the template builder bumps `insertText.n`. Seed the
+  // last-handled counter to the *current* n so a fresh mount (the Editor remounts on every page
+  // switch — its key includes the active path) never replays the last signal; we only insert when
+  // n genuinely advances past what this instance already applied. We focus first so the text lands
+  // where the user last was, even if focus is on a chip button.
+  const lastInsertN = useRef(insertText?.n ?? 0);
+  useEffect(() => {
+    const n = insertText?.n ?? 0;
+    if (n <= lastInsertN.current) return;
+    lastInsertN.current = n;
+    editorRef.current?.chain().focus().insertContent(insertText!.text).run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertText?.n]);
+
   // Menu key handling at the ProseMirror level so it runs before the editor inserts a newline on
   // Enter. Returns true when a popup consumed the key (suppressing the default editor behaviour).
   const handlePopupKey = (e: KeyboardEvent): boolean => {
@@ -1144,11 +1469,28 @@ export default function Editor({
   };
   handlePopupKeyRef.current = handlePopupKey;
 
+  // Ctrl+R (Cmd+R on macOS) toggles the page-width ruler. Only when the ruler can actually do
+  // something (a width-change handler is wired). We preventDefault so the webview doesn't reload.
+  useEffect(() => {
+    if (!onPageWidthChange) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === "r" || e.key === "R")) {
+        e.preventDefault();
+        setRulerOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onPageWidthChange]);
+
   if (!editor) return null;
 
   return (
     <div className="editor-wrap">
       <Toolbar editor={editor} />
+      {rulerOpen && onPageWidthChange && (
+        <PageRuler width={pageWidth} onCommit={onPageWidthChange} />
+      )}
       {headerSlot && <div className="editor-header-slot">{headerSlot}</div>}
       <EditorContent editor={editor} className="editor-content" />
       {slash && filtered.length > 0 && (
@@ -1313,6 +1655,69 @@ function Toolbar({ editor }: { editor: any }) {
       {btn(<Quotes size={16} />, () => editor.chain().focus().toggleBlockquote().run(), editor.isActive("blockquote"), "Quote")}
       {btn("{}", () => editor.chain().focus().toggleCodeBlock().run(), editor.isActive("codeBlock"), "Code block")}
       {btn("―", () => editor.chain().focus().setHorizontalRule().run(), false, "Divider")}
+    </div>
+  );
+}
+
+/**
+ * The page-width ruler: a centered bar spanning the current page width with a drag handle at each
+ * end. The column is centered (`margin: 0 auto`), so each handle moves symmetrically — the bar's
+ * half-width equals the pointer's horizontal distance from the column's center, and the full page
+ * width is twice that. Dragging either side therefore widens/narrows the page evenly.
+ *
+ * During a drag we only update the `--page-width` CSS variable and the label — directly, no React
+ * state — so the page resizes smoothly without re-rendering. Persisting happens once on pointer-up
+ * via `onCommit`. (Saving on every move opened a settings.json write per frame, which collided into
+ * `AbortError: Failed to create swap file`.) The host clamps the committed value to its own range;
+ * we mirror that clamp here so the live preview matches what finally lands.
+ */
+const RULER_MIN = 480;
+const RULER_MAX = 1400;
+function PageRuler({ width, onCommit }: { width: number; onCommit: (px: number) => void }) {
+  const barRef = useRef<HTMLDivElement>(null);
+  const labelRef = useRef<HTMLSpanElement>(null);
+
+  const startDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const bar = barRef.current;
+    const track = bar?.parentElement; // the .page-ruler, full editor-column width
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const root = document.documentElement;
+    let latest = width;
+    const move = (ev: PointerEvent) => {
+      // Half-width = distance from center to the pointer; full width is twice that.
+      const half = Math.abs(ev.clientX - centerX);
+      latest = Math.round(Math.min(RULER_MAX, Math.max(RULER_MIN, half * 2)));
+      // Live preview only: drive the CSS variable + label, no state and no disk write.
+      root.style.setProperty("--page-width", `${latest}px`);
+      if (labelRef.current) labelRef.current.textContent = `${latest}px`;
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      onCommit(latest); // persist once, at the end of the drag
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  return (
+    <div className="page-ruler" role="slider" aria-label="Page width" aria-valuenow={width}>
+      <div className="page-ruler-bar" ref={barRef}>
+        <span
+          className="page-ruler-handle left"
+          onPointerDown={startDrag}
+          title="Drag to resize page width"
+        />
+        <span className="page-ruler-label" ref={labelRef}>{width}px</span>
+        <span
+          className="page-ruler-handle right"
+          onPointerDown={startDrag}
+          title="Drag to resize page width"
+        />
+      </div>
     </div>
   );
 }

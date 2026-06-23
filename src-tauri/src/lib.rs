@@ -7,6 +7,7 @@ mod index;
 mod query;
 mod recents;
 mod settings;
+mod themes;
 mod vault;
 
 use notify::{RecursiveMode, Watcher};
@@ -171,6 +172,15 @@ fn create_page(rel_path: String, body: String, state: State<AppState>) -> Result
     Ok(())
 }
 
+/// Create a plain folder (the sidebar ＋ menu). Empty folders show in the tree.
+#[tauri::command]
+fn create_folder(rel_path: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let abs = session.root.join(&rel_path);
+    vault::create_folder(&abs).map_err(err)
+}
+
 /// Create a database: a folder + `.pinpoint-db.json` schema (the editor's `/database` command and
 /// the sidebar ＋ menu). Rows are added later as `.md` files inside it.
 #[tauri::command]
@@ -179,6 +189,16 @@ fn create_database(rel_path: String, name: String, state: State<AppState>) -> Re
     let session = guard.as_ref().ok_or("no vault open")?;
     let abs = session.root.join(&rel_path);
     vault::create_database(&abs, &name).map_err(err)
+}
+
+/// Convert an existing folder into a database in place (the explorer's "Convert to Database" action).
+/// Existing `.md` files inside it become rows; bails if the folder is already a database.
+#[tauri::command]
+fn convert_to_database(rel_path: String, name: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let abs = session.root.join(&rel_path);
+    vault::convert_to_database(&abs, &name).map_err(err)
 }
 
 /// Read a database folder's schema (`.pinpoint-db.json`). Falls back to a default if absent.
@@ -390,6 +410,54 @@ fn save_settings(s: settings::Settings, state: State<AppState>) -> Result<(), St
     settings::save(&session.root, &s).map_err(err)
 }
 
+// ---- Themes (`.themes/<name>.json`) -------------------------------------------------------------
+// Stored opaquely; the frontend owns the JSON shape (see types.ts `Theme`). The backend only does
+// storage so the two hosts (Tauri + web FSA) stay in lockstep on the same files.
+
+#[tauri::command]
+fn list_themes(state: State<AppState>) -> Result<Vec<String>, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    Ok(themes::list(&session.root))
+}
+
+#[tauri::command]
+fn read_theme(name: String, state: State<AppState>) -> Result<String, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    themes::read(&session.root, &name).map_err(err)
+}
+
+#[tauri::command]
+fn write_theme(name: String, json: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    themes::write(&session.root, &name, &json).map_err(err)
+}
+
+#[tauri::command]
+fn delete_theme(name: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    themes::delete(&session.root, &name).map_err(err)
+}
+
+#[tauri::command]
+fn rename_theme(from: String, to: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    themes::rename(&session.root, &from, &to).map_err(err)
+}
+
+/// Seed curated starter themes into a vault that has no `.themes/` folder yet. `starters` is a list
+/// of `[name, json]` pairs from the frontend. Returns how many were written (0 if already seeded).
+#[tauri::command]
+fn seed_themes(starters: Vec<(String, String)>, state: State<AppState>) -> Result<usize, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    themes::seed_if_empty(&session.root, &starters).map_err(err)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -404,7 +472,9 @@ pub fn run() {
             write_asset,
             write_page,
             create_page,
+            create_folder,
             create_database,
+            convert_to_database,
             read_db_schema,
             write_db_schema,
             delete_page,
@@ -424,6 +494,12 @@ pub fn run() {
             toggle_task,
             get_settings,
             save_settings,
+            list_themes,
+            read_theme,
+            write_theme,
+            delete_theme,
+            rename_theme,
+            seed_themes,
             list_recent_vaults
         ])
         .setup(|app| {

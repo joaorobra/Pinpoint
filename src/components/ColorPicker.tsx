@@ -4,7 +4,7 @@
 //
 // `value` is a CSS hex color, or "" to mean "inherit theme" when `allowReset` is set.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowCounterClockwise } from "@phosphor-icons/react";
 import { PRESET_COLORS } from "../types";
 
@@ -26,6 +26,9 @@ export default function ColorPicker({
   ariaLabel,
 }: Props) {
   const [open, setOpen] = useState(false);
+  // Flip the popover above the swatch when there isn't room below (e.g. the bottom-most picker in a
+  // tall settings list) so it's never clipped by the scroll container. Mirrors Select's dropUp.
+  const [dropUp, setDropUp] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -40,6 +43,14 @@ export default function ColorPicker({
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
     };
+  }, [open]);
+
+  // On open, drop up if the popover (~210px tall) would overflow the viewport bottom and there's
+  // more room above than below.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (rect) setDropUp(window.innerHeight - rect.bottom < 220 && rect.top > 220);
   }, [open]);
 
   const isDefault = value === "";
@@ -61,7 +72,7 @@ export default function ColorPicker({
       </button>
 
       {open && (
-        <div className="cp-popover" role="dialog" aria-label={ariaLabel}>
+        <div className={`cp-popover${dropUp ? " up" : ""}`} role="dialog" aria-label={ariaLabel}>
           <div className="cp-grid">
             {allowReset && (
               <button

@@ -5,8 +5,9 @@ interface Props {
   periodicFolder: string;
   /** Pattern for the daily-note label/heading (see dateformat.ts). */
   dailyFormat: string;
-  /** Open (creating if missing) the period note for the given path + template. */
-  onOpenPeriodic: (relPath: string, fallbackBody: string) => void;
+  /** Open (creating if missing) the period note for the given path + template. `period`/`date` let
+   *  the host apply that period's bound template when creating the note. */
+  onOpenPeriodic: (relPath: string, fallbackBody: string, period?: Period, date?: Date) => void;
 }
 
 export default function PeriodicBar({ periodicFolder, dailyFormat, onOpenPeriodic }: Props) {
@@ -16,7 +17,7 @@ export default function PeriodicBar({ periodicFolder, dailyFormat, onOpenPeriodi
 
   const go = () => {
     const path = pathFor(periodicFolder, period, anchor);
-    onOpenPeriodic(path, template(period, anchor, dailyFormat));
+    onOpenPeriodic(path, template(period, anchor, dailyFormat), period, anchor);
   };
 
   return (

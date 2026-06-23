@@ -101,6 +101,17 @@ fn default_db_schema(name: &str) -> serde_json::Value {
     })
 }
 
+/// Create a plain folder. Fails if it already exists so we never silently merge into an
+/// existing folder. Empty folders are surfaced in the tree (see `build_tree`).
+pub fn create_folder(abs_dir: &Path) -> Result<()> {
+    if abs_dir.exists() {
+        anyhow::bail!("folder already exists");
+    }
+    std::fs::create_dir_all(abs_dir)
+        .with_context(|| format!("create folder {}", abs_dir.display()))?;
+    Ok(())
+}
+
 /// Create a database: a folder containing a `.pinpoint-db.json` schema. Fails if the folder
 /// already exists so we never silently convert an existing folder or clobber a schema.
 pub fn create_database(abs_dir: &Path, name: &str) -> Result<()> {
@@ -109,6 +120,20 @@ pub fn create_database(abs_dir: &Path, name: &str) -> Result<()> {
     }
     std::fs::create_dir_all(abs_dir)
         .with_context(|| format!("create database folder {}", abs_dir.display()))?;
+    write_db_schema(abs_dir, &default_db_schema(name))?;
+    Ok(())
+}
+
+/// Convert an *existing* folder into a database by dropping a default `.pinpoint-db.json` into it.
+/// Unlike `create_database`, the folder is expected to already exist. Bails if it isn't a directory
+/// or is already a database so we never clobber an existing schema. Existing `.md` files become rows.
+pub fn convert_to_database(abs_dir: &Path, name: &str) -> Result<()> {
+    if !abs_dir.is_dir() {
+        anyhow::bail!("not a folder");
+    }
+    if abs_dir.join(DB_SCHEMA_FILE).exists() {
+        anyhow::bail!("folder is already a database");
+    }
     write_db_schema(abs_dir, &default_db_schema(name))?;
     Ok(())
 }

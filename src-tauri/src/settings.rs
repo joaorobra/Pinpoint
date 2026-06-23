@@ -27,6 +27,9 @@ pub struct Settings {
     pub text_color: String,       // hex
     pub line_height: f32,
     pub periodic_folder: String,  // where periodic notes live
+    pub templates_folder: String, // where reusable {{variable}} templates live
+    /// Per-period template bindings: Period name -> template's vault-relative path.
+    pub periodic_templates: HashMap<String, String>,
     pub show_line_numbers: bool,
     /// dateformat.ts patterns, one per use case.
     pub date_format: String,           // editor /today + /date default
@@ -37,6 +40,28 @@ pub struct Settings {
     pub node_icons: HashMap<String, NodeIcon>,
     /// "Semi-fullscreen": hide the custom titlebar, revealing it on a top-edge hover. Desktop only.
     pub auto_hide_titlebar: bool,
+    /// As-you-type symbol replacements: trigger -> output (e.g. "->" -> "→").
+    pub smart_replacements: HashMap<String, String>,
+    /// Text-expansion snippets: name -> inserted text (fired via `snippet_delimiter`).
+    pub snippets: HashMap<String, String>,
+    /// Delimiter wrapping a snippet name to fire it (default "_").
+    pub snippet_delimiter: String,
+    /// Name of the active theme (a `.themes/<name>.json` file). "" = built-in default palette.
+    pub active_theme: String,
+}
+
+/// Built-in symbol replacements seeded into a fresh vault. Mirrors DEFAULT_SMART_REPLACEMENTS in TS.
+fn default_smart_replacements() -> HashMap<String, String> {
+    [
+        ("->", "→"), ("<-", "←"), ("<->", "↔"), ("=>", "⇒"), ("<=", "⇐"),
+        ("(tm)", "™"), ("(c)", "©"), ("(r)", "®"),
+        ("!=", "≠"), ("+-", "±"), (">=", "≥"), ("=<", "≤"), ("~=", "≈"),
+        ("...", "…"),
+        ("1/2", "½"), ("1/4", "¼"), ("3/4", "¾"), ("1/3", "⅓"), ("2/3", "⅔"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }
 
 impl Default for Settings {
@@ -52,6 +77,8 @@ impl Default for Settings {
             text_color: "".into(),
             line_height: 1.6,
             periodic_folder: "Periodic".into(),
+            templates_folder: "Templates".into(),
+            periodic_templates: HashMap::new(),
             show_line_numbers: false,
             date_format: "YYYY-MM-DD".into(),
             time_format: "HH:mm".into(),
@@ -59,6 +86,10 @@ impl Default for Settings {
             periodic_label_format: "dddd, MMMM D".into(),
             node_icons: HashMap::new(),
             auto_hide_titlebar: false,
+            smart_replacements: default_smart_replacements(),
+            snippets: HashMap::new(),
+            snippet_delimiter: "_".into(),
+            active_theme: "".into(),
         }
     }
 }

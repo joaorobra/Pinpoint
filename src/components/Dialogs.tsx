@@ -27,11 +27,21 @@ type ConfirmOpts = {
   danger?: boolean;
 };
 type AlertOpts = { title: string; message?: string; confirmLabel?: string };
+/** One button in a `choose` dialog. `value` is what the promise resolves to when picked. */
+type ChooseOption = { label: string; value: string; danger?: boolean };
+type ChooseOpts = {
+  title: string;
+  message?: string;
+  options: ChooseOption[];
+  /** Label of the dismiss button (resolves null). Defaults to "Cancel". */
+  cancelLabel?: string;
+};
 
 type Request =
   | { id: number; kind: "prompt"; opts: PromptOpts; resolve: (v: string | null) => void }
   | { id: number; kind: "confirm"; opts: ConfirmOpts; resolve: (v: boolean) => void }
-  | { id: number; kind: "alert"; opts: AlertOpts; resolve: () => void };
+  | { id: number; kind: "alert"; opts: AlertOpts; resolve: () => void }
+  | { id: number; kind: "choose"; opts: ChooseOpts; resolve: (v: string | null) => void };
 
 // ---- Module-level store so the hook and the host share one queue ----
 
@@ -62,6 +72,10 @@ export const dialogs = {
   },
   alert(opts: AlertOpts): Promise<void> {
     return new Promise((resolve) => enqueue({ kind: "alert", opts, resolve }));
+  },
+  /** Pick one of several actions. Resolves the chosen option's `value`, or null if dismissed. */
+  choose(opts: ChooseOpts): Promise<string | null> {
+    return new Promise((resolve) => enqueue({ kind: "choose", opts, resolve }));
   },
 };
 
@@ -103,14 +117,18 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
     close(() => {
       if (req.kind === "prompt") req.resolve(null);
       else if (req.kind === "confirm") req.resolve(false);
+      else if (req.kind === "choose") req.resolve(null);
       else req.resolve();
     });
+  // Pick a specific option in a `choose` dialog.
+  const pick = (value: string) => close(() => req.kind === "choose" && req.resolve(value));
   const accept = () =>
     close(() => {
       // Return the raw value; callers trim/validate as they did with the native prompt.
+      // (`choose` has no accept button — it's settled via `pick`/`cancel`.)
       if (req.kind === "prompt") req.resolve(value);
       else if (req.kind === "confirm") req.resolve(true);
-      else req.resolve();
+      else if (req.kind === "alert") req.resolve();
     });
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -159,17 +177,33 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
           />
         )}
 
+        {req.kind === "choose" && (
+          <div className="dialog-choices">
+            {req.opts.options.map((opt) => (
+              <button
+                key={opt.value}
+                className={opt.danger ? "primary danger" : "primary"}
+                onClick={() => pick(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="dialog-actions">
           {req.kind !== "alert" && (
             <button onClick={cancel}>{cancelLabel}</button>
           )}
-          <button
-            className={danger ? "primary danger" : "primary"}
-            onClick={accept}
-            autoFocus={req.kind !== "prompt"}
-          >
-            {confirmLabel}
-          </button>
+          {req.kind !== "choose" && (
+            <button
+              className={danger ? "primary danger" : "primary"}
+              onClick={accept}
+              autoFocus={req.kind !== "prompt"}
+            >
+              {confirmLabel}
+            </button>
+          )}
         </div>
       </div>
     </div>

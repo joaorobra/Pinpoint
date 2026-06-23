@@ -38,8 +38,9 @@ interface Props {
   activePath: string | null;
   /** Set of existing markdown page rel_paths, so the calendar can mark days that already have a note. */
   existingPaths: Set<string>;
-  /** Open (creating if missing) the daily note for a clicked calendar day. */
-  onOpenPeriodic: (relPath: string, fallbackBody: string) => void;
+  /** Open (creating if missing) the daily note for a clicked calendar day. `period`/`date` let the
+   *  host apply that period's bound template (with {{period}} tokens) when creating the note. */
+  onOpenPeriodic: (relPath: string, fallbackBody: string, period?: Period, date?: Date) => void;
   /** Open an existing page (used by the agenda to jump to a task's source). */
   onOpenPath: (relPath: string) => void;
   /** Bumped when tasks/pages change, so the calendar agenda re-fetches. */
@@ -205,7 +206,7 @@ function Periods({
               </button>
               <button
                 className={"period-label" + (hasNote ? " has-note" : "") + (isOpen ? " open" : "")}
-                onClick={() => onOpenPeriodic(path, template(period, anchor, dailyFormat))}
+                onClick={() => onOpenPeriodic(path, template(period, anchor, dailyFormat), period, anchor)}
                 title={hasNote ? "Open note" : "Create note"}
               >
                 {labelFor(period, anchor, dailyFormat)}
@@ -296,7 +297,7 @@ function Calendar({
 
   const openDay = (day: Date) => {
     const path = pathFor(periodicFolder, "daily", day);
-    onOpenPeriodic(path, template("daily", day, dailyFormat));
+    onOpenPeriodic(path, template("daily", day, dailyFormat), "daily", day);
   };
 
   // Clicking a day selects it (updating the agenda) and jumps the month if needed; a click on an

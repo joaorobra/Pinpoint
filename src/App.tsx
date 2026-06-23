@@ -16,22 +16,33 @@ import {
   CircleNotch,
   CheckCircle,
   FileText,
+  Folder,
   CaretLeft,
   CaretRight,
   X,
   File as FileIcon,
   Database,
+  Stack,
   SidebarSimple,
 } from "@phosphor-icons/react";
 import { api, pickVaultFolder, resolveRecentVault, listRecentVaults } from "./api";
+import { getTheme, seedStarterThemes } from "./themes-store";
+import { applyTheme, resolveMode } from "./theme-apply";
+import type { Theme } from "./types";
 import { slideFade, transition } from "./motion";
 import StartScreen from "./components/StartScreen";
 import type { NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS, extForMime } from "./types";
+import { collectTemplates, fillTemplate, stripCursor, type FillContext, type TemplateInfo } from "./templates";
+import type { Period } from "./periodic";
 import Editor from "./components/Editor";
 import FileTree, { type SelectMods } from "./components/FileTree";
 import ContextMenu from "./components/ContextMenu";
 import type { MenuItem } from "./components/ContextMenu";
+import CreateDialog from "./components/CreateDialog";
+import type { CreateKind, CreateRequest } from "./components/CreateDialog";
+import TemplateMenu from "./components/TemplateMenu";
+import TemplateBuilderBar from "./components/TemplateBuilderBar";
 // Lazy-loaded: pulls in the full ~1500-icon Phosphor set, so it loads only on first open.
 const IconPicker = lazy(() => import("./components/IconPicker"));
 import { NodeIconView } from "./components/Icon";
@@ -46,6 +57,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
 import { DialogHost, dialogs } from "./components/Dialogs";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
+import ShortcutsPopup from "./components/ShortcutsPopup";
 import PageProperties from "./components/PageProperties";
 import Titlebar from "./components/Titlebar";
 
@@ -114,6 +126,9 @@ export default function App() {
   const [reloadKey, setReloadKey] = useState<string>("");
   const [tab, setTab] = useState<RightTab>("editor");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  // The resolved active theme object (null = built-in default palette). Loaded from `.themes/`
+  // whenever `settings.active_theme` changes; drives the core CSS tokens in the theming effect.
+  const [activeTheme, setActiveTheme] = useState<Theme | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [taskRefresh, setTaskRefresh] = useState(0);
@@ -128,6 +143,15 @@ export default function App() {
   const [trashCount, setTrashCount] = useState(0);
   // Open context menu: the right-clicked tree node + where to anchor the menu.
   const [menu, setMenu] = useState<{ node: TreeNode; x: number; y: number } | null>(null);
+  // The sidebar ＋ "create" menu (New page / folder / database), anchored under the ＋ button.
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
+  // The "save panel" create dialog: name + destination-folder picker. Open via the ＋ menu.
+  const [create, setCreate] = useState<CreateRequest | null>(null);
+  // The "New from template" picker, anchored at (x,y). `parent` (a folder rel_path) lands the new
+  // page inside it — set by the folder context menu; empty for the sidebar ＋ menu (vault root).
+  const [templatePicker, setTemplatePicker] = useState<{ x: number; y: number; parent: string } | null>(null);
+  // Bumped signal that asks the editor to insert a token at the caret (template builder chips).
+  const [tokenInsert, setTokenInsert] = useState<{ text: string; n: number }>({ text: "", n: 0 });
   // rel_path of the tree row currently being renamed inline (Windows Explorer style), or null.
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   // rel_path of the node whose icon is being chosen in the picker, or null when closed.
@@ -136,6 +160,8 @@ export default function App() {
   const [iconBatch, setIconBatch] = useState<string[] | null>(null);
   // Whether the Cmd/Ctrl+K command palette overlay is open.
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Whether the "?" keyboard-shortcuts cheat sheet is open.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const saveTimer = useRef<number | null>(null);
 
   // ---- Resizable side panels ----
@@ -206,28 +232,70 @@ export default function App() {
     [leftWidth, rightWidth]
   );
 
-  // ---- Theming: apply settings to CSS variables ----
+  // Load (or clear) the active theme object whenever the selected theme name changes. A name with
+  // no matching file falls back to the built-in default rather than erroring.
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = settings.theme;
-    root.style.setProperty("--font-ui", settings.font_family);
-    root.style.setProperty("--font-editor", settings.editor_font_family);
-    root.style.setProperty("--font-size", `${settings.font_size}px`);
-    root.style.setProperty("--line-height", String(settings.line_height));
-    // Whole-UI scaling: `zoom` scales layout + fonts + icons uniformly while keeping the app
-    // filling the viewport and scrollbars/hit-testing correct (unlike transform: scale).
-    document.body.style.zoom = String(settings.ui_zoom || 1);
-    root.style.setProperty("--accent", settings.accent_color);
-    if (settings.background_color) root.style.setProperty("--bg-override", settings.background_color);
-    else root.style.removeProperty("--bg-override");
-    if (settings.text_color) root.style.setProperty("--text-override", settings.text_color);
-    else root.style.removeProperty("--text-override");
-    root.classList.toggle("show-line-numbers", settings.show_line_numbers);
-    // Strike through completed to-do items (and dim them) when enabled.
-    root.classList.toggle("strike-done-tasks", settings.strike_done_tasks);
-    // Collapses the custom titlebar to a top-edge hover strip ("semi-fullscreen").
-    root.classList.toggle("titlebar-auto-hide", settings.auto_hide_titlebar);
-  }, [settings]);
+    let live = true;
+    if (!settings.active_theme) {
+      setActiveTheme(null);
+      return;
+    }
+    getTheme(settings.active_theme).then((t) => {
+      if (live) setActiveTheme(t);
+    });
+    return () => {
+      live = false;
+    };
+  }, [settings.active_theme]);
+
+  // ---- Theming: apply settings (and the active theme) to CSS variables ----
+  // Order is deliberate: the theme paints the six core tokens first, then the user's explicit
+  // accent / background / text overrides from Settings are layered on top, so a one-off override
+  // always wins over the theme. Re-runs on the OS light/dark flip too (for "system" appearance).
+  useEffect(() => {
+    const apply = () => {
+      const root = document.documentElement;
+      root.dataset.theme = settings.theme;
+      // 1) Theme core tokens (or clear them so the stock stylesheet wins when no theme is active).
+      applyTheme(activeTheme, resolveMode(settings.theme));
+      // 2) Fonts: a theme may override them; otherwise the Typography settings stand.
+      root.style.setProperty("--font-ui", activeTheme?.fonts?.ui || settings.font_family);
+      root.style.setProperty("--font-editor", activeTheme?.fonts?.editor || settings.editor_font_family);
+      root.style.setProperty("--font-size", `${settings.font_size}px`);
+      root.style.setProperty("--line-height", String(settings.line_height));
+      root.style.setProperty("--page-width", `${settings.page_width || 820}px`);
+      // Whole-UI scaling: `zoom` scales layout + fonts + icons uniformly while keeping the app
+      // filling the viewport and scrollbars/hit-testing correct (unlike transform: scale).
+      document.body.style.zoom = String(settings.ui_zoom || 1);
+      // 3) Explicit Settings overrides last. With a theme active, the theme owns the core palette
+      // (accent/bg/text live in the theme editor), so the standalone overrides apply only to the
+      // built-in default — this keeps a single source of truth and avoids the default accent
+      // silently clobbering a theme's accent.
+      if (!activeTheme) {
+        root.style.setProperty("--accent", settings.accent_color);
+        if (settings.background_color) root.style.setProperty("--bg-override", settings.background_color);
+        else root.style.removeProperty("--bg-override");
+        if (settings.text_color) root.style.setProperty("--text-override", settings.text_color);
+        else root.style.removeProperty("--text-override");
+      } else {
+        // Theme paints --bg/--text directly; ensure stale standalone overrides don't linger.
+        root.style.removeProperty("--bg-override");
+        root.style.removeProperty("--text-override");
+      }
+      root.classList.toggle("show-line-numbers", settings.show_line_numbers);
+      // Strike through completed to-do items (and dim them) when enabled.
+      root.classList.toggle("strike-done-tasks", settings.strike_done_tasks);
+      // Collapses the custom titlebar to a top-edge hover strip ("semi-fullscreen").
+      root.classList.toggle("titlebar-auto-hide", settings.auto_hide_titlebar);
+    };
+    apply();
+    // Under "system", track the OS scheme so the right theme variant repaints live.
+    if (settings.theme === "system" && window.matchMedia) {
+      const mq = window.matchMedia("(prefers-color-scheme: light)");
+      mq.addEventListener("change", apply);
+      return () => mq.removeEventListener("change", apply);
+    }
+  }, [settings, activeTheme]);
 
   const refreshTree = useCallback(async () => {
     try {
@@ -261,6 +329,8 @@ export default function App() {
     setTree(t);
     setVaultName(t.name);
     setSettings(await api.getSettings());
+    // Seed curated starter themes the first time a vault is opened (no-op if `.themes/` exists).
+    seedStarterThemes();
   }, []);
 
   // Pick a brand-new vault folder, then open it.
@@ -539,18 +609,62 @@ export default function App() {
     []
   );
 
-  // Open or create a periodic note.
+  // Templates available in the configured Templates folder (plain `.md` pages with {{variables}}).
+  const templates = useMemo<TemplateInfo[]>(
+    () => collectTemplates(tree, settings.templates_folder),
+    [tree, settings.templates_folder]
+  );
+
+  // A FillContext that prompts for custom {{variables}} via the in-app dialog and resolves built-in
+  // date/time tokens against the user's configured formats. `extra` adds title/period overrides.
+  const makeFillCtx = useCallback(
+    (extra?: Partial<FillContext>): FillContext => ({
+      formats: { dateFormat: settings.date_format, timeFormat: settings.time_format },
+      dailyFormat: settings.periodic_label_format,
+      vaultName,
+      prompt: (_key, label) =>
+        dialogs.prompt({ title: "Fill template", message: label, placeholder: label }),
+      ...extra,
+    }),
+    [settings.date_format, settings.time_format, settings.periodic_label_format, vaultName]
+  );
+
+  // Read a template file and return its variable-filled body + frontmatter, or null if the user
+  // cancelled a prompt (or the template is unreadable). Built-in tokens never prompt.
+  const applyTemplate = useCallback(
+    async (relPath: string, extra?: Partial<FillContext>): Promise<{ body: string; frontmatter: Record<string, unknown> } | null> => {
+      try {
+        const doc = await api.readPage(relPath);
+        return await fillTemplate(doc.body, doc.frontmatter, makeFillCtx(extra));
+      } catch (e) {
+        console.error("Failed to apply template:", e);
+        return null;
+      }
+    },
+    [makeFillCtx]
+  );
+
+  // Open or create a periodic note. When the note doesn't exist yet we create it from the period's
+  // bound template (settings.periodic_templates) if one is set, else the built-in `fallbackBody`.
+  // `period`/`periodDate` enable the {{period}}/{{periodStart}}/{{periodEnd}} tokens in templates.
   const openPeriodic = useCallback(
-    async (relPath: string, fallbackBody: string) => {
+    async (relPath: string, fallbackBody: string, period?: Period, periodDate?: Date) => {
       try {
         await api.readPage(relPath);
       } catch {
-        await api.createPage(relPath, fallbackBody);
+        let body = fallbackBody;
+        const bound = period ? settings.periodic_templates[period] : undefined;
+        if (bound) {
+          const leaf = (relPath.split("/").pop() ?? relPath).replace(/\.md$/i, "");
+          const filled = await applyTemplate(bound, { title: leaf, date: periodDate, period, periodDate, relPath });
+          if (filled) body = stripCursor(filled.body); // null = cancelled prompt → keep built-in starter
+        }
+        await api.createPage(relPath, body);
         await refreshTree();
       }
       await openPage(relPath);
     },
-    [openPage, refreshTree]
+    [openPage, refreshTree, settings.periodic_templates, applyTemplate]
   );
 
   const onEditorChange = useCallback(
@@ -594,6 +708,56 @@ export default function App() {
     [refreshTree, openPage]
   );
 
+  // Create a standalone page from a template (sidebar + menu / command palette). Prompts for the
+  // page name, fills the template's {{variables}} against it, writes body + frontmatter, and opens
+  // it. A null `templateRel` (or cancelled prompt) aborts silently.
+  const newPageFromTemplate = useCallback(
+    async (templateRel: string | null, parentRel = "") => {
+      if (!templateRel) return;
+      const input = await dialogs.prompt({ title: "New page from template", placeholder: "Notes/Idea" });
+      if (!input?.trim()) return;
+      // Land the page inside `parentRel` (a right-clicked folder) unless the user typed an absolute
+      // path of their own. A leading "/" or an explicit nested path opts out of the parent prefix.
+      const typed = input.trim().replace(/^\/+/, "");
+      const base = parentRel && !input.trim().startsWith("/") ? `${parentRel}/${typed}` : typed;
+      const rel = base.endsWith(".md") ? base : `${base}.md`;
+      const display = (rel.split("/").pop() ?? rel).replace(/\.md$/i, "");
+      const filled = await applyTemplate(templateRel, { title: display, relPath: rel });
+      if (!filled) return; // cancelled a variable prompt
+      const filledBody = stripCursor(filled.body); // file create — no live caret to place
+      try {
+        await api.createPage(rel, filledBody);
+        if (Object.keys(filled.frontmatter).length) {
+          await api.writePage(rel, filled.frontmatter, filledBody);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      await refreshTree();
+      await openPage(rel);
+    },
+    [applyTemplate, refreshTree, openPage]
+  );
+
+  // Create a new template file (sidebar + menu). Prompts for a name, creates it inside the configured
+  // templates folder with a starter body showing the {{variable}} syntax, and opens it for editing.
+  const newTemplate = useCallback(async () => {
+    const input = await dialogs.prompt({ title: "New template", placeholder: "Meeting Notes" });
+    const name = input?.trim().replace(/\.md$/i, "");
+    if (!name) return;
+    const folder = settings.templates_folder.replace(/^\/+|\/+$/g, "");
+    const rel = `${folder ? folder + "/" : ""}${name}.md`;
+    // Starter that demonstrates a built-in token and a prompted one, so the syntax is discoverable.
+    const starter = `# {{title}}\n\nCreated {{date}}\n\n`;
+    try {
+      await api.createPage(rel, starter);
+    } catch (e) {
+      console.error(e);
+    }
+    await refreshTree();
+    await openPage(rel);
+  }, [settings.templates_folder, refreshTree, openPage]);
+
   // Save a pasted/dropped image into the vault's `.attachments` folder and hand the editor back its
   // vault-relative path (inserted as a markdown image). No tree refresh: `.attachments` is a
   // dotfolder, hidden from the tree, so nothing visible changes.
@@ -610,6 +774,30 @@ export default function App() {
     },
     []
   );
+
+  // An image was deleted from a note and its `.attachments` file is now orphaned. Ask what to do
+  // with the file: keep it (dismiss), move it to Trash (recoverable), or delete it permanently.
+  const onAttachmentRemoved = useCallback((relPath: string) => {
+    const leaf = relPath.split("/").pop() ?? relPath;
+    void (async () => {
+      const choice = await dialogs.choose({
+        title: "Delete image file?",
+        message: `“${leaf}” is no longer used in this note. Keep the file, move it to Trash (recoverable), or delete it permanently?`,
+        cancelLabel: "Keep file",
+        options: [
+          { label: "Move to Trash", value: "trash" },
+          { label: "Delete permanently", value: "delete", danger: true },
+        ],
+      });
+      try {
+        if (choice === "trash") await api.trashPage(relPath);
+        else if (choice === "delete") await api.deletePage(relPath);
+        // null / dismiss → keep the file in `.attachments`.
+      } catch (e) {
+        await dialogs.alert({ title: "Couldn’t remove the image file", message: String(e) });
+      }
+    })();
+  }, []);
 
   // Create a database (folder + `.pinpoint-db.json` schema). When `name` is omitted we prompt
   // (sidebar use); when provided (the editor's `/database` command) we skip the prompt. Returns the
@@ -646,6 +834,65 @@ export default function App() {
     [refreshTree, openDatabase]
   );
 
+  // Create a plain folder (the sidebar ＋ menu). Prompts for a name, then refreshes the tree so
+  // the new — possibly empty — folder appears. Nothing is opened: a folder has no view of its own.
+  const newFolder = useCallback(
+    async (name?: string): Promise<string | null> => {
+      const input =
+        name ??
+        (await dialogs.prompt({ title: "New folder", placeholder: "Projects" })) ??
+        "";
+      const rel = input.trim().replace(/\.md$/i, "").replace(/^\/+|\/+$/g, "");
+      if (!rel) return null;
+      try {
+        await api.createFolder(rel);
+      } catch (e) {
+        await dialogs.alert({ title: "Couldn’t create folder", message: String(e) });
+        return null;
+      }
+      await refreshTree();
+      return rel;
+    },
+    [refreshTree]
+  );
+
+  // Convert an existing folder into a database in place (explorer "Convert to Database" action).
+  // Writes a default schema into the folder; its `.md` files become rows. Refreshes the tree, then
+  // opens the now-database folder in the table view.
+  const convertToDatabase = useCallback(
+    async (node: TreeNode) => {
+      const display = node.name;
+      try {
+        await api.convertToDatabase(node.rel_path, display);
+      } catch (e) {
+        await dialogs.alert({ title: "Couldn’t convert folder", message: String(e) });
+        return;
+      }
+      await refreshTree();
+      openDatabase({ ...node, is_database: true });
+    },
+    [refreshTree, openDatabase]
+  );
+
+  // Apply the create dialog's result: join the chosen folder + leaf name into a full rel path and
+  // dispatch to the matching creator. Each creator already accepts a full path and skips its prompt.
+  const runCreate = useCallback(
+    async (kind: CreateKind, leaf: string, parentRel: string) => {
+      const rel = parentRel ? `${parentRel}/${leaf}` : leaf;
+      setCreate(null);
+      if (kind === "page") {
+        const full = rel.endsWith(".md") ? rel : `${rel}.md`;
+        await newPage(full);
+        await openPage(full);
+      } else if (kind === "folder") {
+        await newFolder(rel);
+      } else {
+        await newDatabase(rel);
+      }
+    },
+    [newPage, openPage, newFolder, newDatabase]
+  );
+
   // Database folders, for resolving `/database` wikilinks and the command palette.
   const databases = useMemo(() => {
     const out: { name: string; rel_path: string }[] = [];
@@ -666,6 +913,17 @@ export default function App() {
     const parent = activePath.slice(0, slash);
     return databases.find((d) => d.rel_path === parent) ?? null;
   }, [activePath, activeAsset, activeDb, databases]);
+
+  // Whether the active page lives in the Templates folder (so the template builder bar applies).
+  // A periodic template (one bound under Periodic/<Kind>) also gets the {{period}} chips.
+  const activeTemplate = useMemo(() => {
+    if (!activePath || activeAsset || activeDb) return null;
+    const folder = settings.templates_folder.replace(/^\/+|\/+$/g, "");
+    if (!folder || !activePath.startsWith(`${folder}/`)) return null;
+    // Show the {{period}} chips when this exact path is bound to a period in settings.
+    const isPeriodic = Object.values(settings.periodic_templates).includes(activePath);
+    return { isPeriodic };
+  }, [activePath, activeAsset, activeDb, settings.templates_folder, settings.periodic_templates]);
 
   // Persist a database-row page's properties (frontmatter), keeping App's frontmatter state in sync
   // so the body-save loop never writes a stale map back over a property edit.
@@ -777,6 +1035,22 @@ export default function App() {
     },
     []
   );
+
+  // ---- Page width: the editor ruler (Ctrl+R). Persisted as settings.page_width and applied to
+  //      every page via the --page-width CSS variable, so it travels with the vault. Clamped to a
+  //      sane reading range; no-op writes are skipped so a drag that lands on the same value
+  //      doesn't touch disk. ----
+  const PAGE_WIDTH_MIN = 480;
+  const PAGE_WIDTH_MAX = 1400;
+  const setPageWidth = useCallback((px: number) => {
+    setSettings((prev) => {
+      const next = Math.round(Math.min(PAGE_WIDTH_MAX, Math.max(PAGE_WIDTH_MIN, px)));
+      if (next === (prev.page_width || 820)) return prev;
+      const updated = { ...prev, page_width: next };
+      api.saveSettings(updated).catch(console.error);
+      return updated;
+    });
+  }, []);
 
   // ---- Per-node icons ----
 
@@ -1210,6 +1484,16 @@ export default function App() {
       };
       if (node.is_dir) {
         items.push({ label: "New page here", icon: <Plus size={MI} />, onClick: () => newPageIn(node.rel_path) });
+        if (templates.length && !node.is_database) {
+          items.push({
+            label: "New page from template here",
+            icon: <FileText size={MI} />,
+            onClick: () => setTemplatePicker({ x: menu?.x ?? 0, y: menu?.y ?? 0, parent: node.rel_path }),
+          });
+        }
+        if (!node.is_database) {
+          items.push({ label: "Convert to Database", icon: <Database size={MI} />, onClick: () => convertToDatabase(node) });
+        }
         items.push(iconItem);
         items.push({ label: "Rename", icon: <PencilSimple size={MI} />, onClick: () => renameNode(node) });
         items.push({ label: "Copy path", icon: <Copy size={MI} />, onClick: () => navigator.clipboard?.writeText(node.rel_path) });
@@ -1231,13 +1515,14 @@ export default function App() {
       items.push({ label: "Delete permanently", icon: <TrashSimple size={MI} />, danger: true, onClick: () => deleteNode(node, true) });
       return items;
     },
-    [selected, deleteMany, affixMany, settings.node_icons, openPage, openAsset, renameNode, duplicateNode, deleteNode, newPageIn]
+    [selected, deleteMany, affixMany, settings.node_icons, openPage, openAsset, renameNode, duplicateNode, deleteNode, newPageIn, convertToDatabase, templates, menu]
   );
 
   // ---- Global keyboard shortcuts ----
   // Ctrl/Cmd+K  → open the command palette
   // Ctrl/Cmd+N  → new page
   // Ctrl/Cmd+= / + → zoom in,  Ctrl/Cmd+- → zoom out,  Ctrl/Cmd+0 → reset zoom
+  // ?           → toggle the keyboard-shortcuts popup (see ShortcutsPopup.tsx, kept in sync)
   // Registered only once a vault is open (tree != null). Shortcuts that would otherwise be
   // swallowed by the browser/OS (zoom, new-window) are preventDefault'd.
   useEffect(() => {
@@ -1269,10 +1554,32 @@ export default function App() {
         return;
       }
 
+      // "?" toggles the keyboard-shortcuts cheat sheet (no modifier; "?" is Shift+/).
+      if (!typing && e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setShortcutsOpen((open) => !open);
+        return;
+      }
+
       const mod = e.ctrlKey || e.metaKey;
       if (!mod || e.altKey) return;
 
       const key = e.key;
+      if (e.shiftKey && (key === "l" || key === "L")) {
+        // Toggle dark ↔ light (Ctrl/Cmd+Shift+L). Flip relative to what's actually showing, so from
+        // "system" it lands on the opposite of the current OS scheme rather than getting stuck.
+        // Persisted like the other settings shortcuts so the choice survives a restart.
+        e.preventDefault();
+        setSettings((prev) => {
+          const updated: Settings = {
+            ...prev,
+            theme: resolveMode(prev.theme) === "dark" ? "light" : "dark",
+          };
+          api.saveSettings(updated).catch(console.error);
+          return updated;
+        });
+        return;
+      }
       if ((key === "w" || key === "W") && activePath) {
         // Close the active document tab.
         e.preventDefault();
@@ -1297,7 +1604,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tree, newPage, changeZoom, selected, activePath, deleteMany, navHistory, closeTab]);
+  }, [tree, newPage, changeZoom, selected, activePath, deleteMany, navHistory, closeTab, setShortcutsOpen]);
 
   // Keep the sidebar Trash badge count in sync: refresh on vault open and after any trash change.
   useEffect(() => {
@@ -1394,7 +1701,19 @@ export default function App() {
             <FolderOpen size={16} weight="fill" /> {vaultName}
           </button>
           <div className="sidebar-actions">
-            <button onClick={() => newPage()} title="New page"><Plus size={16} weight="bold" /></button>
+            <button
+              className={addMenu ? "is-active" : undefined}
+              title="Create…"
+              aria-haspopup="menu"
+              aria-expanded={addMenu ? true : false}
+              onClick={(e) => {
+                if (addMenu) { setAddMenu(null); return; }
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setAddMenu({ x: r.left, y: r.bottom + 4 });
+              }}
+            >
+              <Plus size={16} weight="bold" />
+            </button>
             <button onClick={() => api.reindex().then(() => setTaskRefresh((k) => k + 1))} title="Re-index">
               <ArrowsClockwise size={16} weight="bold" />
             </button>
@@ -1588,6 +1907,8 @@ export default function App() {
                 nodeIcons={settings.node_icons}
                 onSetNodeIcon={setNodeIcon}
                 onClearNodeIcon={clearNodeIcon}
+                templates={templates}
+                onApplyTemplate={applyTemplate}
               />
             ) : activeAsset ? (
               <AssetViewer relPath={activeAsset.rel_path} />
@@ -1598,6 +1919,14 @@ export default function App() {
                 reloadKey={reloadKey}
                 pages={pages}
                 tags={allTags}
+                templates={templates}
+                onInsertTemplate={async (rel) => {
+                  // Fill the template against the current page's title + path and insert its body.
+                  // The {{cursor}} sentinel is preserved; the editor places the caret there.
+                  const title = (activePath?.split("/").pop() ?? "").replace(/\.md$/i, "");
+                  const filled = await applyTemplate(rel, { title, relPath: activePath ?? undefined });
+                  return filled ? filled.body : null;
+                }}
                 onCreatePage={newPage}
                 onCreateDatabase={newDatabase}
                 onOpenPage={openPageByName}
@@ -1607,10 +1936,17 @@ export default function App() {
                   setTab("tags");
                 }}
                 onAddAttachment={addAttachment}
+                onAttachmentRemoved={onAttachmentRemoved}
                 onTaskToggled={onTaskToggled}
+                pageWidth={settings.page_width || 820}
+                onPageWidthChange={setPageWidth}
                 dateFormat={settings.date_format}
                 timeFormat={settings.time_format}
                 taskDateFormat={settings.task_date_format}
+                insertText={tokenInsert}
+                smartReplacements={settings.smart_replacements}
+                snippets={settings.snippets}
+                snippetDelimiter={settings.snippet_delimiter}
                 headerSlot={
                   activePageDb ? (
                     <DbPageProperties
@@ -1620,6 +1956,13 @@ export default function App() {
                       onChange={setRowFields}
                       onRenameTitle={renameRowTitle}
                       dateFormat={settings.date_format}
+                    />
+                  ) : activeTemplate ? (
+                    <TemplateBuilderBar
+                      onInsert={(text) => setTokenInsert((s) => ({ text, n: s.n + 1 }))}
+                      dateFormat={settings.date_format}
+                      timeFormat={settings.time_format}
+                      showPeriodic={activeTemplate.isPeriodic}
                     />
                   ) : undefined
                 }
@@ -1687,11 +2030,53 @@ export default function App() {
       </AnimatePresence>
 
       {showSettings && (
-        <SettingsPanel settings={settings} onChange={saveSettings} onClose={() => setShowSettings(false)} />
+        <SettingsPanel settings={settings} onChange={saveSettings} onClose={() => setShowSettings(false)} templates={templates} />
       )}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.node)} onClose={() => setMenu(null)} />
+      )}
+
+      {addMenu && (
+        <ContextMenu
+          x={addMenu.x}
+          y={addMenu.y}
+          onClose={() => setAddMenu(null)}
+          items={[
+            { label: "New page", icon: <FileText size={15} />, onClick: () => tree && setCreate({ kind: "page", tree }) },
+            ...(templates.length
+              ? [{ label: "New from template…", icon: <FileText size={15} />, onClick: () => setTemplatePicker({ x: addMenu.x, y: addMenu.y, parent: "" }) }]
+              : []),
+            { label: "New folder", icon: <Folder size={15} />, onClick: () => tree && setCreate({ kind: "folder", tree }) },
+            { label: "New database", icon: <Database size={15} />, onClick: () => tree && setCreate({ kind: "database", tree }) },
+            { label: "New template", icon: <Stack size={15} />, onClick: () => void newTemplate() },
+          ]}
+        />
+      )}
+
+      {templatePicker && (
+        <div className="template-picker-anchor" style={{ left: templatePicker.x, top: templatePicker.y }}>
+          <TemplateMenu
+            templates={templates}
+            blankLabel="Blank page"
+            onPick={(rel) =>
+              rel
+                ? void newPageFromTemplate(rel, templatePicker.parent)
+                : templatePicker.parent
+                  ? void newPageIn(templatePicker.parent)
+                  : tree && setCreate({ kind: "page", tree })
+            }
+            onClose={() => setTemplatePicker(null)}
+          />
+        </div>
+      )}
+
+      {create && (
+        <CreateDialog
+          req={create}
+          onCancel={() => setCreate(null)}
+          onSubmit={(leaf, parentRel) => void runCreate(create.kind, leaf, parentRel)}
+        />
       )}
 
       {iconTarget !== null && (
@@ -1738,6 +2123,10 @@ export default function App() {
             onClose={() => setPaletteOpen(false)}
           />
         )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {shortcutsOpen && <ShortcutsPopup onClose={() => setShortcutsOpen(false)} />}
       </AnimatePresence>
 
       <DialogHost />

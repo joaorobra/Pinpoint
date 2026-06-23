@@ -15,7 +15,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Plus, Table, Kanban, CalendarBlank, Cards, DotsSixVertical, X, Trash, PencilSimple, Smiley,
+  Plus, Table, Kanban, CalendarBlank, Cards, DotsSixVertical, Trash,
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
 import type {
@@ -27,11 +27,15 @@ import type { DbRow } from "../dblogic";
 import { applyFilters, applySorts } from "../dblogic";
 import { makeId, safeLeaf, TYPE_META } from "./DbShared";
 import { NodeIconView } from "./Icon";
+import TemplateMenu from "./TemplateMenu";
+import { stripCursor, type TemplateInfo, type FillContext } from "../templates";
+import { CaretDown } from "@phosphor-icons/react";
 import DbTableView from "./DbTableView";
 import DbBoardView from "./DbBoardView";
 import DbCalendarView from "./DbCalendarView";
 import DbGalleryView from "./DbGalleryView";
 import DbToolbar from "./DbToolbar";
+import ViewTabMenu from "./ViewTabMenu";
 
 // Lazy so the heavy icon registry only loads when the user actually picks a column/view icon.
 const IconPicker = lazy(() => import("./IconPicker"));
@@ -48,6 +52,10 @@ interface Props {
   onSetNodeIcon?: (relPath: string, icon: NodeIcon) => void;
   /** Clear a row page's custom icon override. */
   onClearNodeIcon?: (relPath: string) => void;
+  /** Templates available for the "+ New ▾" menu (vault Templates folder). */
+  templates?: TemplateInfo[];
+  /** Read + variable-fill a template; returns its body/frontmatter or null if cancelled. */
+  onApplyTemplate?: (relPath: string, extra?: Partial<FillContext>) => Promise<{ body: string; frontmatter: Record<string, unknown> } | null>;
 }
 
 const VIEW_TYPE_META: { type: DbViewType; label: string; icon: PhosphorIcon }[] = [
@@ -64,14 +72,17 @@ function ensureViews(schema: DbSchema): DbView[] {
   return [{ id: "view_default", name: "Table", type: "table", filters: [], sorts: [] }];
 }
 
-export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD", nodeIcons, onSetNodeIcon, onClearNodeIcon }: Props) {
+export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange, dateFormat = "YYYY-MM-DD", nodeIcons, onSetNodeIcon, onClearNodeIcon, templates = [], onApplyTemplate }: Props) {
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [rows, setRows] = useState<DbRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeViewId, setActiveViewId] = useState<string>("");
+  const [editingViewId, setEditingViewId] = useState<string | null>(null);
   // Icon picker target, disambiguated by `kind`: a column id, the active view, or a row page
   // (where `id` is the page's vault-relative path).
   const [iconTarget, setIconTarget] = useState<{ kind: "col" | "view" | "page"; id: string; label: string; current?: NodeIcon } | null>(null);
+  // Whether the "+ New ▾" template menu is open in the header bar.
+  const [newMenu, setNewMenu] = useState(false);
 
   const dir = node.rel_path;
 
@@ -130,10 +141,12 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
     setActiveViewId(v.id);
   }, [schema, saveSchema]);
 
-  const renameView = useCallback(async (v: DbView) => {
-    const name = await dialogs.prompt({ title: "Rename view", defaultValue: v.name });
-    if (!name?.trim() || !schema) return;
-    void saveSchema({ ...schema, views: schema.views!.map((x) => (x.id === v.id ? { ...x, name: name.trim() } : x)) });
+  // Rename is edited in place on the tab: the menu just flips the active tab's name into an input.
+  const commitRenameView = useCallback((v: DbView, raw: string) => {
+    setEditingViewId(null);
+    const name = raw.trim();
+    if (!schema || !name || name === v.name) return;
+    void saveSchema({ ...schema, views: schema.views!.map((x) => (x.id === v.id ? { ...x, name } : x)) });
   }, [schema, saveSchema]);
 
   const deleteView = useCallback(async (v: DbView) => {
@@ -213,18 +226,31 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
     }));
   }, [writeRowFields]);
 
-  const addRow = useCallback(async (preset?: Record<string, unknown>) => {
+  const addRow = useCallback(async (preset?: Record<string, unknown>, body = "") => {
     const existing = new Set(rows.map((r) => r.title.toLowerCase()));
     let leaf = "Untitled"; let n = 1;
     while (existing.has(leaf.toLowerCase())) leaf = `Untitled ${++n}`;
     const rel = `${dir}/${leaf}.md`;
     try {
-      await api.createPage(rel, "");
+      await api.createPage(rel, body);
       if (preset && Object.keys(preset).length) await writeRowFields(rel, preset);
       onTreeChange?.();
       setRows((prev) => [...prev, { rel_path: rel, title: leaf, fields: preset ?? {} }]);
     } catch (e) { console.error(e); }
   }, [rows, dir, onTreeChange, writeRowFields]);
+
+  // Create a row from a template (or blank when templateRel is null), filling {{variables}} against
+  // the row's generated title + its destination path. Custom vars prompt the user.
+  const addRowFromTemplate = useCallback(async (templateRel: string | null) => {
+    if (!templateRel || !onApplyTemplate) return void addRow();
+    const existing = new Set(rows.map((r) => r.title.toLowerCase()));
+    let leaf = "Untitled"; let n = 1;
+    while (existing.has(leaf.toLowerCase())) leaf = `Untitled ${++n}`;
+    const rowRel = `${dir}/${leaf}.md`;
+    const filled = await onApplyTemplate(templateRel, { title: leaf, relPath: rowRel });
+    if (!filled) return; // cancelled
+    await addRow(filled.frontmatter, stripCursor(filled.body)); // row create — no live caret
+  }, [addRow, onApplyTemplate, rows, dir]);
 
   const deleteRow = useCallback(async (row: DbRow) => {
     const ok = await dialogs.confirm({ title: "Delete row", message: `Move “${row.title}” to trash?`, confirmLabel: "Delete", danger: true });
@@ -280,6 +306,23 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
       <div className="db-header-bar">
         <h1 className="db-title">{schema.name || node.name}</h1>
         <span className="db-count">{viewRows.length} of {rows.length}</span>
+        <div className="db-new-wrap">
+          <button className="db-new-split" onClick={() => void addRow()}>
+            <Plus size={14} weight="bold" /> New
+          </button>
+          <button className="db-new-caret" title="New from template" onClick={() => setNewMenu((o) => !o)}>
+            <CaretDown size={12} weight="bold" />
+          </button>
+          {newMenu && (
+            <TemplateMenu
+              className="db-new-menu"
+              templates={templates}
+              blankLabel="Blank row"
+              onPick={(rel) => void addRowFromTemplate(rel)}
+              onClose={() => setNewMenu(false)}
+            />
+          )}
+        </div>
       </div>
 
       {/* View tabs */}
@@ -292,15 +335,34 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
               <span className="db-view-tab-icon">
                 {v.icon ? <NodeIconView icon={v.icon} fallback={Ico} size={14} /> : <Ico size={14} />}
               </span>
-              <span className="db-view-tab-name">{v.name}</span>
-              {active && (
-                <span className="db-view-tab-actions">
-                  <button title="Set view icon" onClick={(e) => { e.stopPropagation(); setIconTarget({ kind: "view", id: v.id, label: v.name, current: v.icon }); }}><Smiley size={13} /></button>
-                  <button title="Rename view" onClick={(e) => { e.stopPropagation(); void renameView(v); }}><PencilSimple size={13} /></button>
-                  {schema.views!.length > 1 && (
-                    <button title="Delete view" onClick={(e) => { e.stopPropagation(); void deleteView(v); }}><X size={13} /></button>
-                  )}
+              {editingViewId === v.id ? (
+                <input
+                  className="db-view-tab-rename"
+                  defaultValue={v.name}
+                  autoFocus
+                  onClick={(e) => e.stopPropagation()}
+                  onFocus={(e) => e.target.select()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRenameView(v, (e.target as HTMLInputElement).value);
+                    else if (e.key === "Escape") setEditingViewId(null);
+                  }}
+                  onBlur={(e) => commitRenameView(v, e.target.value)}
+                />
+              ) : (
+                <span
+                  className="db-view-tab-name"
+                  onDoubleClick={(e) => { if (active) { e.stopPropagation(); setEditingViewId(v.id); } }}
+                >
+                  {v.name}
                 </span>
+              )}
+              {active && editingViewId !== v.id && (
+                <ViewTabMenu
+                  canDelete={schema.views!.length > 1}
+                  onSetIcon={() => setIconTarget({ kind: "view", id: v.id, label: v.name, current: v.icon })}
+                  onRename={() => setEditingViewId(v.id)}
+                  onDelete={() => void deleteView(v)}
+                />
               )}
             </div>
           );

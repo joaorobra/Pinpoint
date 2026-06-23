@@ -6,16 +6,25 @@ import {
   FolderSimple,
   PencilSimple,
   CalendarBlank,
+  Plus,
+  Trash,
+  ArrowUDownLeft,
 } from "@phosphor-icons/react";
 import type { Settings } from "../types";
+import { DEFAULT_SMART_REPLACEMENTS } from "../types";
 import Select, { type SelectGroup, type SelectOption } from "./Select";
 import ColorPicker from "./ColorPicker";
+import ThemeManager from "./ThemeManager";
 import { formatDate, DATE_PRESETS, TIME_PRESETS } from "../dateformat";
+import { PERIODS } from "../periodic";
+import type { TemplateInfo } from "../templates";
 
 interface Props {
   settings: Settings;
   onChange: (s: Settings) => void;
   onClose: () => void;
+  /** Templates discovered in the vault, for the periodic-template bindings. */
+  templates?: TemplateInfo[];
 }
 
 const FONT_GROUPS: SelectGroup[] = [
@@ -23,6 +32,7 @@ const FONT_GROUPS: SelectGroup[] = [
     label: "Sans-serif",
     options: [
       "Inter, system-ui, sans-serif",
+      "'Hanken Grotesk', system-ui, sans-serif",
       "system-ui, sans-serif",
       "'Segoe UI', sans-serif",
       "Roboto, sans-serif",
@@ -39,6 +49,7 @@ const FONT_GROUPS: SelectGroup[] = [
     options: [
       "Georgia, serif",
       "Merriweather, serif",
+      "Fraunces, serif",
       "Lora, serif",
       "'Playfair Display', serif",
       "'Source Serif 4', serif",
@@ -147,7 +158,101 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   );
 }
 
-export default function SettingsPanel({ settings, onChange, onClose }: Props) {
+/**
+ * An editable trigger→output table over a `Record<string,string>`. Used for both the symbol
+ * replacements and the snippets. We edit an ordered array of pairs (so a key can be retyped without
+ * the row jumping) and serialize back to a record on every change, dropping blank-trigger rows.
+ */
+function ReplaceTable({
+  value,
+  onChange,
+  fromLabel,
+  toLabel,
+  fromPlaceholder,
+  toPlaceholder,
+  multilineTo,
+}: {
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+  fromLabel: string;
+  toLabel: string;
+  fromPlaceholder: string;
+  toPlaceholder: string;
+  multilineTo?: boolean;
+}) {
+  // Local ordered draft; seeded from the record and re-seeded when the record identity changes
+  // (e.g. "Reset to defaults"). A trailing blank row is the implicit "add new" affordance.
+  const [pairs, setPairs] = useState<[string, string][]>(() => Object.entries(value));
+  // Re-seed only when the incoming record differs from our serialized draft (avoids clobbering typing).
+  useEffect(() => {
+    const serialized = JSON.stringify(Object.fromEntries(pairs.filter(([k]) => k.trim())));
+    if (serialized !== JSON.stringify(value)) setPairs(Object.entries(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  const commit = (next: [string, string][]) => {
+    setPairs(next);
+    // Last writer wins on duplicate triggers; blank triggers are dropped.
+    const rec: Record<string, string> = {};
+    for (const [k, v] of next) if (k.trim()) rec[k] = v;
+    onChange(rec);
+  };
+
+  const editRow = (i: number, k: string, v: string) => {
+    const next = pairs.slice();
+    next[i] = [k, v];
+    commit(next);
+  };
+  const removeRow = (i: number) => commit(pairs.filter((_, j) => j !== i));
+  const addRow = () => setPairs((p) => [...p, ["", ""]]);
+
+  return (
+    <div className="sr-table">
+      <div className="sr-table-head" aria-hidden>
+        <span>{fromLabel}</span>
+        <span />
+        <span>{toLabel}</span>
+        <span />
+      </div>
+      {pairs.map(([k, v], i) => (
+        <div className="sr-row" key={i}>
+          <input
+            className="sr-input sr-from"
+            value={k}
+            placeholder={fromPlaceholder}
+            spellCheck={false}
+            onChange={(e) => editRow(i, e.target.value, v)}
+          />
+          <span className="sr-arrow" aria-hidden>→</span>
+          {multilineTo ? (
+            <textarea
+              className="sr-input sr-to"
+              value={v}
+              placeholder={toPlaceholder}
+              rows={1}
+              onChange={(e) => editRow(i, k, e.target.value)}
+            />
+          ) : (
+            <input
+              className="sr-input sr-to"
+              value={v}
+              placeholder={toPlaceholder}
+              onChange={(e) => editRow(i, k, e.target.value)}
+            />
+          )}
+          <button className="sr-del" title="Remove" onClick={() => removeRow(i)}>
+            <Trash size={14} />
+          </button>
+        </div>
+      ))}
+      <button className="sr-add" onClick={addRow}>
+        <Plus size={14} weight="bold" /> Add {fromLabel.toLowerCase()}
+      </button>
+    </div>
+  );
+}
+
+export default function SettingsPanel({ settings, onChange, onClose, templates = [] }: Props) {
   const [tab, setTab] = useState<TabId>("appearance");
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     onChange({ ...settings, [k]: v });
@@ -204,56 +309,85 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
 
           <div className="settings-pane-body">
             {tab === "appearance" && (
-              <Group title="Theme" desc="Colors applied across the whole app.">
-                <Row label="Appearance">
-                  <Select
-                    value={settings.theme}
-                    options={THEME_OPTIONS}
-                    onChange={(v) => set("theme", v as Settings["theme"])}
-                    ariaLabel="Theme"
-                    className="select-narrow"
-                  />
-                </Row>
-                <Row label="Accent color" hint="Used for highlights, links and active states.">
-                  <ColorPicker
-                    value={settings.accent_color}
-                    onChange={(v) => set("accent_color", v)}
-                    fallback="#7c5cff"
-                    ariaLabel="Accent color"
-                  />
-                </Row>
-                <Row label="Background override" hint="Leave unset to follow the theme.">
-                  <ColorPicker
-                    value={settings.background_color}
-                    onChange={(v) => set("background_color", v)}
-                    allowReset
-                    fallback="#1a1a1f"
-                    ariaLabel="Background color override"
-                  />
-                </Row>
-                <Row label="Text color override" hint="Leave unset to follow the theme.">
-                  <ColorPicker
-                    value={settings.text_color}
-                    onChange={(v) => set("text_color", v)}
-                    allowReset
-                    fallback="#e8e8ea"
-                    ariaLabel="Text color override"
-                  />
-                </Row>
-                <Row
-                  label="Semi-fullscreen"
-                  hint="Hide the titlebar for a chrome-free workspace; move the pointer to the very top edge to reveal the window controls. Desktop only."
+              <>
+                <Group
+                  title="Appearance"
+                  desc="Choose Dark, Light or follow your system. A theme supplies a palette for each."
                 >
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={settings.auto_hide_titlebar}
-                      onChange={(e) => set("auto_hide_titlebar", e.target.checked)}
+                  <Row label="Mode">
+                    <Select
+                      value={settings.theme}
+                      options={THEME_OPTIONS}
+                      onChange={(v) => set("theme", v as Settings["theme"])}
+                      ariaLabel="Appearance mode"
+                      className="select-narrow"
                     />
-                    <span className="switch-track" />
-                  </label>
-                </Row>
-              </Group>
+                  </Row>
+                </Group>
+
+                <Group
+                  title="Themes"
+                  desc="A theme is a named palette (and optional fonts) with paired dark & light modes, saved in this vault’s .themes folder. Pick one to apply it everywhere; edit or duplicate to make it yours."
+                >
+                  <ThemeManager
+                    activeName={settings.active_theme}
+                    onSelect={(name) => set("active_theme", name)}
+                    fontGroups={FONT_GROUPS}
+                  />
+                </Group>
+
+                {/* The standalone color overrides apply to the built-in Default only; a theme owns
+                    its own palette via the editor above, so we hide these while one is active. */}
+                {!settings.active_theme && (
+                  <Group
+                    title="Default palette"
+                    desc="Fine-tune the built-in look. Select or create a theme above for a full, savable palette."
+                  >
+                    <Row label="Accent color" hint="Used for highlights, links and active states.">
+                      <ColorPicker
+                        value={settings.accent_color}
+                        onChange={(v) => set("accent_color", v)}
+                        fallback="#7c5cff"
+                        ariaLabel="Accent color"
+                      />
+                    </Row>
+                    <Row label="Background override" hint="Leave unset to follow the mode.">
+                      <ColorPicker
+                        value={settings.background_color}
+                        onChange={(v) => set("background_color", v)}
+                        allowReset
+                        fallback="#1a1a1f"
+                        ariaLabel="Background color override"
+                      />
+                    </Row>
+                    <Row label="Text color override" hint="Leave unset to follow the mode.">
+                      <ColorPicker
+                        value={settings.text_color}
+                        onChange={(v) => set("text_color", v)}
+                        allowReset
+                        fallback="#e8e8ea"
+                        ariaLabel="Text color override"
+                      />
+                    </Row>
+                  </Group>
+                )}
+
+                <Group title="Window" desc="How the app frame behaves.">
+                  <Row
+                    label="Semi-fullscreen"
+                    hint="Hide the titlebar for a chrome-free workspace; move the pointer to the very top edge to reveal the window controls. Desktop only."
+                  >
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={settings.auto_hide_titlebar}
+                        onChange={(e) => set("auto_hide_titlebar", e.target.checked)}
+                      />
+                      <span className="switch-track" />
+                    </label>
+                  </Row>
+                </Group>
+              </>
             )}
 
             {tab === "typography" && (
@@ -298,6 +432,20 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
                       onChange={(e) => set("line_height", +e.target.value)}
                     />
                   </div>
+                  <div className="setting">
+                    <label>Page width: {settings.page_width || 820}px</label>
+                    <input
+                      type="range"
+                      min={480}
+                      max={1400}
+                      step={10}
+                      value={settings.page_width || 820}
+                      onChange={(e) => set("page_width", +e.target.value)}
+                    />
+                    <span className="settings-row-hint">
+                      Or drag the ruler in the editor (Ctrl+R). Applies to all pages.
+                    </span>
+                  </div>
                 </Group>
                 <Group title="Interface" desc="Scale the whole app — sidebar, toolbars and text together. Also Ctrl +/- and Ctrl 0 to reset.">
                   <div className="setting">
@@ -316,6 +464,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
             )}
 
             {tab === "editor" && (
+              <>
               <Group title="Editing" desc="Behavior of the markdown editor.">
                 <Row label="Line numbers" hint="Show line numbers in the gutter.">
                   <label className="switch">
@@ -341,6 +490,50 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
                   </label>
                 </Row>
               </Group>
+
+              <Group
+                title="Symbol replacements"
+                desc="Type the trigger and it becomes the symbol as you write (e.g. -> → →). Backspace right after a swap reverts it."
+              >
+                <ReplaceTable
+                  value={settings.smart_replacements}
+                  onChange={(v) => set("smart_replacements", v)}
+                  fromLabel="Trigger"
+                  toLabel="Symbol"
+                  fromPlaceholder="->"
+                  toPlaceholder="→"
+                />
+                <button
+                  className="sr-reset"
+                  onClick={() => set("smart_replacements", { ...DEFAULT_SMART_REPLACEMENTS })}
+                >
+                  <ArrowUDownLeft size={14} /> Reset to defaults
+                </button>
+              </Group>
+
+              <Group
+                title="Snippets"
+                desc={`Type a name wrapped in the delimiter to expand it — e.g. ${settings.snippet_delimiter}mycnpj${settings.snippet_delimiter} inserts your saved text.`}
+              >
+                <Row label="Delimiter" hint="Wraps a snippet name to trigger it.">
+                  <input
+                    className="setting-input sr-delim"
+                    value={settings.snippet_delimiter}
+                    maxLength={2}
+                    onChange={(e) => set("snippet_delimiter", e.target.value || "_")}
+                  />
+                </Row>
+                <ReplaceTable
+                  value={settings.snippets}
+                  onChange={(v) => set("snippets", v)}
+                  fromLabel="Name"
+                  toLabel="Expands to"
+                  fromPlaceholder="mycnpj"
+                  toPlaceholder="12.345.678/0001-90"
+                  multilineTo
+                />
+              </Group>
+              </>
             )}
 
             {tab === "dates" && (
@@ -399,18 +592,55 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
             )}
 
             {tab === "vault" && (
-              <Group
-                title="Periodic notes"
-                desc="Where daily / weekly notes are created and looked up."
-              >
-                <Row label="Periodic notes folder">
-                  <input
-                    className="setting-input"
-                    value={settings.periodic_folder}
-                    onChange={(e) => set("periodic_folder", e.target.value)}
-                  />
-                </Row>
-              </Group>
+              <>
+                <Group
+                  title="Periodic notes"
+                  desc="Where daily / weekly notes are created and looked up."
+                >
+                  <Row label="Periodic notes folder">
+                    <input
+                      className="setting-input"
+                      value={settings.periodic_folder}
+                      onChange={(e) => set("periodic_folder", e.target.value)}
+                    />
+                  </Row>
+                </Group>
+
+                <Group
+                  title="Templates"
+                  desc="Reusable page bodies with {{variables}}. Each .md file in this folder is a template."
+                >
+                  <Row label="Templates folder">
+                    <input
+                      className="setting-input"
+                      value={settings.templates_folder}
+                      onChange={(e) => set("templates_folder", e.target.value)}
+                    />
+                  </Row>
+                </Group>
+
+                <Group
+                  title="Periodic templates"
+                  desc="Use a template when creating each kind of periodic note. “Built-in” keeps the default starter."
+                >
+                  {PERIODS.map((p) => (
+                    <Row key={p} label={p[0].toUpperCase() + p.slice(1)}>
+                      <Select
+                        value={settings.periodic_templates[p] ?? ""}
+                        options={[
+                          { value: "", label: "Built-in" },
+                          ...templates.map((t) => ({ value: t.rel_path, label: t.name })),
+                        ]}
+                        onChange={(v) => {
+                          const next = { ...settings.periodic_templates };
+                          if (v) next[p] = v; else delete next[p];
+                          set("periodic_templates", next);
+                        }}
+                      />
+                    </Row>
+                  ))}
+                </Group>
+              </>
             )}
           </div>
 

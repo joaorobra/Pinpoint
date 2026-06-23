@@ -314,12 +314,64 @@ export const PRESET_COLORS: string[] = [
   "#a1a1aa", // gray
 ];
 
+// ---- Themes -----------------------------------------------------------------------------------
+// A "theme" is a named palette stored as `.themes/<Name>.json` inside the vault, so it travels with
+// the notes like settings.json. One theme carries BOTH a dark and a light variant under the same
+// name: the app's Appearance setting (dark/light/system) chooses which variant renders, so a single
+// theme spans both modes. Selecting a theme pushes its variant's six core tokens (+ fonts) onto the
+// document root; every accent/surface derivative (hovers, rings, tints) recomputes via the existing
+// color-mix tokens, so a theme recolors the whole UI without touching any CSS consumer.
+
+/** The six core, user-editable color tokens of a theme variant. Each is a CSS hex string. */
+export interface ThemeColors {
+  /** Highlights, links, active states — drives all `--accent-*` derivatives. */
+  accent: string;
+  /** Page background (`--bg`). */
+  bg: string;
+  /** Raised panels: sidebar, cards, popovers (`--surface`). */
+  surface: string;
+  /** Primary text (`--text`). */
+  text: string;
+  /** Secondary / muted text (`--text-dim`). */
+  dim: string;
+  /** Hairline borders and dividers (`--border`). */
+  border: string;
+}
+
+/** One appearance variant (dark or light) of a theme. */
+export interface ThemeVariant {
+  colors: ThemeColors;
+}
+
+/**
+ * A named, vault-stored theme with paired dark + light variants and optional font overrides.
+ * `name` is also the file stem (`.themes/<name>.json`). Fonts are optional: when unset the theme
+ * leaves the Typography settings untouched, so a palette-only theme doesn't fight font choices.
+ */
+export interface Theme {
+  name: string;
+  dark: ThemeVariant;
+  light: ThemeVariant;
+  /** Optional UI/editor font-family overrides applied while the theme is active. */
+  fonts?: { ui?: string; editor?: string };
+}
+
+/** A theme as listed for the gallery: its name plus a small preview swatch set per variant. */
+export interface ThemeInfo {
+  name: string;
+  dark: ThemeColors;
+  light: ThemeColors;
+  hasFonts: boolean;
+}
+
 export interface Settings {
   theme: "light" | "dark" | "system";
   font_family: string;
   editor_font_family: string;
   /** Editor/content text size in px. */
   font_size: number;
+  /** Width of the editor page column in px (the draggable ruler). Applies to all pages. */
+  page_width: number;
   /** Whole-UI scale factor applied via CSS zoom on the app root (1.0 = 100%). */
   ui_zoom: number;
   accent_color: string;
@@ -327,6 +379,14 @@ export interface Settings {
   text_color: string;
   line_height: number;
   periodic_folder: string;
+  /** Folder (vault-relative) where reusable {{variable}} templates live. See templates.ts. */
+  templates_folder: string;
+  /**
+   * Per-period template binding: maps a Period ("daily"/"weekly"/…) to a template's vault-relative
+   * path. When set, opening/creating that periodic note uses the template instead of the built-in
+   * starter. Absent/empty entries fall back to the built-in template.
+   */
+  periodic_templates: Record<string, string>;
   show_line_numbers: boolean;
   /** Strike through the text of completed (checked) to-do items in the editor. */
   strike_done_tasks: boolean;
@@ -346,19 +406,212 @@ export interface Settings {
    * keeping the window controls one hover away. Desktop (Tauri) only.
    */
   auto_hide_titlebar: boolean;
+  /**
+   * As-you-type symbol replacements (Notion-style): trigger → output, e.g. `"->": "→"`. Editable in
+   * Settings. Empty map disables symbol replacement. A single Backspace right after a swap reverts it.
+   */
+  smart_replacements: Record<string, string>;
+  /**
+   * Text-expansion snippets: name → inserted text, e.g. `"mycnpj": "12.345.678/0001-90"`. Triggered
+   * by wrapping the name in `snippet_delimiter` (default `_`), so `_mycnpj_` expands. Editable in Settings.
+   */
+  snippets: Record<string, string>;
+  /** The delimiter that wraps a snippet name to fire it (default `_` → `_name_`). */
+  snippet_delimiter: string;
+  /**
+   * Name of the active theme (a `.themes/<name>.json` file). Empty = the built-in default palette,
+   * i.e. the stock CSS tokens with only `accent_color`/`background_color`/`text_color` applied as
+   * before. When set, the theme's dark/light variant supplies the core tokens; the `theme` field
+   * still chooses which variant renders.
+   */
+  active_theme: string;
 }
+
+/**
+ * The built-in "Default" theme — the stock PINPOINT palette, materialised as a Theme so the editor
+ * can show it in the gallery and "duplicate" it as a starting point. It is virtual (never written to
+ * disk) and its values mirror the dark/light blocks at the top of styles.css.
+ */
+export const BUILTIN_THEME: Theme = {
+  name: "Default",
+  dark: {
+    colors: {
+      accent: "#7c5cff",
+      bg: "#131318",
+      surface: "#1a1a21",
+      text: "#ececef",
+      dim: "#9494a1",
+      border: "#2a2a34",
+    },
+  },
+  light: {
+    colors: {
+      accent: "#7c5cff",
+      bg: "#ffffff",
+      surface: "#ffffff",
+      text: "#1b1b22",
+      dim: "#62626d",
+      border: "#e6e6ec",
+    },
+  },
+};
+
+/**
+ * Curated starter themes seeded into a fresh vault's `.themes/` folder, so the gallery isn't empty
+ * and users have ready palettes to pick or remix. Each pairs a tuned dark + light variant.
+ */
+export const STARTER_THEMES: Theme[] = [
+  {
+    name: "Midnight",
+    dark: {
+      colors: { accent: "#6ea8fe", bg: "#0e1116", surface: "#161b22", text: "#e6edf3", dim: "#8b949e", border: "#21262d" },
+    },
+    light: {
+      colors: { accent: "#2f6feb", bg: "#ffffff", surface: "#f6f8fa", text: "#1f2328", dim: "#656d76", border: "#d0d7de" },
+    },
+  },
+  {
+    name: "Forest",
+    dark: {
+      colors: { accent: "#4ade80", bg: "#0f1511", surface: "#161e18", text: "#e7f0ea", dim: "#8aa394", border: "#21302a" },
+    },
+    light: {
+      colors: { accent: "#16a34a", bg: "#fbfdfb", surface: "#f1f7f3", text: "#16241c", dim: "#4f6657", border: "#d7e6dd" },
+    },
+  },
+  {
+    name: "Rosé",
+    dark: {
+      colors: { accent: "#f472b6", bg: "#161114", surface: "#1e161b", text: "#f3e8ef", dim: "#a8909e", border: "#332430" },
+    },
+    light: {
+      colors: { accent: "#db2777", bg: "#fffafc", surface: "#fdf2f8", text: "#27141d", dim: "#6b4f5c", border: "#f3d9e6" },
+    },
+  },
+  {
+    name: "Amber",
+    dark: {
+      colors: { accent: "#fbbf24", bg: "#16130c", surface: "#1f1b12", text: "#f2ecdd", dim: "#a89c80", border: "#332c1c" },
+    },
+    light: {
+      colors: { accent: "#d97706", bg: "#fffdf7", surface: "#fef9ec", text: "#241c0e", dim: "#6b5d44", border: "#f0e4c8" },
+    },
+  },
+  {
+    name: "Nord",
+    dark: {
+      colors: { accent: "#88c0d0", bg: "#2e3440", surface: "#3b4252", text: "#eceff4", dim: "#9aa3b2", border: "#434c5e" },
+    },
+    light: {
+      colors: { accent: "#5e81ac", bg: "#eceff4", surface: "#f7f9fb", text: "#2e3440", dim: "#5b6678", border: "#d8dee9" },
+    },
+  },
+  {
+    name: "Dracula",
+    dark: {
+      colors: { accent: "#bd93f9", bg: "#282a36", surface: "#343746", text: "#f8f8f2", dim: "#9ca0b0", border: "#414458" },
+    },
+    light: {
+      colors: { accent: "#7b4fd1", bg: "#fbfbfd", surface: "#f3f1fb", text: "#282a36", dim: "#5d6072", border: "#e3def2" },
+    },
+  },
+  {
+    name: "Solarized",
+    dark: {
+      colors: { accent: "#268bd2", bg: "#002b36", surface: "#073642", text: "#e6e1cf", dim: "#93a1a1", border: "#0d4a54" },
+    },
+    light: {
+      colors: { accent: "#268bd2", bg: "#fdf6e3", surface: "#f4ecd5", text: "#2c3e44", dim: "#657b83", border: "#e6dcc0" },
+    },
+  },
+  {
+    name: "Gruvbox",
+    dark: {
+      colors: { accent: "#fabd2f", bg: "#282828", surface: "#32302f", text: "#ebdbb2", dim: "#a89984", border: "#3c3836" },
+    },
+    light: {
+      colors: { accent: "#b57614", bg: "#fbf1c7", surface: "#f4e8be", text: "#3c3836", dim: "#7c6f64", border: "#ebdcb2" },
+    },
+  },
+  {
+    name: "Ocean",
+    dark: {
+      colors: { accent: "#22d3ee", bg: "#0b1620", surface: "#11212e", text: "#e2f0f5", dim: "#8aa3ad", border: "#1b3340" },
+    },
+    light: {
+      colors: { accent: "#0891b2", bg: "#f8fdff", surface: "#ecf7fb", text: "#0d2230", dim: "#4d6b78", border: "#cfe6ee" },
+    },
+  },
+  {
+    name: "Sunset",
+    dark: {
+      colors: { accent: "#fb7185", bg: "#1a1117", surface: "#241820", text: "#f4e7ec", dim: "#ad909c", border: "#3a2530" },
+    },
+    light: {
+      colors: { accent: "#e11d48", bg: "#fff8f6", surface: "#fff0ed", text: "#2a1116", dim: "#7a4f57", border: "#f6dcd8" },
+    },
+  },
+  {
+    name: "Mono",
+    dark: {
+      colors: { accent: "#a1a1aa", bg: "#101012", surface: "#18181b", text: "#e8e8ea", dim: "#8a8a93", border: "#27272a" },
+    },
+    light: {
+      colors: { accent: "#52525b", bg: "#fafafa", surface: "#f4f4f5", text: "#18181b", dim: "#71717a", border: "#e4e4e7" },
+    },
+  },
+  {
+    // Claude's brand identity: the warm terracotta accent on Anthropic's cream (light) / warm-charcoal
+    // (dark) surfaces, muted warm-gray text, and Claude-flavored type — Hanken Grotesk (a Styrene-like
+    // grotesk) for the UI and Fraunces (a Tiempos-like serif) for reading.
+    name: "Cláudio",
+    dark: {
+      colors: { accent: "#d97757", bg: "#1f1e1d", surface: "#262624", text: "#f0eee6", dim: "#a6a097", border: "#34322e" },
+    },
+    light: {
+      colors: { accent: "#c25f3c", bg: "#faf9f5", surface: "#f0eee6", text: "#1f1e1d", dim: "#73706b", border: "#e3e0d6" },
+    },
+    fonts: { ui: "'Hanken Grotesk', system-ui, sans-serif", editor: "Fraunces, serif" },
+  },
+];
+
+/** The built-in symbol replacements seeded into a fresh vault. Users can edit/remove/add any. */
+export const DEFAULT_SMART_REPLACEMENTS: Record<string, string> = {
+  "->": "→",
+  "<-": "←",
+  "<->": "↔",
+  "=>": "⇒",
+  "<=": "⇐",
+  "(tm)": "™",
+  "(c)": "©",
+  "(r)": "®",
+  "!=": "≠",
+  "+-": "±",
+  ">=": "≥",
+  "=<": "≤",
+  "~=": "≈",
+  "...": "…",
+  "1/2": "½",
+  "1/4": "¼",
+  "3/4": "¾",
+  "1/3": "⅓",
+  "2/3": "⅔",
+};
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   font_family: "Inter, system-ui, sans-serif",
   editor_font_family: "Inter, system-ui, sans-serif",
   font_size: 16,
+  page_width: 820,
   ui_zoom: 1,
   accent_color: "#7c5cff",
   background_color: "",
   text_color: "",
   line_height: 1.6,
   periodic_folder: "Periodic",
+  templates_folder: "Templates",
+  periodic_templates: {},
   show_line_numbers: false,
   strike_done_tasks: true,
   date_format: "YYYY-MM-DD",
@@ -367,4 +620,8 @@ export const DEFAULT_SETTINGS: Settings = {
   periodic_label_format: "dddd, MMMM D",
   node_icons: {},
   auto_hide_titlebar: false,
+  smart_replacements: { ...DEFAULT_SMART_REPLACEMENTS },
+  snippets: {},
+  snippet_delimiter: "_",
+  active_theme: "",
 };
