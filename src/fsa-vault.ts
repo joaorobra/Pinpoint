@@ -199,12 +199,19 @@ function serializeDoc(frontmatter: Record<string, unknown>, body: string): strin
    Tags + tasks extraction (mirrors index.rs).
 --------------------------------------------------------------------------- */
 
-/** Inline `#tag` tokens: # then [A-Za-z0-9_/-], preceded by start or whitespace. */
+/**
+ * Inline `#tag` tokens: `#` then a run of [A-Za-z0-9_/.!?-], preceded by start or whitespace. `.`,
+ * `!`, `?` are allowed inside a tag (e.g. `#people.John`) but trimmed off the end so trailing
+ * sentence punctuation ("see #people.John.") isn't captured. Mirrors `extract_tags` in index.rs.
+ */
 function extractTags(text: string): string[] {
   const out: string[] = [];
-  const re = /(^|\s)#([A-Za-z0-9_/-]+)/g;
+  const re = /(^|\s)#([A-Za-z0-9_/.!?-]+)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) out.push(m[2]);
+  while ((m = re.exec(text))) {
+    const tag = m[2].replace(/[.!?]+$/, "");
+    if (tag) out.push(tag);
+  }
   return out;
 }
 
@@ -218,11 +225,58 @@ const DUE_RE = /(?:📅|due::)\s*([^📅🔁⏳✅]+)/;
 const RRULE_RE = /(?:🔁|repeat::)\s*([^📅🔁⏳✅]+)/;
 // The `✅ <iso>,<iso>` completed-occurrences list runs to end-of-line.
 const DONE_DATES_RE = /✅\s*([^📅🔁⏳]+)/;
+// `priority:: high` — a single keyword value. Mirrors `parse_task_line` in index.rs.
+const PRIORITY_RE = /\bpriority::\s*(\S+)/i;
 
 /** Parse the comma-separated ISO dates out of a `✅ …` value. */
 function parseDoneDates(text: string): string[] {
   const raw = DONE_DATES_RE.exec(text)?.[1] ?? "";
   return raw.split(",").map((d) => d.trim()).filter(Boolean);
+}
+
+/** Normalize a `priority::` value to `high`/`medium`/`low`, or null if absent/unrecognized. */
+function normalizePriority(text: string): string | null {
+  const raw = PRIORITY_RE.exec(text)?.[1]?.toLowerCase() ?? "";
+  if (raw === "high") return "high";
+  if (raw === "medium" || raw === "med") return "medium";
+  if (raw === "low") return "low";
+  return null;
+}
+
+/**
+ * Rewrite a task line's `priority:: <level>` field. `level` of high/medium/low sets or replaces it;
+ * null removes it. Mirror of `index::set_task_priority_line` in Rust. Returns null if not a task.
+ */
+export function setTaskPriorityLine(line: string, level: string | null): string | null {
+  const m = line.match(/^(\s*)([-*]\s)\[([ xX])\]\s?(.*)$/);
+  if (!m) return null;
+  const [, indent, bullet, mark, body] = m;
+  // Drop an existing `priority:: <word>` and tidy surrounding spaces.
+  const cleaned = body.replace(/\s*\bpriority::\s*\S+/i, "").replace(/\s{2,}/g, " ").trim();
+  const newBody = level ? (cleaned ? `${cleaned} priority:: ${level}` : `priority:: ${level}`) : cleaned;
+  return `${indent}${bullet}[${mark}] ${newBody}`.trimEnd();
+}
+
+/**
+ * How many consecutive lines starting at `start` form one task block: the task line plus every
+ * following line indented deeper than it (subtasks + wrapped content), stopping at the first line
+ * indented at or below the task's own indent. Mirror of `index::task_block_extent` in Rust.
+ */
+export function taskBlockExtent(lines: string[], start: number): number {
+  const base = lines[start].length - lines[start].trimStart().length;
+  let n = 1;
+  while (start + n < lines.length) {
+    const l = lines[start + n];
+    if (l.trim() === "") {
+      const nextReal = lines.slice(start + n + 1).find((x) => x.trim() !== "");
+      const deeperFollows = nextReal != null && nextReal.length - nextReal.trimStart().length > base;
+      if (deeperFollows) { n++; continue; } else break;
+    }
+    const indent = l.length - l.trimStart().length;
+    if (indent > base) n++;
+    else break;
+  }
+  return n;
 }
 
 /**
@@ -274,15 +328,23 @@ function normalizeDue(raw: string | undefined): string | null {
 function extractTasks(relPath: string, body: string): TaskRow[] {
   const rows: TaskRow[] = [];
   const lines = body.split("\n");
+  // (indent, line) of each currently-open ancestor task, deepest last — mirrors the indentation
+  // stack in index.rs so depth/parent_line match the native backend.
+  const stack: { indent: number; line: number }[] = [];
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(TASK_RE);
     if (!m) continue;
+    const indent = lines[i].length - lines[i].trimStart().length;
     const done = m[1].toLowerCase() === "x";
     const text = m[2];
     const due = normalizeDue(DUE_RE.exec(text)?.[1]);
     const rrule = RRULE_RE.exec(text)?.[1]?.trim() || null;
     const tags = extractTags(text);
     const doneDates = parseDoneDates(text);
+    const priority = normalizePriority(text);
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    const parent_line = stack.length ? stack[stack.length - 1].line : null;
+    const depth = stack.length;
     rows.push({
       rel_path: relPath,
       line: i,
@@ -292,7 +354,11 @@ function extractTasks(relPath: string, body: string): TaskRow[] {
       rrule,
       tags: tags.length ? tags.join(",") : null,
       done_dates: doneDates.length ? doneDates.join(",") : null,
+      priority,
+      depth,
+      parent_line,
     });
+    stack.push({ indent, line: i });
   }
   return rows;
 }
@@ -433,7 +499,7 @@ function runQueryDsl(dsl: string): QueryResult {
   if (!kindMatch) throw new Error(`Query must start with TABLE, LIST or TASK`);
   const kind = kindMatch[1].toUpperCase() as "TABLE" | "LIST" | "TASK";
 
-  const fromMatch = flat.match(/\bFROM\s+(#[\w/-]+|"[^"]*"|'[^']*')/i);
+  const fromMatch = flat.match(/\bFROM\s+(#[\w/.!?-]+|"[^"]*"|'[^']*')/i);
   const whereMatch = flat.match(/\bWHERE\s+(.+?)(?=\s+SORT\b|\s+LIMIT\b|$)/i);
   const sortMatch = flat.match(/\bSORT\s+([\w.]+)(\s+(ASC|DESC))?/i);
   const limitMatch = flat.match(/\bLIMIT\s+(\d+)/i);
@@ -810,9 +876,13 @@ export async function openRecentVaultWeb(id: string, now: number): Promise<strin
   const rec = await idbGet(id);
   if (!rec) return null;
   const handle = rec.handle;
-  // A persisted handle loses its permission grant between sessions — re-query, then prompt.
-  let perm = (await handle.queryPermission?.({ mode: "readwrite" })) ?? "granted";
-  if (perm !== "granted") perm = (await handle.requestPermission?.({ mode: "readwrite" })) ?? "denied";
+  // A persisted handle loses its permission grant between sessions and must be re-prompted.
+  // IMPORTANT: when this runs from a click (the Start screen's recent list), we must reach
+  // requestPermission() while the user gesture is still live. queryPermission() inserts an
+  // extra await that consumes the gesture, so Chromium then silently refuses to show the
+  // prompt — which is why reopening "didn't always work". requestPermission() returns
+  // "granted" immediately when access is already held, so it's safe to call unconditionally.
+  const perm = (await handle.requestPermission?.({ mode: "readwrite" })) ?? "granted";
   if (perm !== "granted") throw new Error("Permission to access this vault was denied.");
   rootDir = handle;
   rootName = handle.name || rec.name || "vault";
@@ -1287,6 +1357,84 @@ export const webApi = {
       frontmatter,
       body: newBody,
     });
+  },
+
+  // Set/clear a task's `priority:: …` field in place (mirrors the Rust `set_task_priority`).
+  setTaskPriority: async (relPath: string, line: number, level: string | null): Promise<void> => {
+    if (pageCache.size === 0) await scan();
+    const fh = await fileAt(relPath, false);
+    const { frontmatter, body } = splitFrontmatter(await readFileText(fh));
+    const lines = body.split("\n");
+    const target = lines[line];
+    if (target == null) throw new Error("task line out of range");
+    const next = setTaskPriorityLine(target, level);
+    if (next == null) throw new Error("not a task line");
+    lines[line] = next;
+    const newBody = lines.join("\n");
+    await writeFileText(relPath, serializeDoc(frontmatter, newBody));
+    pageCache.set(relPath, {
+      rel_path: relPath,
+      name: (relPath.split("/").pop() ?? relPath).replace(/\.md$/i, ""),
+      folder: relPath.includes("/") ? relPath.slice(0, relPath.lastIndexOf("/")) : "",
+      frontmatter,
+      body: newBody,
+    });
+  },
+
+  // Move a task block (the line + its deeper-indented children) from one page into another, under a
+  // `## Tasks` heading. The destination must already exist. Mirrors the Rust `move_task_block`.
+  moveTaskBlock: async (fromRel: string, line: number, toRel: string): Promise<void> => {
+    if (fromRel === toRel) throw new Error("source and destination are the same page");
+    if (pageCache.size === 0) await scan();
+
+    // --- Cut the block from the source. ---
+    const srcFh = await fileAt(fromRel, false);
+    const src = splitFrontmatter(await readFileText(srcFh));
+    const srcLines = src.body.split("\n");
+    if (line >= srcLines.length) throw new Error("task line out of range");
+    const len = taskBlockExtent(srcLines, line);
+    const baseIndent = srcLines[line].length - srcLines[line].trimStart().length;
+    // Re-base: drop up to `baseIndent` leading whitespace chars from each row.
+    const rebased = srcLines.slice(line, line + len).map((l) => {
+      let strip = 0;
+      while (strip < baseIndent && strip < l.length && /\s/.test(l[strip])) strip++;
+      return l.slice(strip);
+    });
+    const remaining = [...srcLines.slice(0, line), ...srcLines.slice(line + len)];
+    const fromBody = remaining.join("\n");
+
+    // --- Insert under "## Tasks" in the destination (which must exist). ---
+    const dstFh = await fileAt(toRel, false);
+    const dst = splitFrontmatter(await readFileText(dstFh));
+    const dstLines = dst.body.split("\n");
+    const tasksAt = dstLines.findIndex(
+      (l) => l.trim().toLowerCase() === "## tasks" || l.trim().toLowerCase() === "# tasks"
+    );
+    let insertAt: number;
+    if (tasksAt >= 0) {
+      let j = tasksAt + 1;
+      while (j < dstLines.length && !dstLines[j].trimStart().startsWith("#")) j++;
+      insertAt = j;
+    } else {
+      if (dstLines.length && dstLines[dstLines.length - 1].trim() !== "") dstLines.push("");
+      dstLines.push("## Tasks");
+      insertAt = dstLines.length;
+    }
+    dstLines.splice(insertAt, 0, ...rebased);
+    const toBody = dstLines.join("\n");
+
+    // --- Persist both + refresh cache. ---
+    await writeFileText(fromRel, serializeDoc(src.frontmatter, fromBody));
+    await writeFileText(toRel, serializeDoc(dst.frontmatter, toBody));
+    for (const [rel, fm, b] of [[fromRel, src.frontmatter, fromBody], [toRel, dst.frontmatter, toBody]] as const) {
+      pageCache.set(rel, {
+        rel_path: rel,
+        name: (rel.split("/").pop() ?? rel).replace(/\.md$/i, ""),
+        folder: rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "",
+        frontmatter: fm,
+        body: b,
+      });
+    }
   },
 
   getSettings: (): Promise<Settings> => readSettings(),

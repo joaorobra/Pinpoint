@@ -106,6 +106,12 @@ export interface TaskRow {
   tags: string | null;
   /** Comma-joined ISO dates of completed occurrences (the `✅ …` list). Null when none. */
   done_dates: string | null;
+  /** Normalized priority (`high`/`medium`/`low`) from a `priority:: …` field, or null. */
+  priority: string | null;
+  /** Nesting level by indentation: 0 = top-level, 1 = subtask, … */
+  depth: number;
+  /** `line` of the enclosing task, or null for a top-level task. */
+  parent_line: number | null;
 }
 
 // ---- Tags ------------------------------------------------------------------------------------
@@ -344,15 +350,38 @@ export interface ThemeVariant {
 }
 
 /**
- * A named, vault-stored theme with paired dark + light variants and optional font overrides.
- * `name` is also the file stem (`.themes/<name>.json`). Fonts are optional: when unset the theme
- * leaves the Typography settings untouched, so a palette-only theme doesn't fight font choices.
+ * Optional, theme-owned typography overrides applied while the theme is active. Every field is
+ * optional ("Inherit"): an unset field falls back to the global default in Settings, so a
+ * palette-only theme doesn't disturb the reader's font/size choices. A set field wins.
+ */
+export interface ThemeType {
+  /** UI (interface) font-family. */
+  ui?: string;
+  /** Editor (content) font-family. */
+  editor?: string;
+  /** Editor/content text size in px. */
+  size?: number;
+  /** Editor line height (unitless multiplier). */
+  lineHeight?: number;
+  /** Editor page-column width in px. */
+  pageWidth?: number;
+}
+
+/**
+ * A named, vault-stored theme with paired dark + light variants and optional typography overrides.
+ * `name` is also the file stem (`.themes/<name>.json`). Typography is optional: when unset the theme
+ * leaves the global type settings untouched, so a palette-only theme doesn't fight font choices.
  */
 export interface Theme {
   name: string;
   dark: ThemeVariant;
   light: ThemeVariant;
-  /** Optional UI/editor font-family overrides applied while the theme is active. */
+  /**
+   * Optional typography overrides (font families, size, line height, page width). Replaces the
+   * older `fonts` field; `fonts` is still read for backward-compatibility with existing theme files.
+   */
+  type?: ThemeType;
+  /** @deprecated Legacy font-only overrides; migrated into `type` on read. */
   fonts?: { ui?: string; editor?: string };
 }
 
@@ -361,7 +390,8 @@ export interface ThemeInfo {
   name: string;
   dark: ThemeColors;
   light: ThemeColors;
-  hasFonts: boolean;
+  /** True when the theme carries any typography overrides (fonts/size/line-height/page-width). */
+  hasType: boolean;
 }
 
 export interface Settings {
@@ -571,7 +601,7 @@ export const STARTER_THEMES: Theme[] = [
     light: {
       colors: { accent: "#c25f3c", bg: "#faf9f5", surface: "#f0eee6", text: "#1f1e1d", dim: "#73706b", border: "#e3e0d6" },
     },
-    fonts: { ui: "'Hanken Grotesk', system-ui, sans-serif", editor: "Fraunces, serif" },
+    type: { ui: "'Hanken Grotesk', system-ui, sans-serif", editor: "Fraunces, serif" },
   },
 ];
 

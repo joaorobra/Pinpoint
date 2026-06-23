@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X } from "@phosphor-icons/react";
+import { X, Warning, MagnifyingGlass, Play } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { QueryResult } from "../types";
 import { OPS, KINDS, compile, type Filter } from "../querydsl";
@@ -28,15 +28,19 @@ export default function QueryView({ seedFrom }: Props) {
   const [dsl, setDsl] = useState('TABLE file.name, status\nWHERE status = "active"');
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Distinguishes "haven't run yet" from "ran and got nothing", so each gets its own state.
+  const [hasRun, setHasRun] = useState(false);
 
   const effectiveDsl = mode === "builder" ? compile({ kind, cols, from, filters, sort }) : dsl;
 
   const run = async (overrideDsl?: string) => {
     setError(null);
+    setHasRun(true);
     try {
       setResult(await api.runQuery(overrideDsl ?? effectiveDsl));
     } catch (e) {
-      setError(String(e));
+      // Strip the backend's "Error: " prefix so the message reads as a sentence, not a stack frame.
+      setError(String(e).replace(/^Error:\s*/i, ""));
       setResult(null);
     }
   };
@@ -128,21 +132,39 @@ export default function QueryView({ seedFrom }: Props) {
         </button>
       </div>
 
-      {error && <pre className="error">{error}</pre>}
-
-      {result && (
-        <div className="result">
-          <QueryResultView
-            result={result}
-            // Toggle a task's done state on disk, then re-run so the result reflects it.
-            onToggle={(t) =>
-              api
-                .toggleTask(t.rel_path, t.line, t.occurrence ?? null)
-                .then(() => run())
-                .catch((e) => setError(String(e)))
-            }
-          />
+      {error ? (
+        <div className="query-state error-state">
+          <Warning size={22} weight="duotone" />
+          <div>
+            <strong>Couldn’t run this query</strong>
+            <p className="query-error-msg">{error}</p>
+          </div>
         </div>
+      ) : !hasRun ? (
+        <div className="query-state muted">
+          <Play size={22} weight="duotone" />
+          <p>Build a query above and press <strong>Run</strong> to see results.</p>
+        </div>
+      ) : result && result.rows.length === 0 ? (
+        <div className="query-state muted">
+          <MagnifyingGlass size={22} weight="duotone" />
+          <p>No results. Try loosening the filters or the <em>From</em> clause.</p>
+        </div>
+      ) : (
+        result && (
+          <div className="result">
+            <QueryResultView
+              result={result}
+              // Toggle a task's done state on disk, then re-run so the result reflects it.
+              onToggle={(t) =>
+                api
+                  .toggleTask(t.rel_path, t.line, t.occurrence ?? null)
+                  .then(() => run())
+                  .catch((e) => setError(String(e).replace(/^Error:\s*/i, "")))
+              }
+            />
+          </div>
+        )
       )}
     </div>
   );

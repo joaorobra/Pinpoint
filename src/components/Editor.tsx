@@ -13,6 +13,7 @@ import { dialogs } from "./Dialogs";
 import { Extension, InputRule } from "@tiptap/core";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { Fragment } from "@tiptap/pm/model";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -37,8 +38,20 @@ import {
   Plus,
   Table,
   Database,
+  TextB,
+  TextItalic,
+  TextStrikethrough,
+  LinkSimpleHorizontal,
+  SortAscending,
+  SortDescending,
+  CalendarCheck,
+  Circle,
+  CheckCircle,
+  Flag,
+  CaretRight,
   type Icon,
 } from "@phosphor-icons/react";
+import ContextMenu, { type MenuItem } from "./ContextMenu";
 import DatePicker from "./DatePicker";
 import QueryHelper from "./QueryHelper";
 import { QueryBlock } from "./QueryBlock";
@@ -544,11 +557,13 @@ const SubtaskRollup = Extension.create({
 // literal `#tag`, so the markdown round-trip (the source of truth) is completely untouched. This is
 // the same decoration-overlay pattern as SubtaskRollup — a styling layer, not a content change.
 //
-// We match the index's tag rule (alphanumerics, `-`, `_`, `/`), require the `#` to start a text node
-// or follow whitespace (so `a#b` and `#rrggbb` colours mid-word never pill), and skip code so `#`
-// inside code spans/blocks stays literal.
+// We match the index's tag rule (alphanumerics, `-`, `_`, `/`, and inner `.`/`!`/`?`), require the
+// `#` to start a text node or follow whitespace (so `a#b` and `#rrggbb` colours mid-word never pill),
+// and skip code so `#` inside code spans/blocks stays literal. `.`/`!`/`?` are allowed inside a tag
+// (`#people.John`) but the pill must not extend over trailing punctuation, so the run can't end on
+// one — matching `extract_tags`, which trims trailing `.!?`.
 const tagPillKey = new PluginKey("tagPill");
-const TAG_DECO_RE = /(^|\s)(#[A-Za-z0-9_/-]*[A-Za-z][A-Za-z0-9_/-]*)/g;
+const TAG_DECO_RE = /(^|\s)(#[A-Za-z0-9_/.!?-]*[A-Za-z][A-Za-z0-9_/.!?-]*[A-Za-z0-9_/-]|#[A-Za-z0-9_/.!?-]*[A-Za-z])/g;
 interface TagPillOptions {
   /** Open a tag in the Tags view when its pill is clicked. */
   onOpenTag?: (tag: string) => void;
@@ -591,6 +606,50 @@ const TagPill = Extension.create<TagPillOptions>({
             if (!tag) return false;
             onOpenTag(tag);
             return true;
+          },
+        },
+      }),
+    ];
+  },
+});
+
+// Render an inline `priority:: high|medium|low` field as a colored flag pill — same decoration-overlay
+// approach as TagPill, so the document text stays literal `priority:: high` (the indexer's source of
+// truth is untouched). Two decorations per match: the `priority:: ` keyword is visually collapsed
+// (kept in the doc for the caret + markdown), and the level word becomes the pill, with a flag glyph
+// added via CSS `::before`. The level class (prio-high/medium/low) colours it from the --prio-* tokens.
+const priorityPillKey = new PluginKey("priorityPill");
+// Capture the keyword (incl. trailing space) and the level separately so we can hide one and pill the
+// other. Case-insensitive; only the three known levels match so stray text never pills.
+const PRIORITY_DECO_RE = /(priority::\s*)(high|medium|low)\b/gi;
+const PriorityPill = Extension.create({
+  name: "priorityPill",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: priorityPillKey,
+        props: {
+          decorations(state) {
+            const decos: Decoration[] = [];
+            state.doc.descendants((node, pos) => {
+              if (!node.isText || !node.text) return;
+              if (node.marks.some((m) => m.type.name === "code")) return;
+              const text = node.text;
+              PRIORITY_DECO_RE.lastIndex = 0;
+              let m: RegExpExecArray | null;
+              while ((m = PRIORITY_DECO_RE.exec(text))) {
+                const kwStart = pos + m.index;
+                const kwEnd = kwStart + m[1].length; // end of "priority:: "
+                const valEnd = kwEnd + m[2].length; // end of the level word
+                const level = m[2].toLowerCase();
+                // Collapse the `priority:: ` keyword; pill the level word with its colour class.
+                decos.push(Decoration.inline(kwStart, kwEnd, { class: "priority-kw" }));
+                decos.push(
+                  Decoration.inline(kwEnd, valEnd, { class: `priority-pill prio-${level}` })
+                );
+              }
+            });
+            return DecorationSet.create(state.doc, decos);
           },
         },
       }),
@@ -738,6 +797,38 @@ function insertMarker(editor: any, marker: string): void {
 }
 
 /**
+ * Set (or clear, with `level: null`) the `priority:: <level>` field on the task the caret is in.
+ * Removes any existing `priority:: …` token from the task's text first so toggling between levels
+ * doesn't stack markers, then appends the new one. Operates on the enclosing `taskItem`'s first text
+ * block; a no-op if the caret isn't inside a task.
+ */
+function setPriorityInEditor(editor: any, level: string | null): void {
+  const { state } = editor;
+  const { $from } = state.selection;
+  let taskDepth = -1;
+  for (let d = $from.depth; d > 0; d--) {
+    if ($from.node(d).type.name === "taskItem") { taskDepth = d; break; }
+  }
+  if (taskDepth < 0) return;
+  const itemPos = $from.before(taskDepth);
+  const para = $from.node(taskDepth).firstChild;
+  // Range of the task's first text block (the paragraph holding the task text).
+  const paraStart = itemPos + 1 + 1; // +1 into taskItem, +1 into the paragraph
+  const paraText = para?.textContent ?? "";
+
+  let chain = editor.chain().focus();
+  // Strip an existing `priority:: <word>` (with any leading space) from the paragraph text.
+  const re = /\s*\bpriority::\s*\S+/i;
+  const m = re.exec(paraText);
+  if (m) {
+    const from = paraStart + m.index;
+    chain = chain.deleteRange({ from, to: from + m[0].length });
+  }
+  chain.run();
+  if (level) insertMarker(editor, `priority:: ${level}`);
+}
+
+/**
  * After inserting a filled template, move the caret to its {{cursor}} marker (the CURSOR_SENTINEL
  * text) and delete the marker. If the template had no {{cursor}}, the caret stays where insert left
  * it. Walks the doc once for the sentinel text; safe to call unconditionally.
@@ -802,6 +893,176 @@ function docReferencesImage(editor: any, src: string): boolean {
 function looksLikeMarkdown(text: string): boolean {
   return /^\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|---\s*$|\|.*\|)/m.test(text) ||
     /\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|!\[[^\]]*\]\([^)]+\)/.test(text);
+}
+
+/**
+ * What the "Sort lines" actions order by. `alpha` is a locale-aware case-insensitive compare;
+ * `date` pulls the first date-like token from each line and orders chronologically (lines without a
+ * date sink to the end, keeping their relative order); `length` orders by character count; `done` /
+ * `done-desc` order by a task item's checkbox state (only meaningful for taskItem siblings — the
+ * menu only offers these when the selection is over task-list items).
+ */
+type SortMode = "asc" | "desc" | "date" | "length" | "done" | "done-desc";
+
+// First date-like token in a line: ISO (2024-01-31), slashed (01/31/2024 or 31/01/2024), or a
+// `📅 YYYY-MM-DD` task due-marker. Returns a sortable timestamp, or null when the line has no date.
+function lineDate(text: string): number | null {
+  const iso = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return Date.parse(`${iso[1]}-${iso[2]}-${iso[3]}`);
+  const slash = text.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (slash) {
+    // Ambiguous MM/DD vs DD/MM — assume the larger of the two is the day (best-effort).
+    const a = +slash[1], b = +slash[2];
+    const [mm, dd] = a > 12 ? [b, a] : [a, b];
+    const t = Date.parse(`${slash[3]}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`);
+    return Number.isNaN(t) ? null : t;
+  }
+  return null;
+}
+
+// Is this a checked task item? Reads the taskItem's own `checked` attr, falling back to the node's
+// first descendant taskItem (so a wrapping listItem still reports its checkbox). Non-tasks → false.
+function taskChecked(node: any): boolean {
+  if (node?.type?.name === "taskItem") return !!node.attrs?.checked;
+  let found = false;
+  node?.descendants?.((child: any) => {
+    if (found) return false;
+    if (child.type.name === "taskItem") { found = !!child.attrs?.checked; return false; }
+    return true;
+  });
+  return found;
+}
+
+// A stable comparator for `mode`. Stability (via the original index) keeps equal lines in place and
+// keeps date-less lines in their typed order at the bottom of a date sort.
+function lineComparator(mode: SortMode) {
+  return (a: { text: string; i: number; node: any }, b: { text: string; i: number; node: any }): number => {
+    let d = 0;
+    if (mode === "done" || mode === "done-desc") {
+      // Unchecked (0) before checked (1) for `done`; reversed for `done-desc`.
+      const ca = taskChecked(a.node) ? 1 : 0, cb = taskChecked(b.node) ? 1 : 0;
+      d = mode === "done-desc" ? cb - ca : ca - cb;
+    } else if (mode === "date") {
+      const da = lineDate(a.text), db = lineDate(b.text);
+      if (da == null && db == null) d = 0;
+      else if (da == null) d = 1; // a sinks below b
+      else if (db == null) d = -1;
+      else d = da - db;
+    } else if (mode === "length") {
+      d = a.text.trim().length - b.text.trim().length;
+    } else {
+      d = a.text.localeCompare(b.text, undefined, { sensitivity: "base", numeric: true });
+      if (mode === "desc") d = -d;
+    }
+    return d !== 0 ? d : a.i - b.i;
+  };
+}
+
+/**
+ * The set of sibling "lines" the current selection spans, or null when sorting wouldn't apply. This
+ * is the SAME scope `sortSelectedLines` acts on, so the menu's enabled/visible state always matches
+ * what sorting would actually do: the deepest shared ancestor (a list or the doc), and the inclusive
+ * index range of its children the selection touches. `siblings` is the selected children themselves
+ * (for inspecting them, e.g. counting tasks).
+ */
+function selectedSiblings(state: any): { depth: number; siblings: any[] } | null {
+  const { $from, $to } = state.selection;
+  for (let d = Math.min($from.depth, $to.depth); d >= 0; d--) {
+    const parent = $from.node(d);
+    if (parent !== $to.node(d)) continue;
+    const name = parent.type.name;
+    const isList = name === "bulletList" || name === "orderedList" || name === "taskList";
+    if (!isList && d !== 0) continue;
+    const fromIdx = $from.index(d);
+    const toIdx = $to.index(d);
+    if (toIdx <= fromIdx) return null; // selection within a single sibling — nothing to sort
+    const siblings: any[] = [];
+    for (let i = fromIdx; i <= toIdx; i++) siblings.push(parent.child(i));
+    return { depth: d, siblings };
+  }
+  return null;
+}
+
+/**
+ * Does the selection cover at least two task items (so "Sort by done" is meaningful)? Reads the same
+ * selected-sibling set, so it only fires when those highlighted lines are to-dos.
+ */
+function selectionHasTasks(state: any): boolean {
+  const sel = selectedSiblings(state);
+  if (!sel) return false;
+  let count = 0;
+  for (const node of sel.siblings) {
+    if (node.type.name === "taskItem") count++;
+    else node.descendants?.((c: any) => {
+      if (c.type.name === "taskItem") { count++; return false; }
+      return true;
+    });
+    if (count >= 2) return true;
+  }
+  return count >= 2;
+}
+
+/**
+ * Reorder ONLY the sibling items/blocks the selection actually spans, in one transaction (single
+ * undo). Two rules make this match what the user highlighted:
+ *  - Scope = exactly the selected siblings. We sort the items from the one the selection starts in
+ *    to the one it ends in — never the whole list/document. Highlight three of ten bullets and only
+ *    those three move; the rest stay put.
+ *  - Indentation is respected. We reorder siblings at a SINGLE depth, and each item keeps its own
+ *    nested sub-list attached (it rides along inside the item's node), so a parent never jumps below
+ *    its own children and items at different indent levels never interleave.
+ * Returns false (a no-op) when fewer than two siblings are selected or they're already in order.
+ */
+function sortSelectedLines(editor: any, mode: SortMode): boolean {
+  const { state } = editor;
+  const { $from, $to } = state.selection;
+
+  // Find the deepest shared ancestor whose children are the "lines" to sort: a list (its items) or
+  // the document (its top-level blocks). We sort that ancestor's children, but only across the index
+  // span the selection touches.
+  for (let d = Math.min($from.depth, $to.depth); d >= 0; d--) {
+    const parent = $from.node(d);
+    if (parent !== $to.node(d)) continue; // not a shared ancestor at this depth
+    const name = parent.type.name;
+    const isList = name === "bulletList" || name === "orderedList" || name === "taskList";
+    const isDoc = d === 0;
+    if (!isList && !isDoc) continue;
+
+    // The selected sibling index range at THIS depth (inclusive) — the heart of "only the selected
+    // lines": the items the caret-anchor and caret-head sit in, and everything between them.
+    const fromIdx = $from.index(d);
+    const toIdx = $to.index(d);
+    if (toIdx <= fromIdx) return false; // selection sits within a single sibling — nothing to sort
+
+    // Collect just those siblings, each with its full node (nested sub-lists ride along untouched).
+    const entries: { node: any; text: string; i: number }[] = [];
+    for (let i = fromIdx; i <= toIdx; i++) {
+      const child = parent.child(i);
+      entries.push({ node: child, text: child.textContent, i: i - fromIdx });
+    }
+    if (entries.length < 2) return false;
+    const sorted = [...entries].sort(lineComparator(mode));
+    if (sorted.every((s, idx) => s.i === entries[idx].i)) return false; // already ordered
+
+    // Document positions of the selected run: start of the first selected sibling to end of the last.
+    // $from.before(d+1) is the position just before the sibling the selection starts in.
+    const startPos = $from.before(d + 1);
+    const endPos = startPos + entries.reduce((sum, e) => sum + e.node.nodeSize, 0);
+
+    const tr = state.tr;
+    tr.replaceWith(startPos, endPos, Fragment.fromArray(sorted.map((s) => s.node)));
+    // Keep the same lines highlighted after the sort: the run occupies the same [startPos, endPos]
+    // span (total node size is unchanged), so re-select it. We anchor just inside the first sibling
+    // and the last (startPos+1 / endPos-1) so the selection lands on text, not block boundaries —
+    // TextSelection.between snaps to the nearest valid text positions.
+    tr.setSelection(
+      TextSelection.between(tr.doc.resolve(startPos + 1), tr.doc.resolve(endPos - 1)),
+    );
+    editor.view.dispatch(tr.scrollIntoView());
+    editor.view.focus();
+    return true;
+  }
+  return false;
 }
 
 export default function Editor({
@@ -878,6 +1139,10 @@ export default function Editor({
   // its little properties menu (Due date / Recurrence).
   const [taskHint, setTaskHint] = useState<{ left: number; top: number } | null>(null);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const [priorityOpen, setPriorityOpen] = useState(false);
+  // Right-click context menu (text formatting + sort lines). Open when non-null; positioned at the
+  // pointer in viewport coords (ContextMenu clamps to the viewport itself).
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   // Caret position in editor-wrap-relative coords, for anchoring popups (mirrors detectSlash).
   const caretCoords = useCallback((ed: any): { left: number; top: number } => {
@@ -1023,7 +1288,11 @@ export default function Editor({
     {
       extensions: [
         StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] } }),
-        Link.configure({ openOnClick: false, autolink: true }),
+        // `autolink: false` — tags are literal `#tag` text styled by the TagPill decoration overlay
+        // (never a link). TipTap's autolinker would treat `#tattoo-off` as a `#fragment` link and
+        // rewrite it to `[#tattoo-off](#tattoo-off)`, corrupting the markdown source. Links are made
+        // explicitly via the toolbar / markdown `[text](url)` / wikilinks, so autolink isn't needed.
+        Link.configure({ openOnClick: false, autolink: false }),
         TaskList,
         TaskItem.configure({ nested: true }),
         TableExt.configure({ resizable: true }),
@@ -1032,6 +1301,7 @@ export default function Editor({
         TableCell,
         SubtaskRollup,
         TagPill.configure({ onOpenTag: (tag) => onOpenTagRef.current?.(tag) }),
+        PriorityPill,
         ImageNode,
         WikiLink.configure({ onOpen: (name) => onOpenPageRef.current?.(name) }),
         QueryBlock.configure({
@@ -1162,7 +1432,7 @@ export default function Editor({
     if (!empty) return setTag(null);
     const lineStart = state.doc.resolve(from).start();
     const textBefore = state.doc.textBetween(lineStart, from, "\n", "\n");
-    const m = textBefore.match(/(?:^|\s)#([A-Za-z0-9_/-]*)$/);
+    const m = textBefore.match(/(?:^|\s)#([A-Za-z0-9_/.!?-]*)$/);
     // Require a letter to have been typed before suggesting, so a lone `#` (e.g. starting a heading
     // in plain markdown) doesn't pop the menu until it's clearly a tag.
     if (!m || m[1] === "") return setTag(null);
@@ -1193,6 +1463,7 @@ export default function Editor({
     if (taskDepth < 0 || !empty) {
       setTaskHint(null);
       setTaskMenuOpen(false);
+      setPriorityOpen(false);
       return;
     }
     // Anchor the `+` exactly where the caret sits at the END of the task's text — i.e. right after
@@ -1231,9 +1502,18 @@ export default function Editor({
   // Run a task-property action (the same handlers the slash commands use) from the + menu.
   const runTaskProp = useCallback((id: "due" | "repeat") => {
     setTaskMenuOpen(false);
+    setPriorityOpen(false);
     const ed = editorRef.current;
     const cmd = COMMANDS.find((c) => c.id === id);
     if (cmd && ed) cmd.run(ed, ctxRef.current);
+  }, []);
+
+  // Set/clear the priority of the task under the caret from the + menu's Priority submenu.
+  const runPriority = useCallback((level: string | null) => {
+    setTaskMenuOpen(false);
+    setPriorityOpen(false);
+    const ed = editorRef.current;
+    if (ed) setPriorityInEditor(ed, level);
   }, []);
 
   const filtered = slash
@@ -1483,10 +1763,89 @@ export default function Editor({
     return () => window.removeEventListener("keydown", onKey);
   }, [onPageWidthChange]);
 
+  // Build and open the right-click menu at the pointer. Items adapt to the selection: the text
+  // toggles always show (with their on/off state); the sort actions appear only when the selection
+  // spans more than one block (sorting a single line is meaningless). We never preventDefault on a
+  // right-click over a link/image so their own affordances aren't shadowed.
+  const onEditorContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      const ed = editorRef.current;
+      if (!ed) return;
+      // Let the native menu through on media/links so "Save image", "Open link" etc. stay available.
+      const target = e.target as HTMLElement;
+      if (target.closest("img, a, .wikilink, .query-block")) return;
+      e.preventDefault();
+
+      // Right-click outside the current selection moves the caret there first, so toggles act where
+      // the user clicked (matches every native editor).
+      const posInfo = ed.view.posAtCoords({ left: e.clientX, top: e.clientY });
+      const { from, to } = ed.state.selection;
+      const clickedInside = posInfo && posInfo.pos >= from && posInfo.pos <= to;
+      if (posInfo && !clickedInside) {
+        ed.chain().focus().setTextSelection(posInfo.pos).run();
+      } else {
+        ed.view.focus();
+      }
+
+      // Enabled only when the selection spans ≥2 sibling lines at one level — exactly the scope
+      // sortSelectedLines will reorder, so the affordance never promises more than it delivers.
+      const canSort = !!selectedSiblings(ed.state);
+
+      const toggle = (label: string, icon: React.ReactNode, fn: () => void, isActive: boolean, shortcut?: string): MenuItem => ({
+        label, icon, shortcut, active: isActive, onClick: fn,
+      });
+
+      const items: MenuItem[] = [
+        toggle("Bold", <TextB size={16} />, () => ed.chain().focus().toggleBold().run(), ed.isActive("bold"), "Ctrl+B"),
+        toggle("Italic", <TextItalic size={16} />, () => ed.chain().focus().toggleItalic().run(), ed.isActive("italic"), "Ctrl+I"),
+        toggle("Strikethrough", <TextStrikethrough size={16} />, () => ed.chain().focus().toggleStrike().run(), ed.isActive("strike"), "Ctrl+Shift+S"),
+        toggle("Inline code", <Code size={16} />, () => ed.chain().focus().toggleCode().run(), ed.isActive("code"), "Ctrl+E"),
+        toggle("Link", <LinkSimpleHorizontal size={16} />, async () => {
+          const prev = ed.getAttributes("link").href ?? "";
+          const href = await dialogs.prompt({ title: "Link", placeholder: "https://…", defaultValue: prev });
+          if (href === null) return;
+          if (href === "") ed.chain().focus().unsetLink().run();
+          else ed.chain().focus().setLink({ href }).run();
+        }, ed.isActive("link")),
+      ];
+
+      // Sort actions — disabled (shown but dimmed) when there's nothing multi-line to sort, so the
+      // menu's shape stays stable and the affordance is discoverable.
+      const sort = (label: string, icon: React.ReactNode, mode: SortMode): MenuItem => ({
+        label, icon, separator: label === "Sort A → Z", disabled: !canSort,
+        onClick: () => sortSelectedLines(ed, mode),
+      });
+      items.push(
+        sort("Sort A → Z", <SortAscending size={16} />, "asc"),
+        sort("Sort Z → A", <SortDescending size={16} />, "desc"),
+        sort("Sort by date", <CalendarCheck size={16} />, "date"),
+        sort("Sort by length", <Minus size={16} />, "length"),
+      );
+
+      // Done-sort: only over a selection of task items. Unchecked-first, then a checked-first
+      // variant — handy for pushing finished to-dos to the bottom (or surfacing them on top).
+      if (selectionHasTasks(ed.state)) {
+        items.push(
+          {
+            label: "Sort by done — to-do first", icon: <Circle size={16} />, separator: true,
+            onClick: () => sortSelectedLines(ed, "done"),
+          },
+          {
+            label: "Sort by done — done first", icon: <CheckCircle size={16} />,
+            onClick: () => sortSelectedLines(ed, "done-desc"),
+          },
+        );
+      }
+
+      setCtxMenu({ x: e.clientX, y: e.clientY, items });
+    },
+    []
+  );
+
   if (!editor) return null;
 
   return (
-    <div className="editor-wrap">
+    <div className="editor-wrap" onContextMenu={onEditorContextMenu}>
       <Toolbar editor={editor} />
       {rulerOpen && onPageWidthChange && (
         <PageRuler width={pageWidth} onCommit={onPageWidthChange} />
@@ -1617,9 +1976,58 @@ export default function Editor({
                   <span className="slash-hint">🔁 Repeat this task</span>
                 </span>
               </button>
+              <button
+                className={`slash-item${priorityOpen ? " expanded" : ""}`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setPriorityOpen((o) => !o);
+                }}
+                aria-expanded={priorityOpen}
+              >
+                <span className="slash-icon"><Flag size={16} /></span>
+                <span className="slash-text">
+                  <span className="slash-label">Priority</span>
+                  <span className="slash-hint">Flag importance</span>
+                </span>
+                <CaretRight size={13} className={`slash-caret${priorityOpen ? " open" : ""}`} />
+              </button>
+              {priorityOpen && (
+                <div className="task-hint-submenu" role="group" aria-label="Set priority">
+                  {[
+                    { level: "high", label: "High", cls: "prio-high" },
+                    { level: "medium", label: "Medium", cls: "prio-medium" },
+                    { level: "low", label: "Low", cls: "prio-low" },
+                    { level: null, label: "None", cls: "prio-none" },
+                  ].map((p) => (
+                    <button
+                      key={p.label}
+                      className={`slash-item slash-subitem ${p.cls}`}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        runPriority(p.level);
+                      }}
+                    >
+                      <span className="slash-icon">
+                        {p.level ? <Flag size={14} weight="fill" /> : <Flag size={14} />}
+                      </span>
+                      <span className="slash-text">
+                        <span className="slash-label">{p.label}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
+      )}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={ctxMenu.items}
+          onClose={() => setCtxMenu(null)}
+        />
       )}
     </div>
   );

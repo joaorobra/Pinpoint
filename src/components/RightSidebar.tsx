@@ -11,6 +11,7 @@ import {
 import { pathFor, template, labelFor, step, type Period } from "../periodic";
 import { api } from "../api";
 import { formatDate } from "../dateformat";
+import { stripTaskMeta } from "../markdown";
 import type { TaskRow } from "../types";
 
 type RightTab = "hierarchy" | "calendar";
@@ -481,5 +482,5 @@ function labelForDay(d: Date, fmt?: string): string {
 
 /** Strip task metadata (📅/🔁 markers, #tags) for a clean agenda label. */
 function taskLabel(text: string): string {
-  return text.replace(/[📅🔁]\s*\S+/g, "").replace(/#[\w/-]+/g, "").trim() || "(untitled task)";
+  return stripTaskMeta(text) || "(untitled task)";
 }

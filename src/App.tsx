@@ -19,11 +19,14 @@ import {
   Folder,
   CaretLeft,
   CaretRight,
+  CaretDown,
   X,
   File as FileIcon,
   Database,
   Stack,
   SidebarSimple,
+  MagnifyingGlass,
+  Tag,
 } from "@phosphor-icons/react";
 import { api, pickVaultFolder, resolveRecentVault, listRecentVaults } from "./api";
 import { getTheme, seedStarterThemes } from "./themes-store";
@@ -32,13 +35,16 @@ import type { Theme } from "./types";
 import { slideFade, transition } from "./motion";
 import { useViewport } from "./hooks/useViewport";
 import Breadcrumb from "./components/Breadcrumb";
+import PathBreadcrumb from "./components/PathBreadcrumb";
+import FolderView from "./components/FolderView";
+import Tooltip from "./components/Tooltip";
 import StartScreen from "./components/StartScreen";
 import type { NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS, extForMime } from "./types";
 import { collectTemplates, fillTemplate, stripCursor, type FillContext, type TemplateInfo } from "./templates";
 import type { Period } from "./periodic";
 import Editor from "./components/Editor";
-import FileTree, { type SelectMods } from "./components/FileTree";
+import FileTree, { type SelectMods, type TreeCommands } from "./components/FileTree";
 import ContextMenu from "./components/ContextMenu";
 import type { MenuItem } from "./components/ContextMenu";
 import CreateDialog from "./components/CreateDialog";
@@ -58,15 +64,21 @@ import TagsView from "./components/TagsView";
 import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
 import { DialogHost, dialogs } from "./components/Dialogs";
+import { ToastHost, toast } from "./components/Toast";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
 import ShortcutsPopup from "./components/ShortcutsPopup";
 import PageProperties from "./components/PageProperties";
+import PageTitle from "./components/PageTitle";
 import Titlebar from "./components/Titlebar";
+
+// Platform-friendly modifier label for shortcut hints (⌘ on macOS, Ctrl elsewhere).
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform);
 
 type RightTab = "editor" | "tasks" | "query" | "tags" | "trash";
 
 /** The three kinds of document an open tab can hold. */
-type DocKind = "page" | "asset" | "db";
+type DocKind = "page" | "asset" | "db" | "folder";
 
 // Pasted/dropped images live in a single vault-root `.attachments` folder (a dotfolder, so it
 // stays out of the file tree like `.obsidian`). The markdown stores a vault-relative path into it
@@ -112,6 +124,9 @@ export default function App() {
   // The database folder currently shown in the table view, or null. Mutually exclusive with the
   // editor/asset panes (a database is a third kind of "doc").
   const [activeDb, setActiveDb] = useState<TreeNode | null>(null);
+  // A plain folder opened "as a page": shown as a gallery of its child folders/pages, or null.
+  // Mutually exclusive with the editor/asset/db panes (a fourth kind of "doc").
+  const [activeFolder, setActiveFolder] = useState<TreeNode | null>(null);
   // ---- Open-document tabs + back/forward history (browser-style) ----
   // The strip of documents the user has open. A doc is a page or an asset, keyed by rel_path
   // (we never open the same path twice). `activePath` above stays the single rendered doc.
@@ -165,6 +180,12 @@ export default function App() {
   // Whether the "?" keyboard-shortcuts cheat sheet is open.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const saveTimer = useRef<number | null>(null);
+  // FileTree populates this with a reveal(relPath) fn so the breadcrumb can jump to a folder.
+  const treeRevealRef = useRef<((relPath: string) => void) | null>(null);
+  // FileTree populates this with expand/collapse commands so the folder context menu can drive them.
+  const treeCmdRef = useRef<TreeCommands | null>(null);
+  // True while a re-index is running, so the button can show a spinner + disable.
+  const [reindexing, setReindexing] = useState(false);
 
   // ---- Resizable side panels ----
   // Widths (px) of the left and right sidebars, persisted in localStorage (app-global UI state,
@@ -279,12 +300,15 @@ export default function App() {
       root.dataset.theme = settings.theme;
       // 1) Theme core tokens (or clear them so the stock stylesheet wins when no theme is active).
       applyTheme(activeTheme, resolveMode(settings.theme));
-      // 2) Fonts: a theme may override them; otherwise the Typography settings stand.
-      root.style.setProperty("--font-ui", activeTheme?.fonts?.ui || settings.font_family);
-      root.style.setProperty("--font-editor", activeTheme?.fonts?.editor || settings.editor_font_family);
-      root.style.setProperty("--font-size", `${settings.font_size}px`);
-      root.style.setProperty("--line-height", String(settings.line_height));
-      root.style.setProperty("--page-width", `${settings.page_width || 820}px`);
+      // 2) Typography: the active theme owns it (fonts, size, line-height, page width); any field the
+      // theme leaves unset ("Inherit") falls back to the global Settings value, so palette-only themes
+      // don't disturb the reader's type choices.
+      const ty = activeTheme?.type;
+      root.style.setProperty("--font-ui", ty?.ui || settings.font_family);
+      root.style.setProperty("--font-editor", ty?.editor || settings.editor_font_family);
+      root.style.setProperty("--font-size", `${ty?.size || settings.font_size}px`);
+      root.style.setProperty("--line-height", String(ty?.lineHeight || settings.line_height));
+      root.style.setProperty("--page-width", `${ty?.pageWidth || settings.page_width || 820}px`);
       // Whole-UI scaling: `zoom` scales layout + fonts + icons uniformly while keeping the app
       // filling the viewport and scrollbars/hit-testing correct (unlike transform: scale).
       document.body.style.zoom = String(settings.ui_zoom || 1);
@@ -450,6 +474,7 @@ export default function App() {
       const doc = await api.readPage(relPath);
       setActiveAsset(null);
       setActiveDb(null);
+      setActiveFolder(null);
       setActivePath(relPath);
       setBody(doc.body);
       setFrontmatter(doc.frontmatter as Record<string, unknown>);
@@ -479,6 +504,7 @@ export default function App() {
     (node: TreeNode) => {
       setActiveAsset(node);
       setActiveDb(null);
+      setActiveFolder(null);
       setActivePath(node.rel_path);
       setTab("editor");
       addTab(node.rel_path, "asset");
@@ -493,6 +519,7 @@ export default function App() {
     (node: TreeNode) => {
       setActiveAsset(null);
       setActiveDb(node);
+      setActiveFolder(null);
       setActivePath(node.rel_path);
       setReloadKey(node.rel_path + ":" + Date.now());
       setTab("editor");
@@ -502,6 +529,40 @@ export default function App() {
       closeLeftOnMobile();
     },
     [addTab, pushHistory, closeLeftOnMobile]
+  );
+
+  // Open a plain folder "as a page": show its direct children (subfolders + pages) as a gallery.
+  // A fourth doc kind alongside pages, assets, and databases.
+  const openFolder = useCallback(
+    (node: TreeNode) => {
+      setActiveAsset(null);
+      setActiveDb(null);
+      setActiveFolder(node);
+      setActivePath(node.rel_path);
+      setReloadKey(node.rel_path + ":" + Date.now());
+      setTab("editor");
+      setDirty(false);
+      addTab(node.rel_path, "folder");
+      pushHistory(node.rel_path);
+      closeLeftOnMobile();
+    },
+    [addTab, pushHistory, closeLeftOnMobile]
+  );
+
+  // Single dispatcher: open any tree node in its natural view (database/folder gallery for dirs,
+  // editor for markdown, viewer for other assets). Used by the folder gallery's card clicks.
+  const openNode = useCallback(
+    (node: TreeNode) => {
+      if (node.is_dir) {
+        if (node.is_database) openDatabase(node);
+        else openFolder(node);
+      } else if (node.ext === "") {
+        void openPage(node.rel_path);
+      } else {
+        openAsset(node);
+      }
+    },
+    [openDatabase, openFolder, openPage, openAsset]
   );
 
   // Find a node anywhere in the tree by rel_path (used to re-open an asset tab/history entry,
@@ -520,6 +581,18 @@ export default function App() {
     [tree]
   );
 
+  // A folder crumb in a breadcrumb was clicked: open that folder as a gallery page (its natural
+  // view), and reveal it in the tree for orientation. Falls back to a tree reveal if the node
+  // can't be resolved (e.g. mid-refresh).
+  const openFolderCrumb = useCallback(
+    (folderRelPath: string) => {
+      const node = findNode(folderRelPath);
+      if (node) openNode(node);
+      treeRevealRef.current?.(folderRelPath);
+    },
+    [findNode, openNode]
+  );
+
   // Activate an already-known doc (tab click / history replay) by path, picking page/asset/db.
   const activateDoc = useCallback(
     (path: string, kind: DocKind) => {
@@ -529,11 +602,14 @@ export default function App() {
       } else if (kind === "db") {
         const node = findNode(path);
         if (node) openDatabase(node);
+      } else if (kind === "folder") {
+        const node = findNode(path);
+        if (node) openFolder(node);
       } else {
         openPage(path);
       }
     },
-    [findNode, openPage, openAsset, openDatabase]
+    [findNode, openPage, openAsset, openDatabase, openFolder]
   );
 
   // Switch to an open tab without recording new history.
@@ -1233,16 +1309,21 @@ export default function App() {
   const deleteNode = useCallback(
     async (node: TreeNode, permanent = false) => {
       const what = node.is_dir ? "folder (and everything in it)" : "file";
-      const ok = await dialogs.confirm({
-        title: permanent ? `Permanently delete this ${what}?` : `Move this ${what} to Trash?`,
-        message: permanent ? `${node.rel_path}\n\nThis can't be undone.` : node.rel_path,
-        confirmLabel: permanent ? "Delete forever" : "Move to Trash",
-        danger: true,
-      });
-      if (!ok) return;
+      // Permanent delete is irreversible → confirm. Soft-trash is recoverable → skip confirm and
+      // offer Undo instead, matching deleteMany.
+      if (permanent) {
+        const ok = await dialogs.confirm({
+          title: `Permanently delete this ${what}?`,
+          message: `${node.rel_path}\n\nThis can't be undone.`,
+          confirmLabel: "Delete forever",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      let trashedId: string | null = null;
       try {
         if (permanent) await api.deletePage(node.rel_path);
-        else await api.trashPage(node.rel_path);
+        else trashedId = (await api.trashPage(node.rel_path)).id;
       } catch (e) {
         await dialogs.alert({ title: "Delete failed", message: String(e) });
         return;
@@ -1263,6 +1344,21 @@ export default function App() {
       forgetTabs((p) => p === node.rel_path || p.startsWith(prefix));
       setTrashRefresh((k) => k + 1);
       setTaskRefresh((k) => k + 1);
+      if (trashedId) {
+        const id = trashedId;
+        toast.show({
+          message: `Moved “${node.name}” to Trash`,
+          action: {
+            label: "Undo",
+            run: async () => {
+              await api.restoreTrash(id).catch(() => {});
+              await refreshTree();
+              setTrashRefresh((k) => k + 1);
+              setTaskRefresh((k) => k + 1);
+            },
+          },
+        });
+      }
     },
     [refreshTree, forgetTabs]
   );
@@ -1281,20 +1377,24 @@ export default function App() {
         }
         return true;
       });
-      const ok = await dialogs.confirm({
-        title: permanent
-          ? `Permanently delete ${roots.length} item${roots.length === 1 ? "" : "s"}?`
-          : `Move ${roots.length} item${roots.length === 1 ? "" : "s"} to Trash?`,
-        message: permanent ? `${roots.join("\n")}\n\nThis can't be undone.` : roots.join("\n"),
-        confirmLabel: permanent ? "Delete forever" : "Move to Trash",
-        danger: true,
-      });
-      if (!ok) return;
+      // Permanent delete is irreversible → confirm. Soft-trash is recoverable, so we skip the
+      // confirm and offer an Undo toast instead (forgiving-by-default).
+      if (permanent) {
+        const ok = await dialogs.confirm({
+          title: `Permanently delete ${roots.length} item${roots.length === 1 ? "" : "s"}?`,
+          message: `${roots.join("\n")}\n\nThis can't be undone.`,
+          confirmLabel: "Delete forever",
+          danger: true,
+        });
+        if (!ok) return;
+      }
       const failed: string[] = [];
+      // Trash-entry ids captured so the Undo toast can restore exactly what we just trashed.
+      const trashedIds: string[] = [];
       for (const p of roots) {
         try {
           if (permanent) await api.deletePage(p);
-          else await api.trashPage(p);
+          else trashedIds.push((await api.trashPage(p)).id);
         } catch {
           failed.push(p);
         }
@@ -1316,6 +1416,24 @@ export default function App() {
       setTaskRefresh((k) => k + 1);
       if (failed.length) {
         await dialogs.alert({ title: "Some deletes failed", message: failed.join("\n") });
+      }
+      // Offer one-click undo for the soft-trash path.
+      if (!permanent && trashedIds.length) {
+        const n = trashedIds.length;
+        toast.show({
+          message: `Moved ${n} item${n === 1 ? "" : "s"} to Trash`,
+          action: {
+            label: "Undo",
+            run: async () => {
+              for (const id of trashedIds) {
+                await api.restoreTrash(id).catch(() => {});
+              }
+              await refreshTree();
+              setTrashRefresh((k) => k + 1);
+              setTaskRefresh((k) => k + 1);
+            },
+          },
+        });
       }
     },
     [refreshTree, forgetTabs]
@@ -1339,6 +1457,21 @@ export default function App() {
     },
     [refreshTree, openPage]
   );
+
+  // Rebuild the search/query index, with visible feedback (spinner while running, toast on done).
+  const doReindex = useCallback(async () => {
+    if (reindexing) return;
+    setReindexing(true);
+    try {
+      const count = await api.reindex();
+      setTaskRefresh((k) => k + 1);
+      toast.show({ message: `Re-indexed ${count} item${count === 1 ? "" : "s"}` });
+    } catch (e) {
+      await dialogs.alert({ title: "Re-index failed", message: String(e) });
+    } finally {
+      setReindexing(false);
+    }
+  }, [reindexing]);
 
   // Add a prefix or suffix to the display name of every selected row, in one prompt.
   // The affix is inserted into the leaf name only (path and extension are preserved), and any
@@ -1518,6 +1651,22 @@ export default function App() {
         if (!node.is_database) {
           items.push({ label: "Convert to Database", icon: <Database size={MI} />, onClick: () => convertToDatabase(node) });
         }
+        // Expand / collapse the whole subtree at once. Only offered when the folder actually
+        // contains sub-folders — otherwise the commands would be no-ops.
+        const hasSubfolders = node.children.some((c) => c.is_dir);
+        if (hasSubfolders) {
+          items.push({
+            label: "Expand all",
+            icon: <CaretDown size={MI} />,
+            separator: true,
+            onClick: () => treeCmdRef.current?.expand(node.rel_path),
+          });
+          items.push({
+            label: "Collapse all",
+            icon: <CaretRight size={MI} />,
+            onClick: () => treeCmdRef.current?.collapse(node.rel_path),
+          });
+        }
         items.push(iconItem);
         items.push({ label: "Rename", icon: <PencilSimple size={MI} />, onClick: () => renameNode(node) });
         items.push({ label: "Copy path", icon: <Copy size={MI} />, onClick: () => navigator.clipboard?.writeText(node.rel_path) });
@@ -1645,7 +1794,7 @@ export default function App() {
         label: "Re-index vault",
         hint: "Rescan files",
         icon: ArrowsClockwise,
-        run: () => api.reindex().then(() => setTaskRefresh((k) => k + 1)),
+        run: () => void doReindex(),
       },
       { id: "settings", label: "Open settings", hint: "Appearance & more", icon: GearSix, run: () => setShowSettings(true) },
       { id: "switch-vault", label: "Switch vault", hint: "Back to start", icon: FolderOpen, run: switchVault },
@@ -1653,7 +1802,7 @@ export default function App() {
       { id: "tab-query", label: "Go to Query", icon: FileText, run: () => setTab("query") },
       { id: "tab-trash", label: "Open Trash", hint: "Restore deleted items", icon: Trash, run: () => setTab("trash") },
     ],
-    [newPage, switchVault]
+    [newPage, switchVault, doReindex]
   );
 
   // Scroll the editor to a heading picked in the right sidebar's outline. The editor renders
@@ -1745,26 +1894,48 @@ export default function App() {
             <FolderOpen size={16} weight="fill" /> {vaultName}
           </button>
           <div className="sidebar-actions">
-            <button
-              className={addMenu ? "is-active" : undefined}
-              title="Create…"
-              aria-haspopup="menu"
-              aria-expanded={addMenu ? true : false}
-              onClick={(e) => {
-                if (addMenu) { setAddMenu(null); return; }
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setAddMenu({ x: r.left, y: r.bottom + 4 });
-              }}
-            >
-              <Plus size={16} weight="bold" />
-            </button>
-            <button onClick={() => api.reindex().then(() => setTaskRefresh((k) => k + 1))} title="Re-index">
-              <ArrowsClockwise size={16} weight="bold" />
-            </button>
-            <button onClick={() => setShowSettings(true)} title="Settings"><GearSix size={16} weight="bold" /></button>
-            <button onClick={toggleLeft} title="Hide sidebar"><SidebarSimple size={16} weight="bold" /></button>
+            <Tooltip label="Create…">
+              <button
+                className={addMenu ? "is-active" : undefined}
+                aria-label="Create…"
+                aria-haspopup="menu"
+                aria-expanded={addMenu ? true : false}
+                onClick={(e) => {
+                  if (addMenu) { setAddMenu(null); return; }
+                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  setAddMenu({ x: r.left, y: r.bottom + 4 });
+                }}
+              >
+                <Plus size={16} weight="bold" />
+              </button>
+            </Tooltip>
+            <Tooltip label={reindexing ? "Re-indexing…" : "Re-index"}>
+              <button
+                onClick={() => void doReindex()}
+                disabled={reindexing}
+                aria-label="Re-index vault"
+              >
+                <ArrowsClockwise size={16} weight="bold" className={reindexing ? "spin" : undefined} />
+              </button>
+            </Tooltip>
+            <Tooltip label="Settings">
+              <button onClick={() => setShowSettings(true)} aria-label="Settings"><GearSix size={16} weight="bold" /></button>
+            </Tooltip>
+            <Tooltip label="Hide sidebar">
+              <button onClick={toggleLeft} aria-label="Hide sidebar"><SidebarSimple size={16} weight="bold" /></button>
+            </Tooltip>
           </div>
         </div>
+        <button
+          className="sidebar-search"
+          onClick={() => setPaletteOpen(true)}
+          title="Search & commands"
+          aria-keyshortcuts={IS_MAC ? "Meta+K" : "Control+K"}
+        >
+          <MagnifyingGlass size={15} weight="bold" />
+          <span className="sidebar-search-label">Search…</span>
+          <kbd className="sidebar-search-kbd">{IS_MAC ? "⌘K" : "Ctrl K"}</kbd>
+        </button>
         <div className="tree">
           <FileTree
             node={tree}
@@ -1775,6 +1946,7 @@ export default function App() {
             onOpen={openPage}
             onOpenAsset={openAsset}
             onOpenDatabase={openDatabase}
+            onOpenFolder={openFolder}
             onContextMenu={(node, x, y) => {
               // Right-clicking outside the current multi-selection resets it to that row,
               // so the bulk menu only shows when you right-click within the selection.
@@ -1785,6 +1957,8 @@ export default function App() {
             renamingPath={renamingPath}
             onRenameCommit={commitRename}
             onRenameCancel={() => setRenamingPath(null)}
+            revealRef={treeRevealRef}
+            cmdRef={treeCmdRef}
           />
         </div>
         <button
@@ -1814,6 +1988,7 @@ export default function App() {
             path={activePath ?? ""}
             onToggleLeft={toggleLeft}
             onToggleRight={toggleRight}
+            onNavigateFolder={openFolderCrumb}
             leftOpen={leftOpen}
             rightOpen={rightOpen}
           />
@@ -1821,33 +1996,36 @@ export default function App() {
         <div className="tabs">
           <div className="nav-arrows">
             {!leftOpen && (
+              <Tooltip label="Show sidebar">
+                <button
+                  className="nav-arrow"
+                  onClick={toggleLeft}
+                  aria-label="Show sidebar"
+                >
+                  <SidebarSimple size={15} weight="bold" />
+                </button>
+              </Tooltip>
+            )}
+            <Tooltip label="Back (Alt+←)">
               <button
                 className="nav-arrow"
-                onClick={toggleLeft}
-                title="Show sidebar"
-                aria-label="Show sidebar"
+                disabled={!canBack}
+                onClick={() => navHistory(-1)}
+                aria-label="Back"
               >
-                <SidebarSimple size={15} weight="bold" />
+                <CaretLeft size={15} weight="bold" />
               </button>
-            )}
-            <button
-              className="nav-arrow"
-              disabled={!canBack}
-              onClick={() => navHistory(-1)}
-              title="Back (Alt+←)"
-              aria-label="Back"
-            >
-              <CaretLeft size={15} weight="bold" />
-            </button>
-            <button
-              className="nav-arrow"
-              disabled={!canForward}
-              onClick={() => navHistory(1)}
-              title="Forward (Alt+→)"
-              aria-label="Forward"
-            >
-              <CaretRight size={15} weight="bold" />
-            </button>
+            </Tooltip>
+            <Tooltip label="Forward (Alt+→)">
+              <button
+                className="nav-arrow"
+                disabled={!canForward}
+                onClick={() => navHistory(1)}
+                aria-label="Forward"
+              >
+                <CaretRight size={15} weight="bold" />
+              </button>
+            </Tooltip>
           </div>
 
           <div className="doc-tabs" role="tablist">
@@ -1858,6 +2036,9 @@ export default function App() {
                 <div
                   key={d.path}
                   className={`doc-tab${isActive ? " active" : ""}`}
+                  role="tab"
+                  aria-selected={isActive}
+                  tabIndex={isActive ? 0 : -1}
                   title={d.path}
                   onMouseDown={(e) => {
                     // Middle-click closes, like a browser.
@@ -1884,7 +2065,7 @@ export default function App() {
                   >
                     <NodeIconView
                       icon={settings.node_icons[d.path]}
-                      fallback={d.kind === "asset" ? FileIcon : d.kind === "db" ? Database : FileText}
+                      fallback={d.kind === "asset" ? FileIcon : d.kind === "db" ? Database : d.kind === "folder" ? Folder : FileText}
                     />
                   </button>
                   <span className="doc-tab-label">{label}</span>
@@ -1905,23 +2086,42 @@ export default function App() {
           </div>
 
           <div className="view-tabs">
-            <button className={tab === "tasks" ? "active" : ""} onClick={() => setTab("tasks")}>
-              Tasks
-            </button>
-            <button className={tab === "query" ? "active" : ""} onClick={() => setTab("query")}>
-              Query
-            </button>
-            <button className={tab === "tags" ? "active" : ""} onClick={() => setTab("tags")}>
-              Tags
-            </button>
-            <button
-              className={`right-toggle${rightOpen ? " active" : ""}`}
-              onClick={toggleRight}
-              title={rightOpen ? "Hide right panel" : "Show right panel"}
-              aria-label={rightOpen ? "Hide right panel" : "Show right panel"}
-            >
-              <SidebarSimple size={15} weight="bold" style={{ transform: "scaleX(-1)" }} />
-            </button>
+            <Tooltip label="Tasks">
+              <button
+                className={tab === "tasks" ? "active" : ""}
+                onClick={() => setTab("tasks")}
+                aria-label="Tasks"
+              >
+                <CheckCircle size={15} weight="bold" />
+              </button>
+            </Tooltip>
+            <Tooltip label="Query">
+              <button
+                className={tab === "query" ? "active" : ""}
+                onClick={() => setTab("query")}
+                aria-label="Query"
+              >
+                <MagnifyingGlass size={15} weight="bold" />
+              </button>
+            </Tooltip>
+            <Tooltip label="Tags">
+              <button
+                className={tab === "tags" ? "active" : ""}
+                onClick={() => setTab("tags")}
+                aria-label="Tags"
+              >
+                <Tag size={15} weight="bold" />
+              </button>
+            </Tooltip>
+            <Tooltip label={rightOpen ? "Hide right panel" : "Show right panel"} side="left">
+              <button
+                className={`right-toggle${rightOpen ? " active" : ""}`}
+                onClick={toggleRight}
+                aria-label={rightOpen ? "Hide right panel" : "Show right panel"}
+              >
+                <SidebarSimple size={15} weight="bold" style={{ transform: "scaleX(-1)" }} />
+              </button>
+            </Tooltip>
           </div>
           {activePath && !activeAsset && !activeDb && tab === "editor" && (
             <PageProperties
@@ -1941,7 +2141,7 @@ export default function App() {
             // Editor mounted (key unchanged) while you type, so focus/cursor survive keystrokes.
             key={
               tab === "editor"
-                ? `editor:${activeDb?.rel_path ?? activeAsset?.rel_path ?? activePath ?? "empty"}`
+                ? `editor:${activeFolder?.rel_path ?? activeDb?.rel_path ?? activeAsset?.rel_path ?? activePath ?? "empty"}`
                 : tab
             }
             className="content-view"
@@ -1951,7 +2151,21 @@ export default function App() {
             transition={transition("fast")}
           >
           {tab === "editor" &&
-            (activeDb ? (
+            (activeFolder ? (
+              <FolderView
+                node={activeFolder}
+                nodeIcons={settings.node_icons}
+                onOpenNode={openNode}
+                onPickIcon={(n) => setIconTarget(n.rel_path)}
+                onCreate={(kind, folderRel) =>
+                  tree && setCreate({ kind, tree, initialParent: folderRel })
+                }
+                onRevealInTree={openFolderCrumb}
+                onNavigateRoot={() => {
+                  if (!leftOpen) toggleLeft();
+                }}
+              />
+            ) : activeDb ? (
               <DatabaseView
                 node={activeDb}
                 reloadKey={reloadKey}
@@ -2002,23 +2216,47 @@ export default function App() {
                 snippets={settings.snippets}
                 snippetDelimiter={settings.snippet_delimiter}
                 headerSlot={
-                  activePageDb ? (
-                    <DbPageProperties
-                      dbPath={activePageDb.rel_path}
-                      pagePath={activePath}
-                      frontmatter={frontmatter}
-                      onChange={setRowFields}
-                      onRenameTitle={renameRowTitle}
-                      dateFormat={settings.date_format}
-                    />
-                  ) : activeTemplate ? (
-                    <TemplateBuilderBar
-                      onInsert={(text) => setTokenInsert((s) => ({ text, n: s.n + 1 }))}
-                      dateFormat={settings.date_format}
-                      timeFormat={settings.time_format}
-                      showPeriodic={activeTemplate.isPeriodic}
-                    />
-                  ) : undefined
+                  <>
+                    {activePath && !vp.isMobile && (
+                      <PathBreadcrumb
+                        path={activePath}
+                        icons={settings.node_icons}
+                        onNavigateRoot={() => {
+                          if (!leftOpen) toggleLeft();
+                        }}
+                        onNavigateFolder={openFolderCrumb}
+                      />
+                    )}
+                    {activePath && (
+                      <PageTitle
+                        title={(activePath.split("/").pop() ?? "").replace(/\.md$/i, "")}
+                        icon={settings.node_icons[activePath]}
+                        fallback={FileText}
+                        onCommit={(next) => {
+                          const node = findNode(activePath);
+                          if (node) void commitRename(node, next);
+                        }}
+                        onPickIcon={() => setIconTarget(activePath)}
+                      />
+                    )}
+                    {activePageDb ? (
+                      <DbPageProperties
+                        dbPath={activePageDb.rel_path}
+                        pagePath={activePath}
+                        frontmatter={frontmatter}
+                        onChange={setRowFields}
+                        onRenameTitle={renameRowTitle}
+                        dateFormat={settings.date_format}
+                      />
+                    ) : activeTemplate ? (
+                      <TemplateBuilderBar
+                        onInsert={(text) => setTokenInsert((s) => ({ text, n: s.n + 1 }))}
+                        dateFormat={settings.date_format}
+                        timeFormat={settings.time_format}
+                        showPeriodic={activeTemplate.isPeriodic}
+                      />
+                    ) : null}
+                  </>
                 }
               />
             ) : (
@@ -2027,7 +2265,15 @@ export default function App() {
               </div>
             ))}
           {tab === "tasks" && (
-            <TasksView onOpen={openPage} refreshKey={taskRefresh} dateFormat={settings.task_date_format} />
+            <TasksView
+              onOpen={openPage}
+              onOpenName={openPageByName}
+              refreshKey={taskRefresh}
+              dateFormat={settings.task_date_format}
+              periodicFolder={settings.periodic_folder}
+              dailyFormat={settings.periodic_label_format}
+              onChanged={() => setTaskRefresh((k) => k + 1)}
+            />
           )}
           {tab === "query" && <QueryView seedFrom={queryTagSeed} />}
           {tab === "tags" && (
@@ -2185,6 +2431,7 @@ export default function App() {
       </AnimatePresence>
 
       <DialogHost />
+      <ToastHost />
     </div>
     </>
   );

@@ -128,6 +128,12 @@ const tauriApi = {
    */
   toggleTask: (relPath: string, line: number, occurrence: string | null) =>
     invoke<void>("toggle_task", { relPath, line, occurrence }),
+  /** Set or clear (`level: null`) a task's `priority:: …` field. */
+  setTaskPriority: (relPath: string, line: number, level: string | null) =>
+    invoke<void>("set_task_priority", { relPath, line, level }),
+  /** Move a task (+ its subtasks) out of `fromRel` and under a `## Tasks` heading in `toRel`. */
+  moveTaskBlock: (fromRel: string, line: number, toRel: string) =>
+    invoke<void>("move_task_block", { fromRel, line, toRel }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (s: Settings) => invoke<void>("save_settings", { s }),
   // Themes: raw JSON blobs stored under `.themes/`. The frontend owns the `Theme` shape.

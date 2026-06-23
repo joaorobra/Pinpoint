@@ -22,6 +22,7 @@ import {
   Sparkle,
   MagnifyingGlass,
   CaretDown,
+  ArrowUDownLeft,
   X,
 } from "@phosphor-icons/react";
 import {
@@ -29,6 +30,7 @@ import {
   type Theme,
   type ThemeColors,
   type ThemeInfo,
+  type ThemeType,
 } from "../types";
 import {
   listThemeInfos,
@@ -58,8 +60,13 @@ interface Props {
   activeName: string;
   /** Select a theme by name ("" selects the built-in Default). */
   onSelect: (name: string) => void;
-  /** Font groups reused from the Typography tab so a theme's font overrides match the app's set. */
+  /** Font groups shared with the app's font set so a theme's font overrides match it. */
   fontGroups: SelectGroup[];
+  /**
+   * The global typography baseline a theme's unset ("Inherit") fields fall back to — shown as the
+   * resolved value next to each slider so the user sees what Inherit means.
+   */
+  baseType: Required<ThemeType>;
 }
 
 /**
@@ -154,7 +161,72 @@ function ThemeCard({
   );
 }
 
-export default function ThemeManager({ activeName, onSelect, fontGroups }: Props) {
+/**
+ * A theme typography slider with an "Inherit" state. When `value` is undefined the control sits at
+ * the inherited `base` and reads "Inherit (N)"; moving it sets an explicit override. A reset link
+ * (shown only while overridden) returns the field to Inherit.
+ */
+function TypeSlider({
+  label,
+  unit = "",
+  min,
+  max,
+  step,
+  decimals = 0,
+  value,
+  base,
+  onChange,
+}: {
+  label: string;
+  unit?: string;
+  min: number;
+  max: number;
+  step: number;
+  decimals?: number;
+  value: number | undefined;
+  base: number;
+  onChange: (v: number | undefined) => void;
+}) {
+  const overridden = value !== undefined;
+  const shown = overridden ? value : base;
+  const fmt = (n: number) => n.toFixed(decimals);
+  return (
+    <div className="theme-type-slider">
+      <div className="theme-type-slider-head">
+        <label>{label}</label>
+        <span className={`theme-type-val${overridden ? " is-set" : ""}`}>
+          {overridden ? `${fmt(shown)}${unit}` : `Inherit (${fmt(base)}${unit})`}
+        </span>
+        {overridden && (
+          <button
+            type="button"
+            className="theme-type-reset"
+            title="Reset to Inherit"
+            onClick={() => onChange(undefined)}
+          >
+            <ArrowUDownLeft size={13} /> Inherit
+          </button>
+        )}
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={shown}
+        aria-label={label}
+        onChange={(e) => onChange(+e.target.value)}
+      />
+    </div>
+  );
+}
+
+export default function ThemeManager({ activeName, onSelect, fontGroups, baseType }: Props) {
+  // Font dropdowns gain a leading "Inherit" group so a theme can defer to the global font.
+  const INHERIT_FONT_GROUPS: SelectGroup[] = useMemo(
+    () => [{ label: "Inherit", options: [{ value: "", label: "— Inherit —" }] }, ...fontGroups],
+    [fontGroups]
+  );
   const [infos, setInfos] = useState<ThemeInfo[] | null>(null);
   // The theme currently open in the editor (a working draft), plus the name it was loaded under so
   // we can rename its file on save. null = gallery mode.
@@ -233,14 +305,15 @@ export default function ThemeManager({ activeName, onSelect, fontGroups }: Props
     );
   };
 
-  const setFont = (which: "ui" | "editor", value: string) => {
+  // Set (or clear, when value is undefined/empty) one typography field on the draft. An all-empty
+  // `type` collapses back to undefined so a palette-only theme stays font-neutral.
+  const setType = <K extends keyof ThemeType>(key: K, value: ThemeType[K] | undefined) => {
     setDraft((d) => {
       if (!d) return d;
-      const fonts = { ...(d.fonts ?? {}) };
-      if (value) fonts[which] = value;
-      else delete fonts[which];
-      const hasAny = fonts.ui || fonts.editor;
-      return { ...d, fonts: hasAny ? fonts : undefined };
+      const type: ThemeType = { ...(d.type ?? {}) };
+      if (value === undefined || value === "") delete type[key];
+      else type[key] = value;
+      return { ...d, type: Object.keys(type).length ? type : undefined };
     });
   };
 
@@ -350,33 +423,67 @@ export default function ThemeManager({ activeName, onSelect, fontGroups }: Props
             </div>
 
             <details className="theme-fonts">
-              <summary>Fonts (optional)</summary>
+              <summary>Typography (optional)</summary>
               <p className="theme-fonts-hint">
-                Override the UI / editor typeface while this theme is active. Leave unset to keep your
-                Typography settings.
+                Fonts, text size, line height and page width applied while this theme is active. Leave
+                any control on <em>Inherit</em> to keep the app’s global value.
               </p>
+
               <div className="theme-swatch-row">
                 <div className="theme-swatch-text">
                   <label>UI font</label>
+                  <span>The interface typeface</span>
                 </div>
                 <Select
-                  value={draft.fonts?.ui ?? ""}
-                  groups={[{ label: "Inherit", options: [{ value: "", label: "— Inherit —" }] }, ...fontGroups]}
-                  onChange={(v) => setFont("ui", v)}
+                  value={draft.type?.ui ?? ""}
+                  groups={INHERIT_FONT_GROUPS}
+                  onChange={(v) => setType("ui", v)}
                   ariaLabel="Theme UI font"
                 />
               </div>
               <div className="theme-swatch-row">
                 <div className="theme-swatch-text">
                   <label>Editor font</label>
+                  <span>The reading / writing typeface</span>
                 </div>
                 <Select
-                  value={draft.fonts?.editor ?? ""}
-                  groups={[{ label: "Inherit", options: [{ value: "", label: "— Inherit —" }] }, ...fontGroups]}
-                  onChange={(v) => setFont("editor", v)}
+                  value={draft.type?.editor ?? ""}
+                  groups={INHERIT_FONT_GROUPS}
+                  onChange={(v) => setType("editor", v)}
                   ariaLabel="Theme editor font"
                 />
               </div>
+
+              <TypeSlider
+                label="Font size"
+                unit="px"
+                min={12}
+                max={24}
+                step={1}
+                value={draft.type?.size}
+                base={baseType.size}
+                onChange={(v) => setType("size", v)}
+              />
+              <TypeSlider
+                label="Line height"
+                min={1.2}
+                max={2.2}
+                step={0.05}
+                decimals={2}
+                value={draft.type?.lineHeight}
+                base={baseType.lineHeight}
+                onChange={(v) => setType("lineHeight", v)}
+              />
+              <TypeSlider
+                label="Page width"
+                unit="px"
+                min={480}
+                max={1400}
+                step={10}
+                value={draft.type?.pageWidth}
+                base={baseType.pageWidth}
+                onChange={(v) => setType("pageWidth", v)}
+              />
             </details>
           </div>
 

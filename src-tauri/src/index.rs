@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     rrule      TEXT,            -- recurrence rule if present (🔁 / repeat::)
     tags       TEXT,            -- comma-joined #tags found on the line
     done_dates TEXT,            -- comma-joined ISO dates of completed occurrences (✅ … list)
+    priority   TEXT,            -- high | medium | low if present (priority:: …)
+    depth       INTEGER NOT NULL DEFAULT 0,  -- nesting level: 0 = top-level, 1 = subtask, …
+    parent_line INTEGER,         -- `line` of the enclosing task, or NULL for a top-level task
     PRIMARY KEY (rel_path, line)
 );
 CREATE INDEX IF NOT EXISTS idx_fields_key ON fields(key);
@@ -55,6 +58,13 @@ pub fn open(vault_root: &Path) -> Result<Connection> {
     std::fs::create_dir_all(&dir).ok();
     let conn = Connection::open(dir.join("index.sqlite")).context("open index db")?;
     conn.execute_batch(SCHEMA)?;
+    // Migrate older index DBs that predate the task-nesting columns. `CREATE TABLE IF NOT EXISTS`
+    // leaves an existing table untouched, so add the columns here; the duplicate-column error on an
+    // already-migrated DB is expected and ignored. The index is a rebuildable cache, so a failure
+    // here is non-fatal — a later rebuild() recreates the table from the current SCHEMA.
+    conn.execute("ALTER TABLE tasks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0", []).ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN parent_line INTEGER", []).ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN priority TEXT", []).ok();
     Ok(conn)
 }
 
@@ -147,6 +157,12 @@ pub struct TaskRow {
     pub tags: Option<String>,
     /// Comma-joined ISO dates of completed occurrences (the `✅ …` list). Empty when none.
     pub done_dates: Option<String>,
+    /// Normalized priority (`high`/`medium`/`low`) from a `priority:: …` field, or None.
+    pub priority: Option<String>,
+    /// Nesting level by indentation: 0 = top-level, 1 = subtask, and so on.
+    pub depth: i64,
+    /// `line` of the enclosing (less-indented) task, or None for a top-level task.
+    pub parent_line: Option<i64>,
 }
 
 /// Extract `#tags` from a line of text.
@@ -158,13 +174,20 @@ fn extract_tags(text: &str) -> Vec<String> {
         if bytes[i] == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
             let start = i + 1;
             let mut j = start;
+            // `.`, `!`, `?` are allowed inside a tag (e.g. `#people.John`)…
             while j < bytes.len()
-                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-' || bytes[j] == b'_' || bytes[j] == b'/')
+                && (bytes[j].is_ascii_alphanumeric()
+                    || matches!(bytes[j], b'-' | b'_' | b'/' | b'.' | b'!' | b'?'))
             {
                 j += 1;
             }
-            if j > start {
-                out.push(text[start..j].to_string());
+            // …but never as a trailing char, so sentence punctuation ("see #people.John.") drops off.
+            let mut end = j;
+            while end > start && matches!(bytes[end - 1], b'.' | b'!' | b'?') {
+                end -= 1;
+            }
+            if end > start {
+                out.push(text[start..end].to_string());
             }
             i = j;
         } else {
@@ -195,12 +218,17 @@ fn extract_wikilinks(text: &str) -> Vec<String> {
 }
 
 /// Parse a single line for task syntax.
-/// Returns Some((done, text, due, rrule, done_dates)) if it's a task, where `done_dates` is the
-/// comma-joined ISO list of completed occurrences from the `✅ …` marker.
+/// Returns Some((indent, done, text, due, rrule, done_dates, priority)) if it's a task, where
+/// `indent` is the width of leading whitespace (a tab counts as one column), `done_dates` is the
+/// comma-joined ISO list of completed occurrences from the `✅ …` marker, and `priority` is the
+/// normalized `high`/`medium`/`low` from a `priority:: …` field (None when absent/unrecognized).
 fn parse_task_line(
     line: &str,
-) -> Option<(bool, String, Option<String>, Option<String>, Option<String>)> {
+) -> Option<(usize, bool, String, Option<String>, Option<String>, Option<String>, Option<String>)> {
     let trimmed = line.trim_start();
+    // Indent = count of leading whitespace characters. Mixed tabs/spaces are compared by count,
+    // which is enough to establish relative nesting (deeper line = child of the nearest shallower).
+    let indent = line.len() - trimmed.len();
     let rest = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))?;
     let rest = rest.strip_prefix("[")?;
     let (mark, after) = rest.split_at(1);
@@ -234,8 +262,18 @@ fn parse_task_line(
             .collect::<Vec<_>>()
             .join(",")
     });
+    // `priority:: high` — a single keyword. Take only the first token (the value otherwise runs to
+    // end-of-line, which would swallow any text after it) and keep it only if it's a known level.
+    let priority = find_field(after, &["priority::"]).and_then(|s| {
+        match s.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str() {
+            "high" => Some("high".to_string()),
+            "medium" | "med" => Some("medium".to_string()),
+            "low" => Some("low".to_string()),
+            _ => None,
+        }
+    });
 
-    Some((done, after.to_string(), due, rrule, done_dates))
+    Some((indent, done, after.to_string(), due, rrule, done_dates, priority))
 }
 
 /// Rewrite a task line to reflect a toggle.
@@ -295,6 +333,70 @@ pub fn toggle_task_line(line: &str, occurrence: Option<&str>) -> Option<String> 
             Some(line)
         }
     }
+}
+
+/// Rewrite a task line's `priority:: <level>` field. `level` of `Some("high"|"medium"|"low")` sets
+/// or replaces it; `None` removes it. Any existing `priority:: …` token (the value is a single word)
+/// is stripped first, then the new one is appended at end-of-line so it sits alongside 📅/🔁 markers.
+/// Returns the new line, or `None` if `line` isn't a task line.
+pub fn set_task_priority_line(line: &str, level: Option<&str>) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, trimmed) = line.split_at(indent_len);
+    let rest = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))?;
+    let bullet = &trimmed[..trimmed.len() - rest.len()];
+    let rest = rest.strip_prefix('[')?;
+    let (mark, after) = rest.split_at(1);
+    let after = after.strip_prefix(']')?;
+    let body = after.strip_prefix(' ').unwrap_or(after);
+
+    // Drop an existing `priority:: <word>` (and tidy the surrounding spaces).
+    let cleaned = match body.find("priority::") {
+        Some(pos) => {
+            let before = &body[..pos];
+            let tail = body[pos + "priority::".len()..].trim_start();
+            // Skip the single value token; keep whatever followed it.
+            let after_val = tail.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+            format!("{} {}", before.trim_end(), after_val.trim_start())
+                .trim()
+                .to_string()
+        }
+        None => body.trim_end().to_string(),
+    };
+
+    let new_body = match level {
+        Some(l) if !cleaned.is_empty() => format!("{cleaned} priority:: {l}"),
+        Some(l) => format!("priority:: {l}"),
+        None => cleaned,
+    };
+    // Canonical shape `<indent><bullet>[<mark>] <body>`; keep the space after `]` even when the body
+    // is empty so the line still parses as a task.
+    Some(format!("{indent}{bullet}[{mark}] {new_body}").trim_end().to_string())
+}
+
+/// How many consecutive lines starting at `start` form one task block: the task line itself plus
+/// every following line indented deeper than it (its subtasks and their wrapped content), stopping
+/// at the first line indented at or below the task's own indent. `lines` are the body's lines.
+pub fn task_block_extent(lines: &[&str], start: usize) -> usize {
+    let base = {
+        let l = lines[start];
+        l.len() - l.trim_start().len()
+    };
+    let mut n = 1;
+    while start + n < lines.len() {
+        let l = lines[start + n];
+        if l.trim().is_empty() {
+            // A blank line only stays with the block if a deeper line follows it.
+            let deeper_follows = lines[start + n + 1..]
+                .iter()
+                .find(|x| !x.trim().is_empty())
+                .map(|x| x.len() - x.trim_start().len() > base)
+                .unwrap_or(false);
+            if deeper_follows { n += 1; continue; } else { break; }
+        }
+        let indent = l.len() - l.trim_start().len();
+        if indent > base { n += 1; } else { break; }
+    }
+    n
 }
 
 fn find_field(text: &str, markers: &[&str]) -> Option<String> {
@@ -380,7 +482,11 @@ pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Resu
         }
     }
 
-    // Body scan: tags, links, tasks (line by line).
+    // Body scan: tags, links, tasks (line by line). `task_stack` holds the (indent, line) of each
+    // currently-open ancestor task, deepest last, so we can derive each task's nesting depth and
+    // parent from indentation: pop ancestors at the same-or-greater indent, then the remaining top
+    // is the parent and the stack height is the depth.
+    let mut task_stack: Vec<(usize, i64)> = Vec::new();
     for (i, line) in doc.body.lines().enumerate() {
         for tag in extract_tags(line) {
             conn.execute("INSERT INTO tags (rel_path, tag) VALUES (?1, ?2)", params![rel, tag])?;
@@ -388,13 +494,19 @@ pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Resu
         for dst in extract_wikilinks(line) {
             conn.execute("INSERT INTO links (src, dst) VALUES (?1, ?2)", params![rel, dst])?;
         }
-        if let Some((done, text, due, rrule, done_dates)) = parse_task_line(line) {
+        if let Some((indent, done, text, due, rrule, done_dates, priority)) = parse_task_line(line) {
+            while task_stack.last().is_some_and(|&(ai, _)| ai >= indent) {
+                task_stack.pop();
+            }
+            let parent_line = task_stack.last().map(|&(_, al)| al);
+            let depth = task_stack.len() as i64;
             let line_tags = extract_tags(&text).join(",");
             conn.execute(
-                "INSERT OR REPLACE INTO tasks (rel_path, line, text, done, due, rrule, tags, done_dates)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![rel, i as i64, text, done as i64, due, rrule, line_tags, done_dates],
+                "INSERT OR REPLACE INTO tasks (rel_path, line, text, done, due, rrule, tags, done_dates, priority, depth, parent_line)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![rel, i as i64, text, done as i64, due, rrule, line_tags, done_dates, priority, depth, parent_line],
             )?;
+            task_stack.push((indent, i as i64));
         }
     }
 
@@ -419,7 +531,7 @@ pub fn rebuild(conn: &Connection, vault_root: &Path) -> Result<usize> {
 /// Fetch all tasks (used by the Tasks view; recurrence expansion happens in the frontend).
 pub fn all_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT rel_path, line, text, done, due, rrule, tags, done_dates FROM tasks ORDER BY due IS NULL, due",
+        "SELECT rel_path, line, text, done, due, rrule, tags, done_dates, priority, depth, parent_line FROM tasks ORDER BY due IS NULL, due",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -432,6 +544,9 @@ pub fn all_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
                 rrule: r.get(5)?,
                 tags: r.get(6)?,
                 done_dates: r.get(7)?,
+                priority: r.get(8)?,
+                depth: r.get(9)?,
+                parent_line: r.get(10)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;

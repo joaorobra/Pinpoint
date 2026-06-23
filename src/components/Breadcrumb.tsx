@@ -7,6 +7,8 @@ interface BreadcrumbProps {
   onToggleLeft: () => void;
   /** Toggle the right (outline/calendar) drawer. */
   onToggleRight: () => void;
+  /** Jump to a folder: open the tree drawer and reveal/scroll to that folder. */
+  onNavigateFolder?: (folderRelPath: string) => void;
   leftOpen: boolean;
   rightOpen: boolean;
 }
@@ -15,14 +17,15 @@ interface BreadcrumbProps {
  * Mobile-only top bar. With the sidebars collapsed into overlay drawers, this is the persistent
  * orientation cue: it shows where the open file sits in the vault and flanks that path with the two
  * drawer toggles (☰ file tree on the left, outline/calendar on the right). The crumb segments are
- * derived from the rel path; the leaf is shown without its `.md` extension. Tapping any folder
- * segment opens the file tree so the user can navigate from there (deeper folder jumps can come
- * later — for now every folder crumb is an entry point into the tree).
+ * derived from the rel path; the leaf is shown without its `.md` extension. Tapping a folder
+ * segment opens the file tree and reveals that folder (expands its ancestors + scrolls to it), so
+ * each crumb is a real jump to that level of the hierarchy.
  */
 export default function Breadcrumb({
   path,
   onToggleLeft,
   onToggleRight,
+  onNavigateFolder,
   leftOpen,
   rightOpen,
 }: BreadcrumbProps) {
@@ -48,13 +51,19 @@ export default function Breadcrumb({
           segments.map((seg, i) => {
             const isLeaf = i === lastIdx;
             const label = isLeaf ? seg.replace(/\.md$/i, "") : seg;
+            // Cumulative rel path of this folder crumb, used to reveal it in the tree.
+            const folderPath = segments.slice(0, i + 1).join("/");
             return (
               <span className="breadcrumb-seg" key={i}>
                 {i > 0 && <span className="breadcrumb-sep" aria-hidden>›</span>}
                 <button
                   className={`breadcrumb-crumb${isLeaf ? " leaf" : ""}`}
-                  // Folder crumbs open the tree; the leaf is the current file, so it's inert.
-                  onClick={isLeaf ? undefined : onToggleLeft}
+                  // Folder crumbs jump to that folder in the tree; the leaf is the current file (inert).
+                  onClick={
+                    isLeaf
+                      ? undefined
+                      : () => (onNavigateFolder ? onNavigateFolder(folderPath) : onToggleLeft())
+                  }
                   disabled={isLeaf}
                   title={label}
                 >

@@ -43,6 +43,8 @@ interface Props {
   onOpenAsset?: (node: TreeNode) => void;
   /** Open a database folder (is_database) in the table view. */
   onOpenDatabase?: (node: TreeNode) => void;
+  /** Open a plain folder (not a database) as a gallery page. */
+  onOpenFolder?: (node: TreeNode) => void;
   /** Right-click on a tree row: hand the node and pointer coords to the host for a context menu. */
   onContextMenu?: (node: TreeNode, x: number, y: number) => void;
   /** Click on a node's icon: open the icon picker for that node. */
@@ -53,6 +55,25 @@ interface Props {
   onRenameCommit?: (node: TreeNode, newName: string) => void;
   /** Cancel the inline rename without changes. */
   onRenameCancel?: () => void;
+  /**
+   * The host populates this ref with a `reveal(relPath)` function it can call to expand a folder's
+   * ancestors and scroll it into view (used by the mobile breadcrumb's folder crumbs).
+   */
+  revealRef?: React.MutableRefObject<((relPath: string) => void) | null>;
+  /**
+   * The host populates this ref with commands that drive folder open/closed state, so the
+   * right-click menu can offer "Expand all" / "Collapse all" scoped to a single folder's subtree
+   * (or, with no relPath, the whole tree).
+   */
+  cmdRef?: React.MutableRefObject<TreeCommands | null>;
+}
+
+/** Imperative handle exposed via {@link Props.cmdRef} for driving folder collapse state. */
+export interface TreeCommands {
+  /** Open `relPath` and every descendant folder; with no arg, expand the whole tree. */
+  expand: (relPath?: string) => void;
+  /** Collapse `relPath` and every descendant folder; with no arg, collapse the whole tree. */
+  collapse: (relPath?: string) => void;
 }
 
 /** The default Phosphor icon for a node when the user hasn't chosen one. */
@@ -75,10 +96,11 @@ function defaultIcon(node: TreeNode): PhosphorIcon {
  * The vault file tree. Folder open/closed state is owned here (a Set of collapsed paths) so the
  * header's expand-all / collapse-all controls can drive every folder at once — Obsidian-style.
  */
-export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, onOpen, onOpenAsset, onOpenDatabase, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel }: Props) {
+export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel, revealRef, cmdRef }: Props) {
   // We track which folders are *collapsed*; everything else is open by default at depth 0,
   // and a bumped signal lets the toolbar collapse/expand the whole tree at once.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const allDirPaths = useMemo(() => {
     const paths: string[] = [];
@@ -99,6 +121,71 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
 
   const expandAll = () => setCollapsed(new Set());
   const collapseAll = () => setCollapsed(new Set(allDirPaths));
+
+  // The folder paths inside (and including) `relPath`'s subtree. Used to scope expand/collapse to
+  // a single folder from its context menu.
+  const subtreeDirPaths = (relPath: string): string[] => {
+    const found: string[] = [];
+    const visit = (n: TreeNode, inside: boolean) => {
+      const here = inside || n.rel_path === relPath;
+      if (here && n.is_dir && n.rel_path) found.push(n.rel_path);
+      n.children.forEach((c) => visit(c, here));
+    };
+    node.children.forEach((c) => visit(c, false));
+    return found;
+  };
+
+  // Expose expand/collapse commands to the host (drives the right-click menu). With a relPath the
+  // command is scoped to that folder's subtree; without one it acts on the whole tree.
+  useEffect(() => {
+    if (!cmdRef) return;
+    cmdRef.current = {
+      expand: (relPath) =>
+        setCollapsed((prev) => {
+          if (!relPath) return new Set();
+          const next = new Set(prev);
+          subtreeDirPaths(relPath).forEach((p) => next.delete(p));
+          return next;
+        }),
+      collapse: (relPath) =>
+        setCollapsed((prev) => {
+          if (!relPath) return new Set(allDirPaths);
+          const next = new Set(prev);
+          subtreeDirPaths(relPath).forEach((p) => next.add(p));
+          return next;
+        }),
+    };
+    return () => {
+      if (cmdRef) cmdRef.current = null;
+    };
+  }, [cmdRef, node, allDirPaths]);
+
+  // Expose a reveal(relPath) to the host: expand the folder and every ancestor so it's visible,
+  // then scroll its row into view. Drives the mobile breadcrumb's folder crumbs.
+  useEffect(() => {
+    if (!revealRef) return;
+    revealRef.current = (relPath: string) => {
+      const parts = relPath.split("/").filter(Boolean);
+      // Ancestor paths + the folder itself must all be un-collapsed.
+      const open = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+      setCollapsed((prev) => {
+        if (!open.some((p) => prev.has(p))) return prev;
+        const next = new Set(prev);
+        open.forEach((p) => next.delete(p));
+        return next;
+      });
+      // Defer the scroll a frame so the newly-expanded rows have mounted.
+      requestAnimationFrame(() => {
+        const row = rootRef.current?.querySelector<HTMLElement>(
+          `[data-rel="${CSS.escape(relPath)}"]`
+        );
+        row?.scrollIntoView({ block: "nearest" });
+      });
+    };
+    return () => {
+      if (revealRef) revealRef.current = null;
+    };
+  }, [revealRef]);
 
   // Flat, top-to-bottom order of the rows the user can currently see (collapsed folders hide
   // their children). Shift-click ranges are resolved against this order, mirroring how
@@ -140,7 +227,7 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
           <CaretRight size={12} weight="bold" /> Collapse
         </button>
       </div>
-      <div className="tree-body">
+      <div className="tree-body" ref={rootRef}>
         {node.children.map((c) => (
           <TreeRow
             key={c.rel_path}
@@ -155,6 +242,7 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
             onOpen={onOpen}
             onOpenAsset={onOpenAsset}
             onOpenDatabase={onOpenDatabase}
+            onOpenFolder={onOpenFolder}
             onContextMenu={onContextMenu}
             onPickIcon={onPickIcon}
             renamingPath={renamingPath}
@@ -179,6 +267,7 @@ interface RowProps {
   onOpen: (relPath: string) => void;
   onOpenAsset?: (node: TreeNode) => void;
   onOpenDatabase?: (node: TreeNode) => void;
+  onOpenFolder?: (node: TreeNode) => void;
   onContextMenu?: (node: TreeNode, x: number, y: number) => void;
   onPickIcon?: (node: TreeNode) => void;
   renamingPath?: string | null;
@@ -186,7 +275,7 @@ interface RowProps {
   onRenameCancel?: () => void;
 }
 
-function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
+function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
   const renaming = renamingPath === node.rel_path;
   const isSelected = selected.has(node.rel_path);
   // Normalize the click into selection modifiers. metaKey covers Cmd on macOS.
@@ -223,6 +312,7 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
     const label = isMd ? node.name.replace(/\.md$/i, "") : node.name.replace(new RegExp(`\\.${node.ext}$`, "i"), "");
     return (
       <div
+        data-rel={node.rel_path}
         className={`tree-file${activePath === node.rel_path ? " active" : ""}${isSelected ? " selected" : ""}`}
         onClick={(e) => {
           const m = mods(e);
@@ -261,15 +351,17 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
   return (
     <div>
       <div
+        data-rel={node.rel_path}
         className={`tree-dir${isSelected ? " selected" : ""}`}
         onClick={(e) => {
           const m = mods(e);
-          // Ctrl/shift select the folder. A plain click opens/closes it — and for a database
-          // folder, also opens its table view (Notion-style).
+          // Ctrl/shift select the folder. A plain click opens/closes it — and also opens its view:
+          // the table for a database folder, or the gallery page for a plain folder (Notion-style).
           if (m.toggle || m.range) onSelect(node, m);
           else {
             onToggle(node.rel_path);
             if (node.is_database) onOpenDatabase?.(node);
+            else onOpenFolder?.(node);
           }
         }}
         onContextMenu={ctx}
@@ -310,6 +402,7 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
             onOpen={onOpen}
             onOpenAsset={onOpenAsset}
             onOpenDatabase={onOpenDatabase}
+            onOpenFolder={onOpenFolder}
             onContextMenu={onContextMenu}
             onPickIcon={onPickIcon}
             renamingPath={renamingPath}

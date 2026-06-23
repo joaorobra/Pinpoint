@@ -113,8 +113,12 @@ export function usePopoverPlacement<T extends HTMLElement>(open: boolean) {
  * `ignoreSelector` lets a caller exempt a control row (e.g. the toolbar buttons) so clicking a
  * sibling button switches popovers via its own handler instead of just closing this one.
  */
-export function useDismiss(open: boolean, close: () => void, ignoreSelector?: string) {
-  const ref = useRef<HTMLDivElement>(null);
+export function useDismiss<T extends HTMLElement = HTMLDivElement>(
+  open: boolean,
+  close: () => void,
+  ignoreSelector?: string
+) {
+  const ref = useRef<T>(null);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {

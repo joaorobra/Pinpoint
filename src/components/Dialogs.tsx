@@ -10,6 +10,7 @@
 // any component can open a dialog without prop-drilling.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 type PromptOpts = {
   title: string;
@@ -99,6 +100,8 @@ export function DialogHost() {
 function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
   const [value, setValue] = useState(req.kind === "prompt" ? req.opts.defaultValue ?? "" : "");
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     if (req.kind === "prompt") {
@@ -151,9 +154,11 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
   return (
     <div className="modal-backdrop" onMouseDown={cancel} onKeyDown={onKeyDown}>
       <div
+        ref={panelRef}
         className="modal dialog"
         role="dialog"
         aria-modal="true"
+        aria-label={req.opts.title}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
@@ -179,11 +184,12 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
 
         {req.kind === "choose" && (
           <div className="dialog-choices">
-            {req.opts.options.map((opt) => (
+            {req.opts.options.map((opt, i) => (
               <button
                 key={opt.value}
                 className={opt.danger ? "primary danger" : "primary"}
                 onClick={() => pick(opt.value)}
+                autoFocus={i === 0}
               >
                 {opt.label}
               </button>

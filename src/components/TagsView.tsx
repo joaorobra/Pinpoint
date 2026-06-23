@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Hash, MagnifyingGlass, FileText, Graph, ListMagnifyingGlass } from "@phosphor-icons/react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Hash, MagnifyingGlass, FileText, Graph, ListMagnifyingGlass, X, CaretRight } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { TagConnection, TagInfo, TagPage } from "../types";
 
@@ -29,6 +29,9 @@ export default function TagsView({ onOpen, onQueryTag, focusTag, refreshKey }: P
   const [pages, setPages] = useState<TagPage[]>([]);
   const [connections, setConnections] = useState<TagConnection[]>([]);
   const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const activeRowRef = useRef<HTMLButtonElement>(null);
 
   // Load every tag whenever the vault changes. Keep the current selection if it still exists.
   useEffect(() => {
@@ -57,22 +60,50 @@ export default function TagsView({ onOpen, onQueryTag, focusTag, refreshKey }: P
       return;
     }
     let alive = true;
+    setLoading(true);
     Promise.all([api.tagPages(selected), api.tagConnections(selected)])
       .then(([p, c]) => {
         if (!alive) return;
         setPages(p);
         setConnections(c);
       })
-      .catch(console.error);
+      .catch(console.error)
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
     return () => {
       alive = false;
     };
   }, [selected, refreshKey]);
 
+  // Focus the filter on arrival so the user can start typing immediately.
+  useEffect(() => {
+    searchRef.current?.focus();
+  }, []);
+
+  // Keep the selected tag in view when it changes (e.g. clicking an editor pill scrolls it into the rail).
+  useEffect(() => {
+    activeRowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
+
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
     return q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags;
   }, [tags, filter]);
+
+  // Arrow-key navigation over the (filtered) tag rail; Home/End jump to the ends.
+  function onListKeyDown(e: React.KeyboardEvent) {
+    if (!shown.length) return;
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    const i = shown.findIndex((t) => t.tag === selected);
+    let next = i;
+    if (e.key === "ArrowDown") next = i < 0 ? 0 : Math.min(i + 1, shown.length - 1);
+    else if (e.key === "ArrowUp") next = i < 0 ? shown.length - 1 : Math.max(i - 1, 0);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = shown.length - 1;
+    setSelected(shown[next].tag);
+  }
 
   return (
     <div className="panel tags-view">
@@ -93,18 +124,41 @@ export default function TagsView({ onOpen, onQueryTag, focusTag, refreshKey }: P
             <div className="tags-search">
               <MagnifyingGlass size={14} />
               <input
+                ref={searchRef}
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
+                onKeyDown={onListKeyDown}
                 placeholder="Filter tags…"
                 spellCheck={false}
+                aria-label="Filter tags"
               />
+              {filter && (
+                <button
+                  className="tags-search-clear"
+                  onClick={() => {
+                    setFilter("");
+                    searchRef.current?.focus();
+                  }}
+                  title="Clear filter"
+                  aria-label="Clear filter"
+                >
+                  <X size={12} weight="bold" />
+                </button>
+              )}
             </div>
-            <ul>
+            {filter.trim() && (
+              <p className="muted tags-filter-count">
+                {shown.length} of {tags.length}
+              </p>
+            )}
+            <ul onKeyDown={onListKeyDown}>
               {shown.map((t) => (
                 <li key={t.tag}>
                   <button
+                    ref={t.tag === selected ? activeRowRef : undefined}
                     className={`tag-row${t.tag === selected ? " active" : ""}`}
                     onClick={() => setSelected(t.tag)}
+                    aria-current={t.tag === selected ? "true" : undefined}
                     title={`#${t.tag} — ${t.count} page${t.count === 1 ? "" : "s"}`}
                   >
                     <Hash size={13} weight="bold" />
@@ -137,8 +191,14 @@ export default function TagsView({ onOpen, onQueryTag, focusTag, refreshKey }: P
                   <h4>
                     <Graph size={14} /> Connected tags
                   </h4>
-                  {connections.length === 0 ? (
-                    <p className="muted">No other tags share these pages yet.</p>
+                  {loading ? (
+                    <div className="tag-chips" aria-hidden="true">
+                      <span className="tag-chip skeleton" style={{ width: 72 }} />
+                      <span className="tag-chip skeleton" style={{ width: 96 }} />
+                      <span className="tag-chip skeleton" style={{ width: 60 }} />
+                    </div>
+                  ) : connections.length === 0 ? (
+                    <p className="muted">No other tags share these pages yet — connections appear when pages share tags.</p>
                   ) : (
                     <div className="tag-chips">
                       {connections.map((c) => (
@@ -159,9 +219,17 @@ export default function TagsView({ onOpen, onQueryTag, focusTag, refreshKey }: P
 
                 <div className="tags-section">
                   <h4>
-                    <FileText size={14} /> Pages ({pages.length})
+                    <FileText size={14} /> Pages{loading ? "" : ` (${pages.length})`}
                   </h4>
-                  {pages.length === 0 ? (
+                  {loading ? (
+                    <ul className="tag-pages" aria-hidden="true">
+                      {[0, 1, 2].map((i) => (
+                        <li key={i}>
+                          <span className="tag-page skeleton" />
+                        </li>
+                      ))}
+                    </ul>
+                  ) : pages.length === 0 ? (
                     <p className="muted">No pages carry this tag.</p>
                   ) : (
                     <ul className="tag-pages">
@@ -170,6 +238,7 @@ export default function TagsView({ onOpen, onQueryTag, focusTag, refreshKey }: P
                           <button className="tag-page" onClick={() => onOpen(p.rel_path)} title={p.rel_path}>
                             <FileText size={14} />
                             <span className="tag-page-title">{p.title}</span>
+                            <CaretRight size={13} className="tag-page-go" />
                           </button>
                         </li>
                       ))}

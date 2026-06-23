@@ -143,7 +143,13 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function inlineMd(text: string): string {
+/**
+ * Render inline markdown (links, wikilinks, images, code, bold/italic/strike) to HTML. Exported so
+ * non-editor surfaces (e.g. the Tasks list) display the same formatting instead of leaking raw
+ * `**`, `[[ ]]`, `[ ]( )` markup. Wikilinks become `[data-page-link]` spans; the caller can delegate
+ * clicks on those to open the page.
+ */
+export function inlineMd(text: string): string {
   let s = escapeHtml(text);
   // Wikilinks `[[Name]]` -> styled page-link atom. Must run before the `[text](url)` rule so the
   // double brackets aren't consumed as a regular markdown link.
@@ -158,6 +164,31 @@ function inlineMd(text: string): string {
   s = s.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
   s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
   return s;
+}
+
+/**
+ * Strip task metadata from a raw task line to a clean display label: date/recurrence/done emoji
+ * markers (📅 🔁 ✅ ⏳), a `priority:: …` field, and `#tags`.
+ *
+ * Tags sometimes appear wrapped as a markdown link — e.g. `[#tattoo-off](#tattoo-off)` — when the
+ * editor auto-links a `#tag`. A naive `#[\w/-]+` strip would gut the `#` out of both the `[...]`
+ * label and the `(...)` href and leave behind empty `[]()` markup (which then renders literally).
+ * So we first remove any whole markdown link whose label is a bare tag, *then* strip plain tags.
+ */
+export function stripTaskMeta(text: string): string {
+  return text
+    // `priority:: high` — the dataview-style field (value is a single word).
+    .replace(/\bpriority::\s*\S+/gi, "")
+    // 📅/🔁/✅ marker + its trailing value (date, rrule, …), up to the next marker.
+    .replace(/[📅🔁✅⏳]\s*[^📅🔁⏳✅]*/g, "")
+    // A markdown link that's really just a tag: `[#tag](anything)` → gone (drop the empty shell too).
+    .replace(/\[#[\w/.!?-]+\]\([^)]*\)/g, "")
+    // Remaining bare `#tags`. Allow inner `.`/`!`/`?` (e.g. `#people.John`) but stop before trailing
+    // sentence punctuation so it survives, matching the indexer's tag rule. Two forms: a multi-char
+    // run that can't end on `.!?`, or a single trailing char.
+    .replace(/#(?:[\w/.!?-]*[\w/-]|[\w/-])/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 export function markdownToHtml(md: string): string {

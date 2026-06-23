@@ -1,14 +1,14 @@
 // Table view: the spreadsheet-style grid. Adds resizable columns (drag the right edge), custom
 // per-column icons, per-view column visibility, and the in-header type/option/icon config menu.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check, ArrowSquareOut, FileText } from "@phosphor-icons/react";
 import type { DbAggregation, DbColumn, DbColumnType, DbOption, DbView, NodeIcon } from "../types";
 import { DB_OPTION_COLORS } from "../types";
 import type { DbRow } from "../dblogic";
 import { AGG_LABELS, aggsForType, computeAggregation } from "../dblogic";
 import { NodeIconView } from "./Icon";
-import { TYPE_META, typeIcon, makeId, DbCell, formatCurrency } from "./DbShared";
+import { TYPE_META, typeIcon, makeId, DbCell, formatCurrency, useDismiss } from "./DbShared";
 
 interface Props {
   columns: DbColumn[];      // already filtered to visible + ordered for this view
@@ -240,17 +240,8 @@ function FooterCell({
   onSetAgg: (a: DbAggregation) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLTableCellElement>(null);
+  const ref = useDismiss<HTMLTableCellElement>(open, () => setOpen(false));
   const options = useMemo(() => aggsForType(col.type), [col.type]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    const id = window.setTimeout(() => document.addEventListener("mousedown", onDown), 0);
-    window.addEventListener("keydown", onKey);
-    return () => { window.clearTimeout(id); document.removeEventListener("mousedown", onDown); window.removeEventListener("keydown", onKey); };
-  }, [open]);
 
   const result = useMemo(() => computeAggregation(agg, rows, col), [agg, rows, col]);
   // Currency columns get their symbol on numeric results (sum/avg/min/max).
@@ -313,16 +304,7 @@ function HeaderCell({
   onClearIcon: () => void;
 }) {
   const FallbackIco = typeIcon(col.type);
-  const ref = useRef<HTMLTableCellElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) onCloseMenu(); };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCloseMenu();
-    const id = window.setTimeout(() => document.addEventListener("mousedown", onDown), 0);
-    window.addEventListener("keydown", onKey);
-    return () => { window.clearTimeout(id); document.removeEventListener("mousedown", onDown); window.removeEventListener("keydown", onKey); };
-  }, [menuOpen, onCloseMenu]);
+  const ref = useDismiss<HTMLTableCellElement>(menuOpen, onCloseMenu);
 
   // Drag-to-resize the right edge. While dragging we set the width on the matching <col> through
   // the parent (resizing=true) so the transition is suppressed and the column tracks the cursor
@@ -459,13 +441,7 @@ function OptionEditor({ options, onChange }: { options: DbOption[]; onChange: (o
 
 function AddColumnButton({ onAdd }: { onAdd: (t: DbColumnType) => void }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
-    const id = window.setTimeout(() => document.addEventListener("mousedown", onDown), 0);
-    return () => { window.clearTimeout(id); document.removeEventListener("mousedown", onDown); };
-  }, [open]);
+  const ref = useDismiss(open, () => setOpen(false));
   return (
     <div className="db-add-col-wrap" ref={ref}>
       <button className="db-add-col-btn" title="Add property" onClick={() => setOpen((o) => !o)}><Plus size={14} weight="bold" /></button>

@@ -4,7 +4,7 @@
 
 import { api } from "./api";
 import { BUILTIN_THEME, STARTER_THEMES } from "./types";
-import type { Theme, ThemeColors, ThemeInfo, ThemeVariant } from "./types";
+import type { Theme, ThemeColors, ThemeInfo, ThemeType, ThemeVariant } from "./types";
 
 const HEX = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
 
@@ -31,6 +31,35 @@ function variant(raw: unknown, fb: ThemeVariant): ThemeVariant {
   return { colors: colors(o.colors, fb.colors) };
 }
 
+/** A finite positive number, else undefined — guards size/lineHeight/pageWidth from bad JSON. */
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+const str = (v: unknown): string | undefined =>
+  typeof v === "string" && v.trim() ? v : undefined;
+
+/**
+ * Normalize a theme's typography block, migrating the legacy `fonts` field into `type`. Each field
+ * is optional; an all-empty result returns undefined so palette-only themes stay font-neutral.
+ */
+function typography(rawType: unknown, rawFonts: unknown): ThemeType | undefined {
+  const t = (rawType ?? {}) as Partial<ThemeType>;
+  const f = (rawFonts ?? {}) as { ui?: unknown; editor?: unknown };
+  const type: ThemeType = {
+    ui: str(t.ui) ?? str(f.ui),
+    editor: str(t.editor) ?? str(f.editor),
+    size: num(t.size),
+    lineHeight: num(t.lineHeight),
+    pageWidth: num(t.pageWidth),
+  };
+  // Drop undefined keys so the persisted JSON stays clean.
+  for (const k of Object.keys(type) as (keyof ThemeType)[]) {
+    if (type[k] === undefined) delete type[k];
+  }
+  return Object.keys(type).length ? type : undefined;
+}
+
 /** Parse one raw theme JSON string into a validated `Theme`, or null if it's unusable. */
 function parseTheme(json: string): Theme | null {
   let raw: unknown;
@@ -42,18 +71,12 @@ function parseTheme(json: string): Theme | null {
   const o = raw as Partial<Theme>;
   const name = typeof o.name === "string" ? o.name.trim() : "";
   if (!name) return null;
-  const fonts =
-    o.fonts && typeof o.fonts === "object"
-      ? {
-          ui: typeof o.fonts.ui === "string" ? o.fonts.ui : undefined,
-          editor: typeof o.fonts.editor === "string" ? o.fonts.editor : undefined,
-        }
-      : undefined;
+  const type = typography(o.type, o.fonts);
   return {
     name,
     dark: variant(o.dark, BUILTIN_THEME.dark),
     light: variant(o.light, BUILTIN_THEME.light),
-    ...(fonts && (fonts.ui || fonts.editor) ? { fonts } : {}),
+    ...(type ? { type } : {}),
   };
 }
 
@@ -72,7 +95,7 @@ export async function listThemeInfos(): Promise<ThemeInfo[]> {
     name: t.name,
     dark: t.dark.colors,
     light: t.light.colors,
-    hasFonts: !!(t.fonts && (t.fonts.ui || t.fonts.editor)),
+    hasType: !!t.type,
   }));
 }
 
@@ -119,6 +142,6 @@ export function duplicateTheme(src: Theme, name: string): Theme {
     name,
     dark: { colors: { ...src.dark.colors } },
     light: { colors: { ...src.light.colors } },
-    ...(src.fonts ? { fonts: { ...src.fonts } } : {}),
+    ...(src.type ? { type: { ...src.type } } : {}),
   };
 }

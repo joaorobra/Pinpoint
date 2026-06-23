@@ -15,7 +15,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Plus, Table, Kanban, CalendarBlank, Cards, DotsSixVertical, Trash,
+  Plus, Table, Kanban, CalendarBlank, Cards, DotsSixVertical, Trash, Database,
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
 import type {
@@ -25,9 +25,10 @@ import { api } from "../api";
 import { dialogs } from "./Dialogs";
 import type { DbRow } from "../dblogic";
 import { applyFilters, applySorts } from "../dblogic";
-import { makeId, safeLeaf, TYPE_META } from "./DbShared";
+import { makeId, safeLeaf, TYPE_META, useDismiss } from "./DbShared";
 import { NodeIconView } from "./Icon";
 import TemplateMenu from "./TemplateMenu";
+import PageTitle from "./PageTitle";
 import { stripCursor, type TemplateInfo, type FillContext } from "../templates";
 import { CaretDown } from "@phosphor-icons/react";
 import DbTableView from "./DbTableView";
@@ -78,11 +79,13 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [rows, setRows] = useState<DbRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // Set when the schema can't be read/parsed, so we surface a retry instead of hanging on "Loading…".
+  const [error, setError] = useState<string | null>(null);
   const [activeViewId, setActiveViewId] = useState<string>("");
   const [editingViewId, setEditingViewId] = useState<string | null>(null);
   // Icon picker target, disambiguated by `kind`: a column id, the active view, or a row page
   // (where `id` is the page's vault-relative path).
-  const [iconTarget, setIconTarget] = useState<{ kind: "col" | "view" | "page"; id: string; label: string; current?: NodeIcon } | null>(null);
+  const [iconTarget, setIconTarget] = useState<{ kind: "col" | "view" | "page" | "db"; id: string; label: string; current?: NodeIcon } | null>(null);
   // Whether the "+ New ▾" template menu is open in the header bar.
   const [newMenu, setNewMenu] = useState(false);
 
@@ -91,6 +94,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
   // ---- Load --------------------------------------------------------------------------------
   const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const s = await api.readDbSchema(dir);
       if (!s.columns.some((c) => c.type === "title")) s.columns.unshift({ id: "name", name: "Name", type: "title" });
@@ -112,6 +116,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
       setRows(loaded);
     } catch (e) {
       console.error(e);
+      setError(String(e));
     } finally {
       setLoading(false);
     }
@@ -301,12 +306,33 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
     return applySorts(filtered, activeView.sorts, schema.columns);
   }, [rows, schema, activeView]);
 
-  if (loading || !schema || !activeView) return <div className="db-view db-loading">Loading database…</div>;
+  if (loading) return <div className="db-view db-loading">Loading database…</div>;
+  if (error || !schema || !activeView) {
+    return (
+      <div className="db-view db-state">
+        <div className="db-state-card">
+          <Database size={28} weight="duotone" />
+          <h2>Couldn’t open this database</h2>
+          <p className="muted">{error ?? "Its schema couldn’t be read."}</p>
+          <button className="primary" onClick={() => void load()}>Retry</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="db-view">
       <div className="db-header-bar">
-        <h1 className="db-title">{schema.name || node.name}</h1>
+        <PageTitle
+          title={schema.name || node.name}
+          icon={nodeIcons?.[node.rel_path]}
+          fallback={Database}
+          placeholder="Untitled database"
+          onCommit={(next) => void saveSchema({ ...schema, name: next })}
+          onPickIcon={() =>
+            setIconTarget({ kind: "db", id: node.rel_path, label: schema.name || node.name, current: nodeIcons?.[node.rel_path] })
+          }
+        />
         <span className="db-count">{viewRows.length} of {rows.length}</span>
         <div className="db-new-wrap">
           <button className="db-new-split" onClick={() => void addRow()}>
@@ -377,6 +403,23 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
 
       {/* Active view */}
       <div className="db-view-body">
+        {rows.length === 0 ? (
+          <div className="db-empty-view">
+            <Database size={28} weight="duotone" />
+            <h2>No rows yet</h2>
+            <p className="muted">Create your first row to start filling out this database.</p>
+            <button className="primary" onClick={() => void addRow()}>
+              <Plus size={14} weight="bold" /> New row
+            </button>
+          </div>
+        ) : viewRows.length === 0 ? (
+          <div className="db-empty-view">
+            <Table size={26} weight="duotone" />
+            <h2>No matching rows</h2>
+            <p className="muted">No rows match this view’s filters. Adjust the filters to see more.</p>
+          </div>
+        ) : (
+          <>
         {activeView.type === "table" && (
           <DbTableView
             isMobile={isMobile}
@@ -420,6 +463,8 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
             onOpenRow={(p) => onOpenRow?.(p)} onAddRow={() => addRow()}
           />
         )}
+          </>
+        )}
       </div>
 
       {iconTarget && (
@@ -429,13 +474,13 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
             current={iconTarget.current}
             onPick={(icon) => {
               if (iconTarget.kind === "col") updateColumn(iconTarget.id, { icon });
-              else if (iconTarget.kind === "page") onSetNodeIcon?.(iconTarget.id, icon);
+              else if (iconTarget.kind === "page" || iconTarget.kind === "db") onSetNodeIcon?.(iconTarget.id, icon);
               else updateView({ icon }); // active view
               setIconTarget(null);
             }}
             onRemove={() => {
               if (iconTarget.kind === "col") updateColumn(iconTarget.id, { icon: undefined });
-              else if (iconTarget.kind === "page") onClearNodeIcon?.(iconTarget.id);
+              else if (iconTarget.kind === "page" || iconTarget.kind === "db") onClearNodeIcon?.(iconTarget.id);
               else updateView({ icon: undefined });
               setIconTarget(null);
             }}
@@ -449,9 +494,10 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
 
 function AddViewButton({ onAdd }: { onAdd: (t: DbViewType) => void }) {
   const [open, setOpen] = useState(false);
+  const ref = useDismiss(open, () => setOpen(false));
   return (
-    <div className="db-add-view-wrap">
-      <button className="db-add-view" title="Add view" onClick={() => setOpen((o) => !o)} onBlur={() => setTimeout(() => setOpen(false), 150)}>
+    <div className="db-add-view-wrap" ref={ref}>
+      <button className="db-add-view" title="Add view" onClick={() => setOpen((o) => !o)}>
         <Plus size={14} weight="bold" />
       </button>
       {open && (

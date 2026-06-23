@@ -356,6 +356,124 @@ fn toggle_task(
     Ok(())
 }
 
+/// Set (or clear) a task's priority by rewriting its `priority:: <level>` field in place.
+/// `level` is `"high"`/`"medium"`/`"low"`, or `None` to remove any priority. `line` is the 0-based
+/// body line index from the tasks index.
+#[tauri::command]
+fn set_task_priority(
+    rel_path: String,
+    line: usize,
+    level: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let abs = session.root.join(&rel_path);
+    let doc = vault::read_doc(&abs).map_err(err)?;
+
+    let mut lines: Vec<String> = doc.body.lines().map(|s| s.to_string()).collect();
+    let target = lines.get(line).ok_or("task line out of range")?;
+    let new_line = index::set_task_priority_line(target, level.as_deref()).ok_or("not a task line")?;
+    lines[line] = new_line;
+    let mut body = lines.join("\n");
+    if doc.body.ends_with('\n') {
+        body.push('\n');
+    }
+
+    vault::write_doc(&abs, &doc.frontmatter, &body).map_err(err)?;
+    index::index_file(&session.conn, &session.root, &abs).map_err(err)?;
+    Ok(())
+}
+
+/// Move a task (the line at `line` plus all of its more-indented child lines) out of `from_rel` and
+/// append it under a `## Tasks` heading in `to_rel`. The destination must already exist (the caller
+/// creates it from the periodic template first). The moved block is re-based to the left margin so
+/// it reads as a top-level task in its new home. Both files are re-indexed.
+#[tauri::command]
+fn move_task_block(
+    from_rel: String,
+    line: usize,
+    to_rel: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    if from_rel == to_rel {
+        return Err("source and destination are the same page".into());
+    }
+    let from_abs = session.root.join(&from_rel);
+    let to_abs = session.root.join(&to_rel);
+
+    // --- Cut the block from the source. ---
+    let from_doc = vault::read_doc(&from_abs).map_err(err)?;
+    let src_lines: Vec<&str> = from_doc.body.lines().collect();
+    if line >= src_lines.len() {
+        return Err("task line out of range".into());
+    }
+    let len = index::task_block_extent(&src_lines, line);
+    let base_indent = {
+        let l = src_lines[line];
+        l.len() - l.trim_start().len()
+    };
+    // Re-base indentation: drop up to `base_indent` leading whitespace chars from every row.
+    let rebased: Vec<String> = src_lines[line..line + len]
+        .iter()
+        .map(|l| {
+            let strip = l.chars().take(base_indent).take_while(|c| c.is_whitespace()).count();
+            l.chars().skip(strip).collect::<String>()
+        })
+        .collect();
+
+    let remaining: Vec<&str> = src_lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i < line || *i >= line + len)
+        .map(|(_, s)| *s)
+        .collect();
+    let mut from_body = remaining.join("\n");
+    if from_doc.body.ends_with('\n') {
+        from_body.push('\n');
+    }
+
+    // --- Insert under "## Tasks" in the destination. ---
+    let to_doc = vault::read_doc(&to_abs).map_err(|_| format!("destination missing: {to_rel}"))?;
+    let mut to_lines: Vec<String> = to_doc.body.lines().map(|s| s.to_string()).collect();
+    let tasks_at = to_lines
+        .iter()
+        .position(|l| l.trim().eq_ignore_ascii_case("## Tasks") || l.trim().eq_ignore_ascii_case("# Tasks"));
+    let insert_at = match tasks_at {
+        Some(h) => {
+            // After the heading's existing content: scan to the next heading or EOF.
+            let mut j = h + 1;
+            while j < to_lines.len() && !to_lines[j].trim_start().starts_with('#') {
+                j += 1;
+            }
+            j
+        }
+        None => {
+            if !to_lines.is_empty() && !to_lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+                to_lines.push(String::new());
+            }
+            to_lines.push("## Tasks".to_string());
+            to_lines.len()
+        }
+    };
+    for (k, bl) in rebased.into_iter().enumerate() {
+        to_lines.insert(insert_at + k, bl);
+    }
+    let mut to_body = to_lines.join("\n");
+    if !to_body.ends_with('\n') {
+        to_body.push('\n');
+    }
+
+    // --- Persist both, then re-index both. ---
+    vault::write_doc(&from_abs, &from_doc.frontmatter, &from_body).map_err(err)?;
+    vault::write_doc(&to_abs, &to_doc.frontmatter, &to_body).map_err(err)?;
+    index::index_file(&session.conn, &session.root, &from_abs).map_err(err)?;
+    index::index_file(&session.conn, &session.root, &to_abs).map_err(err)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn list_tasks(state: State<AppState>) -> Result<Vec<index::TaskRow>, String> {
     let guard = state.inner.lock().unwrap();
@@ -492,6 +610,8 @@ pub fn run() {
             tag_pages,
             tag_connections,
             toggle_task,
+            set_task_priority,
+            move_task_block,
             get_settings,
             save_settings,
             list_themes,

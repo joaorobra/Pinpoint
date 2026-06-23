@@ -80,6 +80,7 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
   const [hits, setHits] = useState<SearchHit[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -190,20 +191,30 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
     } else if (e.key === "Escape") {
       e.preventDefault();
       onClose();
+    } else if (e.key === "Tab") {
+      // The palette is fully arrow-driven; trap Tab so focus can't escape to the page behind the
+      // modal. Keeping focus on the input means ↑/↓/Enter stay live no matter what.
+      e.preventDefault();
+      inputRef.current?.focus();
     }
   };
 
   return (
     <motion.div
       className="palette-backdrop"
-      onClick={onClose}
+      onMouseDown={onClose}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={transition("fast")}
     >
       <motion.div
+        ref={panelRef}
         className="palette"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Search and commands"
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
         {...slideFade({ axis: "y", distance: -8, scale: 0.98, speed: "fast" })}
       >
@@ -213,6 +224,7 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
             ref={inputRef}
             className="palette-input"
             placeholder="Search pages and their contents, or run a command…"
+            aria-label="Search pages and commands"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}

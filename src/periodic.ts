@@ -178,3 +178,65 @@ export function template(period: Period, date: Date, dailyFormat?: string): stri
   };
   return sections[period];
 }
+
+/** Monday (local time) of the given ISO week-year — the inverse of `isoWeek`. */
+export function isoWeekStart(year: number, week: number): Date {
+  // ISO week 1 is the week containing Jan 4th; find that week's Monday, then add (week-1) weeks.
+  const jan4 = new Date(year, 0, 4);
+  const jan4Dow = (jan4.getDay() + 6) % 7; // 0 = Monday
+  const week1Monday = new Date(year, 0, 4 - jan4Dow);
+  week1Monday.setDate(week1Monday.getDate() + (week - 1) * 7);
+  week1Monday.setHours(0, 0, 0, 0);
+  return week1Monday;
+}
+
+/** Subfolder name (as produced by `pathFor`) → period. */
+const FOLDER_TO_PERIOD: Record<string, Period> = {
+  Daily: "daily",
+  Weekly: "weekly",
+  Monthly: "monthly",
+  Quarterly: "quarterly",
+  Semestral: "semestral",
+  Yearly: "yearly",
+};
+
+/**
+ * Reverse of `pathFor`: given a page's vault-relative path and the configured periodic folder,
+ * recover which period note it is and the date it represents (the period's start), or null if the
+ * path isn't a periodic note. The returned date is local-midnight at the start of the period (e.g.
+ * Monday for a week, the 1st for a month), suitable for feeding back into `pathFor`/`labelFor`/`step`.
+ */
+export function periodFromPath(relPath: string, folder: string): { period: Period; date: Date } | null {
+  const norm = relPath.replace(/\\/g, "/");
+  const prefix = `${folder.replace(/\/+$/, "")}/`;
+  if (!norm.startsWith(prefix)) return null;
+  const rest = norm.slice(prefix.length); // e.g. "Weekly/2026-W26.md"
+  const slash = rest.indexOf("/");
+  if (slash < 0) return null;
+  const sub = rest.slice(0, slash);
+  const file = rest.slice(slash + 1).replace(/\.md$/i, "");
+  const period = FOLDER_TO_PERIOD[sub];
+  if (!period) return null;
+
+  let m: RegExpMatchArray | null;
+  switch (period) {
+    case "daily":
+      m = file.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      return m ? { period, date: new Date(+m[1], +m[2] - 1, +m[3]) } : null;
+    case "weekly":
+      m = file.match(/^(\d{4})-W(\d{2})$/);
+      return m ? { period, date: isoWeekStart(+m[1], +m[2]) } : null;
+    case "monthly":
+      m = file.match(/^(\d{4})-(\d{2})$/);
+      return m ? { period, date: new Date(+m[1], +m[2] - 1, 1) } : null;
+    case "quarterly":
+      m = file.match(/^(\d{4})-Q([1-4])$/);
+      return m ? { period, date: new Date(+m[1], (+m[2] - 1) * 3, 1) } : null;
+    case "semestral":
+      m = file.match(/^(\d{4})-H([12])$/);
+      return m ? { period, date: new Date(+m[1], (+m[2] - 1) * 6, 1) } : null;
+    case "yearly":
+      m = file.match(/^(\d{4})$/);
+      return m ? { period, date: new Date(+m[1], 0, 1) } : null;
+  }
+}

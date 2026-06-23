@@ -1,8 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   X,
   Palette,
-  TextAa,
   FolderSimple,
   PencilSimple,
   CalendarBlank,
@@ -13,6 +12,7 @@ import {
 import type { Settings } from "../types";
 import { DEFAULT_SMART_REPLACEMENTS } from "../types";
 import Select, { type SelectGroup, type SelectOption } from "./Select";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import ColorPicker from "./ColorPicker";
 import ThemeManager from "./ThemeManager";
 import { formatDate, DATE_PRESETS, TIME_PRESETS } from "../dateformat";
@@ -75,11 +75,10 @@ const THEME_OPTIONS: SelectOption[] = [
   { value: "system", label: "System" },
 ];
 
-type TabId = "appearance" | "typography" | "editor" | "dates" | "vault";
+type TabId = "appearance" | "editor" | "dates" | "vault";
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={17} /> },
-  { id: "typography", label: "Typography", icon: <TextAa size={17} /> },
   { id: "editor", label: "Editor", icon: <PencilSimple size={17} /> },
   { id: "dates", label: "Dates & Times", icon: <CalendarBlank size={17} /> },
   { id: "vault", label: "Vault", icon: <FolderSimple size={17} /> },
@@ -263,6 +262,8 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
     d.setHours(14, 30, 5, 0);
     return d;
   });
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -278,6 +279,7 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div
+        ref={panelRef}
         className="modal settings-modal"
         role="dialog"
         aria-modal="true"
@@ -333,6 +335,13 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                     activeName={settings.active_theme}
                     onSelect={(name) => set("active_theme", name)}
                     fontGroups={FONT_GROUPS}
+                    baseType={{
+                      ui: settings.font_family,
+                      editor: settings.editor_font_family,
+                      size: settings.font_size,
+                      lineHeight: settings.line_height,
+                      pageWidth: settings.page_width || 820,
+                    }}
                   />
                 </Group>
 
@@ -372,6 +381,23 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                   </Group>
                 )}
 
+                <Group
+                  title="Interface"
+                  desc="Scale the whole app — sidebar, toolbars and text together. Also Ctrl +/- and Ctrl 0 to reset. Fonts, text size and page width now live in your theme above."
+                >
+                  <div className="setting">
+                    <label>UI zoom: {Math.round((settings.ui_zoom || 1) * 100)}%</label>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={2}
+                      step={0.1}
+                      value={settings.ui_zoom || 1}
+                      onChange={(e) => set("ui_zoom", +e.target.value)}
+                    />
+                  </div>
+                </Group>
+
                 <Group title="Window" desc="How the app frame behaves.">
                   <Row
                     label="Semi-fullscreen"
@@ -386,79 +412,6 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                       <span className="switch-track" />
                     </label>
                   </Row>
-                </Group>
-              </>
-            )}
-
-            {tab === "typography" && (
-              <>
-                <Group title="Fonts" desc="Typefaces for the interface and the editor.">
-                  <Row label="UI font">
-                    <Select
-                      value={settings.font_family}
-                      groups={FONT_GROUPS}
-                      onChange={(v) => set("font_family", v)}
-                      ariaLabel="UI font"
-                    />
-                  </Row>
-                  <Row label="Editor font">
-                    <Select
-                      value={settings.editor_font_family}
-                      groups={FONT_GROUPS}
-                      onChange={(v) => set("editor_font_family", v)}
-                      ariaLabel="Editor font"
-                    />
-                  </Row>
-                </Group>
-                <Group title="Text" desc="Reading comfort in the editor.">
-                  <div className="setting">
-                    <label>Font size: {settings.font_size}px</label>
-                    <input
-                      type="range"
-                      min={12}
-                      max={24}
-                      value={settings.font_size}
-                      onChange={(e) => set("font_size", +e.target.value)}
-                    />
-                  </div>
-                  <div className="setting">
-                    <label>Line height: {settings.line_height.toFixed(2)}</label>
-                    <input
-                      type="range"
-                      min={1.2}
-                      max={2.2}
-                      step={0.05}
-                      value={settings.line_height}
-                      onChange={(e) => set("line_height", +e.target.value)}
-                    />
-                  </div>
-                  <div className="setting">
-                    <label>Page width: {settings.page_width || 820}px</label>
-                    <input
-                      type="range"
-                      min={480}
-                      max={1400}
-                      step={10}
-                      value={settings.page_width || 820}
-                      onChange={(e) => set("page_width", +e.target.value)}
-                    />
-                    <span className="settings-row-hint">
-                      Or drag the ruler in the editor (Ctrl+R). Applies to all pages.
-                    </span>
-                  </div>
-                </Group>
-                <Group title="Interface" desc="Scale the whole app — sidebar, toolbars and text together. Also Ctrl +/- and Ctrl 0 to reset.">
-                  <div className="setting">
-                    <label>UI zoom: {Math.round((settings.ui_zoom || 1) * 100)}%</label>
-                    <input
-                      type="range"
-                      min={0.5}
-                      max={2}
-                      step={0.1}
-                      value={settings.ui_zoom || 1}
-                      onChange={(e) => set("ui_zoom", +e.target.value)}
-                    />
-                  </div>
                 </Group>
               </>
             )}
