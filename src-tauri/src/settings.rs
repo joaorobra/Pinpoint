@@ -26,11 +26,14 @@ pub struct Settings {
     pub background_color: String, // hex (overrides theme bg if set)
     pub text_color: String,       // hex
     pub line_height: f32,
+    pub page_width: u32,          // editor page column width in px
     pub periodic_folder: String,  // where periodic notes live
     pub templates_folder: String, // where reusable {{variable}} templates live
     /// Per-period template bindings: Period name -> template's vault-relative path.
     pub periodic_templates: HashMap<String, String>,
     pub show_line_numbers: bool,
+    /// Show the floating formatting toolbar (H1–H3, B/I/S, lists…) at the top of the editor.
+    pub show_format_toolbar: bool,
     /// dateformat.ts patterns, one per use case.
     pub date_format: String,           // editor /today + /date default
     pub time_format: String,           // editor /time
@@ -60,6 +63,10 @@ pub struct Settings {
     pub snippets: HashMap<String, String>,
     /// Delimiter wrapping a snippet name to fire it (default "_").
     pub snippet_delimiter: String,
+    /// What to open when this vault is (re)opened: "last" | "today" | "page".
+    pub startup_behavior: String,
+    /// Vault-relative path of the page opened on launch when `startup_behavior` is "page".
+    pub startup_page: String,
     /// Name of the active theme (a `.themes/<name>.json` file). "" = built-in default palette.
     pub active_theme: String,
 }
@@ -90,10 +97,12 @@ impl Default for Settings {
             background_color: "".into(),
             text_color: "".into(),
             line_height: 1.6,
+            page_width: 820,
             periodic_folder: "Periodic".into(),
             templates_folder: "Templates".into(),
             periodic_templates: HashMap::new(),
             show_line_numbers: false,
+            show_format_toolbar: true,
             date_format: "YYYY-MM-DD".into(),
             time_format: "HH:mm".into(),
             task_date_format: "ddd, D MMM".into(),
@@ -110,6 +119,8 @@ impl Default for Settings {
             smart_replacements: default_smart_replacements(),
             snippets: HashMap::new(),
             snippet_delimiter: "_".into(),
+            startup_behavior: "last".into(),
+            startup_page: "".into(),
             active_theme: "".into(),
         }
     }

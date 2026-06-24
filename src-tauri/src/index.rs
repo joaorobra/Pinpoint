@@ -58,13 +58,21 @@ pub fn open(vault_root: &Path) -> Result<Connection> {
     std::fs::create_dir_all(&dir).ok();
     let conn = Connection::open(dir.join("index.sqlite")).context("open index db")?;
     conn.execute_batch(SCHEMA)?;
-    // Migrate older index DBs that predate the task-nesting columns. `CREATE TABLE IF NOT EXISTS`
-    // leaves an existing table untouched, so add the columns here; the duplicate-column error on an
-    // already-migrated DB is expected and ignored. The index is a rebuildable cache, so a failure
-    // here is non-fatal — a later rebuild() recreates the table from the current SCHEMA.
+    // Migrate older index DBs that predate columns added to the `tasks` table over time.
+    // `CREATE TABLE IF NOT EXISTS` leaves a pre-existing table untouched, so EVERY column added after
+    // a DB's original creation must have a matching `ALTER TABLE … ADD COLUMN` here — otherwise the
+    // INSERT in `index_file` (which lists all columns by name) fails on the missing column and every
+    // task silently drops, breaking the Tasks view, the calendar agenda, and task queries. The
+    // duplicate-column error on an already-migrated DB is expected and ignored. NOTE: rebuild() only
+    // DELETEs rows (never DROP+CREATE), so it does NOT heal a missing column — these ALTERs are the
+    // sole upgrade path, so keep this list complete as the SCHEMA grows.
+    //
+    // `done_dates` in particular was added to the SCHEMA without this migration, so any vault indexed
+    // by that build has a `tasks` table lacking the column and indexes zero tasks until this runs.
+    conn.execute("ALTER TABLE tasks ADD COLUMN done_dates TEXT", []).ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN priority TEXT", []).ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0", []).ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN parent_line INTEGER", []).ok();
-    conn.execute("ALTER TABLE tasks ADD COLUMN priority TEXT", []).ok();
     Ok(conn)
 }
 

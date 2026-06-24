@@ -9,3 +9,6 @@ src-tauri/target
 
 # Archives / build artifacts
 src-tauri.zip
+
+# Dev server logs
+vite-out.log

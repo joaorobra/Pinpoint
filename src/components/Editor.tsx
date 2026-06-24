@@ -59,6 +59,7 @@ import { QueryBlock } from "./QueryBlock";
 import { docToMarkdown, markdownToHtml } from "../markdown";
 import { formatDate } from "../dateformat";
 import { CURSOR_SENTINEL } from "../templates";
+import { uiZoom } from "../lib/zoom";
 import type { Period } from "../periodic";
 
 /** A page the `/link` command can reference. */
@@ -633,8 +634,13 @@ const BlockDragHandle = Extension.create({
             const box = dom.getBoundingClientRect();
             const lineNums = document.documentElement.classList.contains("show-line-numbers");
             const gap = lineNums ? HANDLE_GAP + LINE_NUM_CLEAR : HANDLE_GAP;
-            handle.style.left = `${box.left - originBox.left - gap}px`;
-            handle.style.top = `${box.top - originBox.top + 1}px`;
+            // `getBoundingClientRect` reports OUTER (zoomed) pixels, but inline `left`/`top` are
+            // applied in the handle's own LOCAL (unzoomed) space — so the rect-delta must be divided
+            // by the whole-UI zoom factor or the grip drifts further off the more you zoom. The `gap`
+            // is already a local-space constant, so it's subtracted after the conversion. No-op at 100%.
+            const z = uiZoom();
+            handle.style.left = `${(box.left - originBox.left) / z - gap}px`;
+            handle.style.top = `${(box.top - originBox.top) / z + 1}px`;
             handle.style.display = "flex";
           };
 
@@ -733,9 +739,13 @@ const BlockDragHandle = Extension.create({
             const drop = computeDrop(clientY);
             if (!drop) { indicator.style.display = "none"; dropTarget = null; return; }
             dropTarget = { refPos: drop.refPos, after: drop.after };
-            indicator.style.top = `${drop.y - 1.5}px`;
-            indicator.style.left = `${drop.left}px`;
-            indicator.style.right = `${drop.right}px`;
+            // `drop.{y,left,right}` are rect-deltas in OUTER (zoomed) pixels; the indicator's inline
+            // offsets are LOCAL (unzoomed) — divide by the zoom factor so the drop line tracks the
+            // gap exactly at any zoom (no-op at 100%).
+            const z = uiZoom();
+            indicator.style.top = `${drop.y / z - 1.5}px`;
+            indicator.style.left = `${drop.left / z}px`;
+            indicator.style.right = `${drop.right / z}px`;
             indicator.style.display = "block";
           };
 
