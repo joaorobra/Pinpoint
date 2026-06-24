@@ -422,6 +422,25 @@ export interface Settings {
   show_format_toolbar: boolean;
   /** Strike through the text of completed (checked) to-do items in the editor. */
   strike_done_tasks: boolean;
+  /**
+   * What to do with completed (checked) to-dos in the editor body:
+   *  - `show` — leave them in place (default);
+   *  - `dim`  — keep them but fade them back so open tasks stand out;
+   *  - `hide` — collapse them out of view entirely (the markdown still keeps them).
+   */
+  completed_task_display: "show" | "dim" | "hide";
+  /**
+   * How an inline `priority:: <level>` field renders in the editor:
+   *  - `both` — coloured flag + level word (default);
+   *  - `flag` — flag glyph only (compact);
+   *  - `text` — level word only, no flag.
+   */
+  priority_display: "both" | "flag" | "text";
+  /**
+   * Tint a task's inline due-date marker (`📅`/`due::`) by urgency in the editor — overdue, due
+   * today, or due soon. Off renders due dates in the normal text colour.
+   */
+  highlight_due_dates: boolean;
   /** Pattern (see dateformat.ts tokens) for inserting plain dates in the editor. */
   date_format: string;
   /** Pattern for inserting the current time / "now" timestamps. */
@@ -439,6 +458,12 @@ export interface Settings {
    * date + time.
    */
   done_date_format: string;
+  /**
+   * Optional text placed before the completion timestamp in the stamp, e.g. `✅` or `Done` →
+   * `done:: ✅ 2026-06-23`. Empty for just the timestamp. Purely cosmetic; the `done::` field key is
+   * unchanged so parsing/round-trip is unaffected.
+   */
+  done_date_prefix: string;
   /** Pattern for the human label of a daily periodic note. */
   periodic_label_format: string;
   /** Per-node icon overrides, keyed by the node's vault-relative path. */
@@ -658,11 +683,15 @@ export const DEFAULT_SETTINGS: Settings = {
   show_line_numbers: false,
   show_format_toolbar: true,
   strike_done_tasks: true,
+  completed_task_display: "show",
+  priority_display: "both",
+  highlight_due_dates: true,
   date_format: "YYYY-MM-DD",
   time_format: "HH:mm",
   task_date_format: "ddd, D MMM",
   stamp_done_date: true,
   done_date_format: "YYYY-MM-DD HH:mm",
+  done_date_prefix: "",
   periodic_label_format: "dddd, MMMM D",
   node_icons: {},
   auto_hide_titlebar: false,

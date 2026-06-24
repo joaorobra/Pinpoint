@@ -39,6 +39,16 @@ pub struct Settings {
     pub stamp_done_date: bool,
     /// dateformat.ts pattern for the completion stamp (date-only or date + time).
     pub done_date_format: String,
+    /// Optional text before the completion timestamp (e.g. "✅"). "" = just the timestamp.
+    pub done_date_prefix: String,
+    /// Strike through + dim completed to-do text in the editor.
+    pub strike_done_tasks: bool,
+    /// Completed to-dos in the editor: "show" | "dim" | "hide".
+    pub completed_task_display: String,
+    /// Inline `priority::` rendering: "both" (flag + word) | "flag" | "text".
+    pub priority_display: String,
+    /// Tint inline due-date markers by urgency (overdue / today / soon) in the editor.
+    pub highlight_due_dates: bool,
     pub periodic_label_format: String, // daily periodic-note heading
     /// Per-node icon overrides, keyed by the node's vault-relative path.
     pub node_icons: HashMap<String, NodeIcon>,
@@ -89,6 +99,11 @@ impl Default for Settings {
             task_date_format: "ddd, D MMM".into(),
             stamp_done_date: true,
             done_date_format: "YYYY-MM-DD HH:mm".into(),
+            done_date_prefix: "".into(),
+            strike_done_tasks: true,
+            completed_task_display: "show".into(),
+            priority_display: "both".into(),
+            highlight_due_dates: true,
             periodic_label_format: "dddd, MMMM D".into(),
             node_icons: HashMap::new(),
             auto_hide_titlebar: false,

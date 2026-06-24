@@ -38,7 +38,7 @@ import { toast } from "./Toast";
 import { type SelectOption } from "./Select";
 
 interface Props {
-  onOpen: (relPath: string) => void;
+  onOpen: (relPath: string, line?: number) => void;
   /** Open a page by `[[wikilink]]` name (clicking a wikilink in a task's text). */
   onOpenName?: (name: string) => void;
   refreshKey: number;

@@ -1,49 +1,23 @@
-import { SidebarSimple } from "@phosphor-icons/react";
-
 interface BreadcrumbProps {
   /** Rel path of the active doc, e.g. "Notes/Projects/Pinpoint.md". Empty when nothing is open. */
   path: string;
-  /** Toggle the left (file-tree) drawer. */
-  onToggleLeft: () => void;
-  /** Toggle the right (outline/calendar) drawer. */
-  onToggleRight: () => void;
-  /** Jump to a folder: open the tree drawer and reveal/scroll to that folder. */
+  /** Jump to a folder: open it and reveal/scroll to that folder in the tree. */
   onNavigateFolder?: (folderRelPath: string) => void;
-  leftOpen: boolean;
-  rightOpen: boolean;
 }
 
 /**
- * Mobile-only top bar. With the sidebars collapsed into overlay drawers, this is the persistent
- * orientation cue: it shows where the open file sits in the vault and flanks that path with the two
- * drawer toggles (☰ file tree on the left, outline/calendar on the right). The crumb segments are
- * derived from the rel path; the leaf is shown without its `.md` extension. Tapping a folder
- * segment opens the file tree and reveals that folder (expands its ancestors + scrolls to it), so
- * each crumb is a real jump to that level of the hierarchy.
+ * Mobile-only top bar — a pure orientation cue. With the sidebars collapsed into overlay drawers
+ * (toggled from the bottom navbar, which owns all drawer controls), this bar's single job is to show
+ * WHERE the open file sits in the vault. The crumb segments are derived from the rel path; the leaf
+ * is shown without its `.md` extension. Tapping a folder segment opens that folder and reveals it in
+ * the tree, so each crumb is a real jump to that level of the hierarchy.
  */
-export default function Breadcrumb({
-  path,
-  onToggleLeft,
-  onToggleRight,
-  onNavigateFolder,
-  leftOpen,
-  rightOpen,
-}: BreadcrumbProps) {
+export default function Breadcrumb({ path, onNavigateFolder }: BreadcrumbProps) {
   const segments = path ? path.split("/").filter(Boolean) : [];
   const lastIdx = segments.length - 1;
 
   return (
     <nav className="breadcrumb" aria-label="Location">
-      <button
-        className={`breadcrumb-toggle${leftOpen ? " active" : ""}`}
-        onClick={onToggleLeft}
-        title="Files"
-        aria-label="Toggle file tree"
-        aria-expanded={leftOpen}
-      >
-        <SidebarSimple size={18} weight="bold" />
-      </button>
-
       <div className="breadcrumb-trail">
         {segments.length === 0 ? (
           <span className="breadcrumb-empty">No file open</span>
@@ -51,19 +25,15 @@ export default function Breadcrumb({
           segments.map((seg, i) => {
             const isLeaf = i === lastIdx;
             const label = isLeaf ? seg.replace(/\.md$/i, "") : seg;
-            // Cumulative rel path of this folder crumb, used to reveal it in the tree.
+            // Cumulative rel path of this folder crumb, used to open + reveal it.
             const folderPath = segments.slice(0, i + 1).join("/");
             return (
               <span className="breadcrumb-seg" key={i}>
                 {i > 0 && <span className="breadcrumb-sep" aria-hidden>›</span>}
                 <button
                   className={`breadcrumb-crumb${isLeaf ? " leaf" : ""}`}
-                  // Folder crumbs jump to that folder in the tree; the leaf is the current file (inert).
-                  onClick={
-                    isLeaf
-                      ? undefined
-                      : () => (onNavigateFolder ? onNavigateFolder(folderPath) : onToggleLeft())
-                  }
+                  // Folder crumbs jump to that folder; the leaf is the current file (inert).
+                  onClick={isLeaf ? undefined : () => onNavigateFolder?.(folderPath)}
                   disabled={isLeaf}
                   title={label}
                 >
@@ -74,16 +44,6 @@ export default function Breadcrumb({
           })
         )}
       </div>
-
-      <button
-        className={`breadcrumb-toggle${rightOpen ? " active" : ""}`}
-        onClick={onToggleRight}
-        title="Outline & calendar"
-        aria-label="Toggle outline panel"
-        aria-expanded={rightOpen}
-      >
-        <SidebarSimple size={18} weight="bold" style={{ transform: "scaleX(-1)" }} />
-      </button>
     </nav>
   );
 }

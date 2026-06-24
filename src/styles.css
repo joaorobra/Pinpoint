@@ -762,6 +762,26 @@ code, .dsl-preview, .dsl-input {
 }
 .sidebar-trash.active .sidebar-trash-count { background: var(--accent); color: var(--accent-contrast); }
 
+/* Mobile nav-hub: the view shortcuts (Tasks / Query / Tags) shown inside the file-tree drawer on a
+   phone, so the drawer is the single place all navigation lives. Only rendered when vp.isMobile. */
+.sidebar-views {
+  flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+.sidebar-view {
+  display: flex; align-items: center; gap: var(--sp-2);
+  width: 100%; min-height: var(--touch-target);
+  padding: var(--sp-2);
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-dim);
+  font-size: 0.92em; font-weight: 550; text-align: left;
+}
+.sidebar-view svg { flex: none; }
+.sidebar-view span { flex: 1; }
+.sidebar-view:active { background: var(--bg-hover); color: var(--text); }
+.sidebar-view.active { background: var(--accent-soft); color: var(--accent); }
+
 /* Expand / collapse-all controls above the tree. */
 .tree-toolbar {
   display: flex; gap: var(--sp-1);
@@ -1568,6 +1588,12 @@ code, .dsl-preview, .dsl-input {
 }
 .ProseMirror ul[data-type="taskList"] p { margin: 0; line-height: var(--line-height); }
 
+/* The "jump to task" highlight (calendar agenda / Tasks panel) is NOT styled here. Tiptap renders
+   each task <li> as a React NodeView and continuously reconciles it, wiping any inline style/class
+   we set. So App's `flashTaskRow` overlays a body-level <div> on top of the row and fades it from
+   JS — outside the editor's managed DOM and immune to the global prefers-reduced-motion reset
+   (`* { animation-duration/transition-duration: 0.01ms !important }`) that kills CSS animations. */
+
 /* Strike through + dim the text of completed to-do items. Gated on a root class so it can be
    turned off in Settings → Editor → "Strike completed to-dos". Targets the item's own paragraph
    only (`> div > p`), never its nested sub-list, so sub-items keep their own state. */
@@ -1576,6 +1602,45 @@ code, .dsl-preview, .dsl-input {
   text-decoration-color: var(--text-faint);
   color: var(--text-faint);
 }
+
+/* Completed-to-do visibility (Settings → Tasks → "Completed to-dos"), driven by a root data-attr.
+   "dim" fades the finished item's own row back so open tasks stand out; "hide" collapses that row
+   out of view. Both target the item's OWN row (`> div`) only — never its nested sub-list — so an
+   unchecked child of a checked parent stays visible and the markdown source is unaffected. */
+:root[data-completed-tasks="dim"] .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+  opacity: 0.45;
+}
+:root[data-completed-tasks="hide"] .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+  display: none;
+}
+
+/* Priority pill display mode (Settings → Tasks → "Priority display"), driven by a root data-attr.
+   "flag" keeps only the ::before flag glyph (the level word is zeroed out); "text" drops the flag and
+   shows just the word. Default ("both") needs no override. The doc text stays literal `priority:: …`. */
+:root[data-priority-display="flag"] .priority-pill {
+  /* Collapse the level word; the masked ::before glyph is sized in em, so re-establish a real
+     font-size on it below (matching the default ~0.71rem glyph) and drop the now-empty word's gap. */
+  font-size: 0; padding: 0.05em 0.34em;
+}
+:root[data-priority-display="flag"] .priority-pill::before {
+  font-size: 0.84rem; margin-right: 0;
+}
+:root[data-priority-display="text"] .priority-pill::before {
+  display: none;
+}
+
+/* Due-date urgency tints for the editor's inline `📅`/`due::` date (DueHighlight decoration). A small
+   rounded chip coloured by how close the due date is. Off (setting) → no `.due-pill` class emitted. */
+.due-pill {
+  border-radius: 6px;
+  padding: 0.02em 0.32em;
+  font-weight: 600;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.due-pill.due-overdue { color: var(--danger); background: var(--danger-soft); }
+.due-pill.due-today { color: var(--prio-medium); background: var(--prio-medium-soft); }
+.due-pill.due-soon { color: var(--text-dim); background: var(--bg-3); }
 
 /* Semi-done parent: some — but not all — of its sub-to-dos are checked. Draw an indeterminate
    "dash" badge over the (unchecked) checkbox so the partial state reads at a glance. */
@@ -2758,6 +2823,40 @@ input[type="range"]::-moz-range-thumb {
 .settings-tab:hover { background: var(--bg-hover); color: var(--text); }
 .settings-tab.active { background: var(--accent-tint); color: var(--accent); }
 .settings-tab-icon { display: grid; place-items: center; }
+
+/* Search box at the top of the settings nav */
+.settings-search {
+  position: relative; display: flex; align-items: center;
+  margin: 0 var(--sp-1) var(--sp-3);
+}
+.settings-search-icon {
+  position: absolute; left: var(--sp-2); color: var(--text-dim);
+  pointer-events: none;
+}
+.settings-search-input {
+  width: 100%; padding: var(--sp-2) var(--sp-6) var(--sp-2) calc(var(--sp-2) + 22px);
+  background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  font-size: 0.9em;
+}
+.settings-search-input::placeholder { color: var(--text-dim); }
+.settings-search-input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-tint);
+}
+/* Hide the native search clear affordance — we render our own. */
+.settings-search-input::-webkit-search-cancel-button { display: none; }
+.settings-search-clear {
+  position: absolute; right: var(--sp-1); display: grid; place-items: center;
+  width: 22px; height: 22px; padding: 0;
+  background: transparent; border: none; border-radius: var(--r-sm);
+  color: var(--text-dim); cursor: pointer;
+}
+.settings-search-clear:hover { background: var(--bg-hover); color: var(--text); }
+
+.settings-no-results {
+  margin: var(--sp-4) 0; color: var(--text-dim); font-size: 0.92em;
+}
 
 /* Right pane */
 .settings-pane { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
@@ -4415,20 +4514,15 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 .breadcrumb {
   position: sticky; top: 0; z-index: 6;
   display: flex; align-items: center; gap: var(--sp-1);
-  padding: var(--safe-t) max(var(--sp-1), var(--safe-r)) 0 max(var(--sp-1), var(--safe-l));
+  padding: var(--safe-t) max(var(--sp-3), var(--safe-r)) 0 max(var(--sp-3), var(--safe-l));
   min-height: var(--touch-target);
-  background: var(--bg-2);
+  /* Translucent + blurred so it reads as a pair with the bottom navbar and lets content scroll
+     softly beneath it. */
+  background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
-.breadcrumb-toggle {
-  flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  width: var(--touch-target); height: var(--touch-target);
-  border-radius: var(--r-sm);
-  background: transparent; border: 1px solid transparent; color: var(--text-dim);
-}
-.breadcrumb-toggle:active { background: var(--bg-hover); color: var(--text); }
-.breadcrumb-toggle.active { background: var(--accent-soft); color: var(--accent); }
 .breadcrumb-trail {
   flex: 1; min-width: 0;
   display: flex; align-items: center;
@@ -4479,9 +4573,11 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   .right-sidebar { border-left: none; }
   .sidebar { border-right: none; }
 
-  /* The main column owns the full width; hide the desktop "show sidebar" nav button (the
-     breadcrumb toggles cover it) and let the document tabs scroll horizontally. */
+  /* The main column owns the full width. The desktop sidebar-toggle nav button and the view-tab
+     strip (Tasks/Query/Tags + right toggle) are redundant on a phone — the bottom navbar owns drawer
+     toggling and the file-tree drawer hosts the view shortcuts — so hide them; let doc tabs scroll. */
   .nav-arrows .nav-arrow:first-child:not(:only-child) { display: none; }
+  .view-tabs { display: none; }
   .doc-tabs { overflow-x: auto; }
 
   /* Editor content gets full width with comfortable, safe-area-aware side padding. */
@@ -4539,7 +4635,163 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   /* Kanban lanes get a scroll-snap so each lane settles into view when swiping the board. */
   .db-board { scroll-snap-type: x proximity; }
   .db-lane { scroll-snap-align: start; }
+
+  /* Reserve room at the bottom of the editor so the last lines clear the fixed quick-capture bar. */
+  .editor-content { padding-bottom: calc(30vh + var(--navbar-h) + var(--safe-b)); }
 }
+
+/* ============================================================
+   Mobile quick-capture navbar + bottom sheet
+   A persistent bottom bar (mobile only) whose one dominant action
+   is Quick Capture (＋), flanked by the Files / Outline drawer
+   toggles within thumb range. The ＋ raises a bottom sheet to file
+   a task into today's note or create a note in any folder.
+   ============================================================ */
+
+/* Height of the bar itself (excludes the safe-area inset added below). Editor padding and the
+   toast host both offset by this so nothing hides behind the bar. */
+:root { --navbar-h: 56px; }
+
+.mobile-navbar {
+  position: fixed; z-index: 60;
+  left: 0; right: 0; bottom: 0;
+  height: calc(var(--navbar-h) + var(--safe-b));
+  padding: 0 max(var(--sp-4), var(--safe-r)) var(--safe-b) max(var(--sp-4), var(--safe-l));
+  display: flex; align-items: center; justify-content: space-between;
+  background: color-mix(in srgb, var(--bg-2) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+}
+
+/* Side toggles: icon + tiny label, dimmed until their drawer is open. */
+.mnav-btn {
+  flex: 1 1 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  min-height: var(--navbar-h);
+  background: transparent; border: none; color: var(--text-dim);
+  font-size: 0.66rem; font-weight: 500; letter-spacing: 0.01em;
+  transition: color var(--dur) var(--ease);
+}
+.mnav-btn:active { color: var(--text); }
+.mnav-btn.active { color: var(--accent); }
+.mnav-label { line-height: 1; }
+
+/* The primary action: a raised accent pill, optically centered and lifted above the bar. */
+.mnav-fab {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 52px; height: 52px; margin-bottom: 8px;
+  border-radius: var(--r-lg);
+  background: var(--accent); color: var(--accent-contrast);
+  border: none; box-shadow: var(--shadow-md);
+  transition: transform var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.mnav-fab:active { transform: scale(0.94); background: var(--accent-hover); }
+
+/* ---- Bottom sheet ---- */
+.sheet-backdrop {
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; align-items: flex-end; justify-content: center;
+  background: var(--scrim);
+}
+.capture-sheet {
+  width: 100%; max-width: 560px; max-height: 80vh;
+  display: flex; flex-direction: column;
+  padding: var(--sp-2) var(--sp-4) calc(var(--sp-5) + var(--safe-b));
+  background: var(--bg-2);
+  border: 1px solid var(--border); border-bottom: none;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  box-shadow: var(--shadow-lg);
+}
+.sheet-grip {
+  flex: none; width: 36px; height: 4px; margin: var(--sp-1) auto var(--sp-2);
+  border-radius: 999px; background: var(--border-strong);
+}
+.sheet-header {
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.sheet-title {
+  flex: 1; min-width: 0; margin: 0;
+  font-size: 1rem; font-weight: 600; color: var(--text);
+}
+.sheet-close, .sheet-back {
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: var(--r-sm);
+  background: transparent; border: none; color: var(--text-dim);
+}
+.sheet-close:active, .sheet-back:active { background: var(--bg-hover); color: var(--text); }
+
+/* ---- Capture menu (two intents) ---- */
+.capture-menu { display: flex; flex-direction: column; gap: var(--sp-2); }
+.capture-option {
+  display: flex; align-items: center; gap: var(--sp-3); text-align: left;
+  padding: var(--sp-3);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  color: var(--text);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.capture-option:active { background: var(--bg-hover); border-color: var(--border-strong); }
+.capture-icon {
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: var(--r-md);
+}
+.capture-icon.task { background: var(--accent-soft); color: var(--accent); }
+.capture-icon.note { background: var(--accent-tint); color: var(--accent); }
+.capture-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.capture-name { font-weight: 600; font-size: 0.95rem; }
+.capture-desc { font-size: 0.8rem; color: var(--text-dim); }
+.capture-go { flex: none; color: var(--text-faint); }
+
+/* ---- Capture forms (task / note) ---- */
+.capture-form { display: flex; flex-direction: column; gap: var(--sp-3); min-height: 0; }
+.capture-input {
+  width: 100%;
+  padding: var(--sp-3);
+  font-size: 1rem;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.capture-input:focus {
+  outline: none;
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.capture-field-label {
+  font-size: 0.78rem; font-weight: 600; color: var(--text-dim);
+  margin-bottom: calc(-1 * var(--sp-1));
+}
+.capture-folders {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 38vh; overflow-y: auto;
+  padding: var(--sp-1);
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.capture-folder {
+  display: flex; align-items: center; gap: var(--sp-2); text-align: left;
+  width: 100%; min-height: 40px; padding: var(--sp-2) var(--sp-3);
+  background: transparent; border: none; border-radius: var(--r-sm);
+  color: var(--text); font-size: 0.92rem;
+}
+.capture-folder:active { background: var(--bg-hover); }
+.capture-folder.selected { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.capture-folder span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.capture-submit {
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  width: 100%; min-height: var(--touch-target); margin-top: var(--sp-1);
+  font-size: 0.95rem; font-weight: 600;
+  background: var(--accent); color: var(--accent-contrast);
+  border: none; border-radius: var(--r-md);
+  transition: background var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+.capture-submit:active { background: var(--accent-hover); }
+.capture-submit:disabled { opacity: 0.5; }
+
+/* Lift the toast clear of the bottom bar so they never overlap on a phone (the navbar renders
+   only at the mobile breakpoint, which <body> exposes as data-vp). */
+body[data-vp="mobile"] .toast-host { bottom: calc(var(--navbar-h) + var(--sp-3) + var(--safe-b)); }
 
 /* ---- Touch devices: reveal hover-only affordances, enlarge tap targets ---- */
 @media (hover: none) {
@@ -4552,14 +4804,10 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   /* The kanban grip is the explicit drag handle on touch — always show it, with a real tap target. */
   .db-card-grip { opacity: 0.6; padding: 4px; top: 4px; right: 2px; }
 
-  /* Hover highlights don't fire on touch — mirror them on :active so taps still feel responsive. */
-  .breadcrumb-toggle:hover { background: transparent; }
-
   /* Bump icon-button hit areas to the minimum comfortable touch target. */
   .sidebar-actions button,
   .nav-arrow,
-  .right-tabs button,
-  .breadcrumb-toggle {
+  .right-tabs button {
     min-width: var(--touch-target);
     min-height: var(--touch-target);
   }

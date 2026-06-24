@@ -43,8 +43,9 @@ interface Props {
   /** Open (creating if missing) the daily note for a clicked calendar day. `period`/`date` let the
    *  host apply that period's bound template (with {{period}} tokens) when creating the note. */
   onOpenPeriodic: (relPath: string, fallbackBody: string, period?: Period, date?: Date) => void;
-  /** Open an existing page (used by the agenda to jump to a task's source). */
-  onOpenPath: (relPath: string) => void;
+  /** Open an existing page (used by the agenda to jump to a task's source). `line` (0-based body
+   *  line of the task) lets the editor scroll to and flash that task's row. */
+  onOpenPath: (relPath: string, line?: number) => void;
   /** Open a page by its `[[wikilink]]` name (clicking a wikilink inside an agenda task). */
   onOpenName: (name: string) => void;
   /** Bumped when tasks/pages change, so the calendar agenda re-fetches. */
@@ -515,7 +516,7 @@ function AgendaSection({
   label?: string;
   /** Each row carries its (re-based) nesting depth so children indent under their parent. */
   tasks: { task: TaskRow; depth: number }[];
-  onOpenPath: (relPath: string) => void;
+  onOpenPath: (relPath: string, line?: number) => void;
   onOpenName: (name: string) => void;
 }) {
   return (
@@ -528,7 +529,7 @@ function AgendaSection({
             className={"cal-agenda-task" + (t.done ? " done" : "") + (depth ? " nested" : "")}
             style={depth ? { marginLeft: `calc(var(--sp-4) * ${depth})` } : undefined}
             title={t.rel_path}
-            onClick={() => onOpenPath(t.rel_path)}
+            onClick={() => onOpenPath(t.rel_path, t.line)}
           >
             {t.done ? <CheckCircle size={14} weight="fill" /> : <Circle size={14} />}
             {/* Body: task text with #tags flowing inline right after it (wrapping with the text). The
@@ -536,7 +537,7 @@ function AgendaSection({
             <span className="cal-agenda-body">
               <AgendaText
                 text={t.text}
-                onOpenSource={() => onOpenPath(t.rel_path)}
+                onOpenSource={() => onOpenPath(t.rel_path, t.line)}
                 onOpenName={onOpenName}
               />
               {(t.tags ?? "")

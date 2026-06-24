@@ -160,6 +160,13 @@ interface Props {
    * `YYYY-MM-DD HH:mm`.
    */
   doneDateFormat?: string;
+  /** Optional cosmetic text before the completion timestamp (e.g. `✅`). Empty for just the time. */
+  doneDatePrefix?: string;
+  /**
+   * Tint inline due-date markers (`📅`/`due::`) by urgency — overdue / today / soon. Default true.
+   * Off leaves due dates in the normal text colour.
+   */
+  highlightDueDates?: boolean;
   /** Current editor page-column width in px (drives the draggable ruler and the column max-width). */
   pageWidth?: number;
   /**
@@ -633,9 +640,6 @@ const BlockDragHandle = Extension.create({
 
           const onMove = (e: MouseEvent) => {
             if (dragging) return;
-            // Track over the WHOLE editor column (text + left gutter), not just the text — otherwise
-            // moving left toward the grip leaves the text box and the handle vanishes before you can
-            // grab it. `lineAtCoords` clamps x into the text column, so gutter rows still resolve.
             const hit = lineAtCoords(view, e.clientX, e.clientY);
             if (!hit) {
               hoverPos = null;
@@ -645,8 +649,10 @@ const BlockDragHandle = Extension.create({
             hoverPos = hit.pos;
             place(hit.dom);
           };
+          // Hide only when the pointer truly leaves the editor column — NOT when it crosses from the
+          // text into the left gutter on its way to the grip. (The old check used `view.dom`, so the
+          // handle vanished the instant you left the text box, making it nearly impossible to grab.)
           const onLeave = (e: MouseEvent) => {
-            // Keep the handle as long as the pointer is still somewhere in the editor column.
             if (dragging) return;
             const to = e.relatedTarget as Node | null;
             if (to && wrap.contains(to)) return;
@@ -654,7 +660,10 @@ const BlockDragHandle = Extension.create({
             hoverPos = null;
           };
 
-          wrap.addEventListener("mousemove", onMove);
+          // `mousemove` stays on `view.dom` (the editable surface) — the binding that reliably fires
+          // and reveals the grip; `mouseleave` watches the whole column so the grip survives the trip
+          // across the gutter.
+          view.dom.addEventListener("mousemove", onMove);
           wrap.addEventListener("mouseleave", onLeave);
 
           // From a pointer Y, find the drop gap among ALL lines in the document (any list, any level).
@@ -813,7 +822,7 @@ const BlockDragHandle = Extension.create({
 
           return {
             destroy() {
-              wrap.removeEventListener("mousemove", onMove);
+              view.dom.removeEventListener("mousemove", onMove);
               wrap.removeEventListener("mouseleave", onLeave);
               if (rafScroll) cancelAnimationFrame(rafScroll);
               handle.remove();
@@ -1251,6 +1260,84 @@ const DonePill = Extension.create({
                 const valEnd = kwEnd + m[2].length; // end of the timestamp value
                 decos.push(Decoration.inline(kwStart, kwEnd, { class: "done-kw" }));
                 decos.push(Decoration.inline(kwEnd, valEnd, { class: "done-pill" }));
+              }
+            });
+            return DecorationSet.create(state.doc, decos);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * Tint a task's inline due-date marker by urgency — overdue / due-today / due-soon — without touching
+ * the document model (decoration overlay, like the other task pills). Matches `📅 YYYY-MM-DD` and
+ * `due:: YYYY-MM-DD`, parses the date as a LOCAL calendar day, and adds a `due-*` class the CSS colours
+ * from the urgency tokens. Only past / today / next-two-days get a class; further-out dates stay plain.
+ *
+ * `getEnabled()` is read live (a getter) so the Settings toggle applies without re-creating the editor.
+ * `today0()` recomputes local-midnight on every decoration pass, so an open editor rolls over at
+ * midnight without a reload.
+ */
+const dueHighlightKey = new PluginKey("dueHighlight");
+// `📅`/`due::` then a YYYY-MM-DD. Two capture groups: the leading marker (kept plain) and the date
+// (pilled). Mirrors the markers the indexer recognises; only an ISO date is tinted (the unambiguous case).
+const DUE_DECO_RE = /(📅\s*|due::\s*)(\d{4}-\d{2}-\d{2})/gi;
+
+interface DueHighlightOptions {
+  /** Whether due-date tinting is on. Read live so the Settings toggle needs no editor re-create. */
+  getEnabled: () => boolean;
+}
+
+/** Local-midnight timestamp for today (recomputed per pass so an open doc rolls over at midnight). */
+function today0(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** Local-midnight timestamp for a `YYYY-MM-DD` string, or null if it isn't a real date. */
+function isoDay0(iso: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return null;
+  const t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+
+const DueHighlight = Extension.create<DueHighlightOptions>({
+  name: "dueHighlight",
+  addOptions() {
+    return { getEnabled: () => true };
+  },
+  addProseMirrorPlugins() {
+    const getEnabled = this.options.getEnabled;
+    return [
+      new Plugin({
+        key: dueHighlightKey,
+        props: {
+          decorations(state) {
+            if (!getEnabled()) return DecorationSet.empty;
+            const decos: Decoration[] = [];
+            const base = today0();
+            const DAY = 86400000;
+            state.doc.descendants((node, pos) => {
+              if (!node.isText || !node.text) return;
+              if (node.marks.some((m) => m.type.name === "code")) return;
+              const text = node.text;
+              DUE_DECO_RE.lastIndex = 0;
+              let m: RegExpExecArray | null;
+              while ((m = DUE_DECO_RE.exec(text))) {
+                const day = isoDay0(m[2]);
+                if (day == null) continue;
+                const diff = Math.round((day - base) / DAY);
+                const urgency =
+                  diff < 0 ? "overdue" : diff === 0 ? "today" : diff <= 2 ? "soon" : null;
+                if (!urgency) continue;
+                // Tint the date token (after the marker); the marker glyph itself stays plain.
+                const dateStart = pos + m.index + m[1].length;
+                const dateEnd = dateStart + m[2].length;
+                decos.push(Decoration.inline(dateStart, dateEnd, { class: `due-pill due-${urgency}` }));
               }
             });
             return DecorationSet.create(state.doc, decos);
@@ -1967,6 +2054,8 @@ export default function Editor({
   taskDateFormat = "YYYY-MM-DD",
   stampDoneDate = true,
   doneDateFormat = "YYYY-MM-DD HH:mm",
+  doneDatePrefix = "",
+  highlightDueDates = true,
   pageWidth = 820,
   onPageWidthChange,
   headerSlot,
@@ -2002,12 +2091,23 @@ export default function Editor({
   onTaskToggledRef.current = onTaskToggled;
   const onSendTaskRef = useRef(onSendTask);
   onSendTaskRef.current = onSendTask;
-  // Builds the `done:: …` completion timestamp on demand from the user's live format setting, or ""
-  // to disable stamping entirely (CompletionStamp treats an empty stamp as "skip"). A ref so the
-  // extension (configured once) always reads the current pattern / on-off without an editor re-create.
+  // Builds the `done:: …` completion stamp VALUE on demand (an optional prefix + the formatted
+  // timestamp), or "" to disable stamping entirely (CompletionStamp treats an empty value as "skip").
+  // A ref so the extension (configured once) always reads the current settings without an editor
+  // re-create. The prefix is cosmetic and rides inside the value, so DonePill pills it too.
   const doneStampRef = useRef<() => string>(() => "");
-  doneStampRef.current = () =>
-    stampDoneDate ? formatDate(new Date(), doneDateFormat).trim() : "";
+  doneStampRef.current = () => {
+    if (!stampDoneDate) return "";
+    const stamp = formatDate(new Date(), doneDateFormat).trim();
+    // Strip the reserved field markers (📅🔁⏳✅) from the prefix: they delimit OTHER inline fields, so
+    // letting one into the value would break the done:: field's own bounds (and ✅ already shows as the
+    // pill's own check glyph). Everything else — "Done", 🎉, etc. — is kept.
+    const prefix = (doneDatePrefix ?? "").replace(/[📅🔁⏳✅]/g, "").trim();
+    return prefix ? `${prefix} ${stamp}` : stamp;
+  };
+  // Live on/off for due-date tinting, read by the DueHighlight plugin (configured once) per pass.
+  const highlightDueRef = useRef(highlightDueDates);
+  highlightDueRef.current = highlightDueDates;
   const lastEmitted = useRef<string>(value);
   const [slash, setSlash] = useState<{ query: string; left: number; top: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -2196,6 +2296,7 @@ export default function Editor({
         TagPill.configure({ onOpenTag: (tag) => onOpenTagRef.current?.(tag) }),
         PriorityPill,
         DonePill,
+        DueHighlight.configure({ getEnabled: () => highlightDueRef.current }),
         ImageNode,
         WikiLink.configure({ onOpen: (name) => onOpenPageRef.current?.(name) }),
         QueryBlock.configure({
@@ -2833,7 +2934,7 @@ export default function Editor({
         <PageRuler width={pageWidth} onCommit={onPageWidthChange} />
       )}
       {headerSlot && <div className="editor-header-slot">{headerSlot}</div>}
-      <EditorContent editor={editor} className="editor-content" />
+      <EditorContent editor={editor} className="editor-content" data-reload-key={reloadKey} />
       {slash && filtered.length > 0 && (
         <div className="slash-menu" style={{ left: slash.left, top: slash.top }}>
           {groupedCommands.map((g) => (

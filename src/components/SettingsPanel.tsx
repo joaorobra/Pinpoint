@@ -1,13 +1,25 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  Children,
+  createContext,
+  isValidElement,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   X,
   Palette,
   FolderSimple,
   PencilSimple,
   CalendarBlank,
+  CheckSquare,
   Plus,
   Trash,
   ArrowUDownLeft,
+  MagnifyingGlass,
 } from "@phosphor-icons/react";
 import type { Settings } from "../types";
 import { DEFAULT_SMART_REPLACEMENTS } from "../types";
@@ -75,12 +87,13 @@ const THEME_OPTIONS: SelectOption[] = [
   { value: "system", label: "System" },
 ];
 
-type TabId = "appearance" | "editor" | "dates" | "vault";
+type TabId = "appearance" | "editor" | "dates" | "tasks" | "vault";
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={17} /> },
   { id: "editor", label: "Editor", icon: <PencilSimple size={17} /> },
   { id: "dates", label: "Dates & Times", icon: <CalendarBlank size={17} /> },
+  { id: "tasks", label: "Tasks", icon: <CheckSquare size={17} /> },
   { id: "vault", label: "Vault", icon: <FolderSimple size={17} /> },
 ];
 
@@ -131,8 +144,53 @@ function FormatPicker({
   );
 }
 
-/** A labelled group of related settings within a tab — the "section" in Notion/Obsidian. */
-function Group({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
+/**
+ * The active settings search query (lowercased, trimmed), shared down to every Group/Row so each can
+ * decide whether it matches and hide itself otherwise. Empty string means "no search — show all".
+ */
+const SearchContext = createContext("");
+
+/** True when `query` is empty (show everything) or `text` contains it. */
+function matchesQuery(query: string, text: string) {
+  return !query || text.toLowerCase().includes(query);
+}
+
+/** Walk a React child tree collecting the label/hint text of any <Row> elements within. */
+function collectRowText(node: ReactNode): string {
+  let text = "";
+  Children.forEach(node, (child) => {
+    if (!isValidElement(child)) return;
+    const props = child.props as { label?: string; hint?: string; children?: ReactNode };
+    if (child.type === Row) text += ` ${props.label ?? ""} ${props.hint ?? ""}`;
+    if (props.children) text += collectRowText(props.children);
+  });
+  return text;
+}
+
+/**
+ * A labelled group of related settings within a tab — the "section" in Notion/Obsidian.
+ * `keywords` adds extra searchable text for groups whose controls aren't plain Rows (theme manager,
+ * replacement tables, sliders) so they can still surface on a relevant query.
+ */
+function Group({
+  title,
+  desc,
+  keywords,
+  children,
+}: {
+  title: string;
+  desc?: string;
+  keywords?: string;
+  children: ReactNode;
+}) {
+  const query = useContext(SearchContext);
+  // The group is searchable by its own header text, any author-supplied keywords, and the text of
+  // every Row nested inside it — so searching a row's label keeps its group visible.
+  const haystack = useMemo(
+    () => `${title} ${desc ?? ""} ${keywords ?? ""}${collectRowText(children)}`,
+    [title, desc, keywords, children],
+  );
+  if (!matchesQuery(query, haystack)) return null;
   return (
     <section className="settings-group">
       <header className="settings-group-head">
@@ -146,6 +204,8 @@ function Group({ title, desc, children }: { title: string; desc?: string; childr
 
 /** A single row: a label/description on the left, a control on the right. */
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  const query = useContext(SearchContext);
+  if (!matchesQuery(query, `${label} ${hint ?? ""}`)) return null;
   return (
     <div className="settings-row">
       <div className="settings-row-text">
@@ -251,8 +311,28 @@ function ReplaceTable({
   );
 }
 
+/**
+ * The empty-state shown while searching. Groups self-filter, so rather than re-derive every match we
+ * just look: after this render, does the pane contain any visible group? If not, nothing matched.
+ */
+function NoResults({ query, pane }: { query: string; pane: React.RefObject<HTMLDivElement> }) {
+  const [empty, setEmpty] = useState(false);
+  useEffect(() => {
+    setEmpty(!pane.current?.querySelector(".settings-group"));
+  });
+  if (!empty) return null;
+  return (
+    <p className="settings-no-results">
+      No settings match “{query}”.
+    </p>
+  );
+}
+
 export default function SettingsPanel({ settings, onChange, onClose, templates = [] }: Props) {
   const [tab, setTab] = useState<TabId>("appearance");
+  const [search, setSearch] = useState("");
+  const query = search.trim().toLowerCase();
+  const searching = query.length > 0;
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     onChange({ ...settings, [k]: v });
   // A fixed sample so previews don't tick/jitter as the panel re-renders. Mid-afternoon shows
@@ -263,6 +343,7 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
     return d;
   });
   const panelRef = useRef<HTMLDivElement>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
   useFocusTrap(panelRef);
 
   useEffect(() => {
@@ -288,12 +369,36 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
       >
         <nav className="settings-nav" aria-label="Settings sections">
           <div className="settings-nav-title">Settings</div>
+          <div className="settings-search">
+            <MagnifyingGlass size={15} className="settings-search-icon" aria-hidden />
+            <input
+              type="search"
+              className="settings-search-input"
+              placeholder="Search settings…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search settings"
+            />
+            {search && (
+              <button
+                className="settings-search-clear"
+                onClick={() => setSearch("")}
+                title="Clear search"
+                aria-label="Clear search"
+              >
+                <X size={13} weight="bold" />
+              </button>
+            )}
+          </div>
           {TABS.map((t) => (
             <button
               key={t.id}
-              className={`settings-tab${tab === t.id ? " active" : ""}`}
-              onClick={() => setTab(t.id)}
-              aria-current={tab === t.id ? "page" : undefined}
+              className={`settings-tab${!searching && tab === t.id ? " active" : ""}`}
+              onClick={() => {
+                setSearch("");
+                setTab(t.id);
+              }}
+              aria-current={!searching && tab === t.id ? "page" : undefined}
             >
               <span className="settings-tab-icon">{t.icon}</span>
               {t.label}
@@ -303,14 +408,15 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
 
         <div className="settings-pane">
           <div className="settings-pane-head">
-            <h2>{TABS.find((t) => t.id === tab)?.label}</h2>
+            <h2>{searching ? `Results for “${search.trim()}”` : TABS.find((t) => t.id === tab)?.label}</h2>
             <button onClick={onClose} title="Close" aria-label="Close settings">
               <X size={16} weight="bold" />
             </button>
           </div>
 
-          <div className="settings-pane-body">
-            {tab === "appearance" && (
+          <SearchContext.Provider value={query}>
+          <div className="settings-pane-body" ref={paneRef}>
+            {(searching || tab === "appearance") && (
               <>
                 <Group
                   title="Appearance"
@@ -329,6 +435,7 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
 
                 <Group
                   title="Themes"
+                  keywords="palette font typeface text size page width color"
                   desc="A theme is a named palette (and optional fonts) with paired dark & light modes, saved in this vault’s .themes folder. Pick one to apply it everywhere; edit or duplicate to make it yours."
                 >
                   <ThemeManager
@@ -383,6 +490,7 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
 
                 <Group
                   title="Interface"
+                  keywords="zoom scale"
                   desc="Scale the whole app — sidebar, toolbars and text together. Also Ctrl +/- and Ctrl 0 to reset. Fonts, text size and page width now live in your theme above."
                 >
                   <div className="setting">
@@ -416,7 +524,7 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
               </>
             )}
 
-            {tab === "editor" && (
+            {(searching || tab === "editor") && (
               <>
               <Group title="Editing" desc="Behavior of the markdown editor.">
                 <Row label="Formatting toolbar" hint="Show the floating toolbar (headings, bold, lists…) above the page.">
@@ -439,23 +547,11 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                     <span className="switch-track" />
                   </label>
                 </Row>
-                <Row
-                  label="Strike completed to-dos"
-                  hint="Cross out and dim the text of checked to-do items."
-                >
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={settings.strike_done_tasks}
-                      onChange={(e) => set("strike_done_tasks", e.target.checked)}
-                    />
-                    <span className="switch-track" />
-                  </label>
-                </Row>
               </Group>
 
               <Group
                 title="Symbol replacements"
+                keywords="autoreplace arrow trigger symbol"
                 desc="Type the trigger and it becomes the symbol as you write (e.g. -> → →). Backspace right after a swap reverts it."
               >
                 <ReplaceTable
@@ -499,7 +595,7 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
               </>
             )}
 
-            {tab === "dates" && (
+            {(searching || tab === "dates") && (
               <>
                 <Group
                   title="Editor inserts"
@@ -524,8 +620,31 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                     />
                   </Row>
                 </Group>
-                <Group title="Tasks" desc="How due dates appear in the Tasks view.">
-                  <Row label="Due-date format">
+                <Group title="Periodic notes" desc="The heading written into a new daily note.">
+                  <Row label="Daily note label">
+                    <FormatPicker
+                      value={settings.periodic_label_format}
+                      presets={DATE_PRESETS}
+                      sample={sample}
+                      onChange={(v) => set("periodic_label_format", v)}
+                      ariaLabel="Daily note label format"
+                    />
+                  </Row>
+                </Group>
+                {!searching && (
+                  <p className="settings-hint-block">
+                    Patterns use tokens like <code>YYYY</code> <code>MM</code> <code>DD</code>{" "}
+                    <code>ddd</code> <code>HH</code> <code>mm</code> <code>A</code>. Wrap literal
+                    text in <code>[brackets]</code>, e.g. <code>[Logged] YYYY-MM-DD</code>.
+                  </p>
+                )}
+              </>
+            )}
+
+            {(searching || tab === "tasks") && (
+              <>
+                <Group title="Due dates" desc="How due dates appear in the Tasks view and editor.">
+                  <Row label="Due-date format" hint="Format used for due dates in the Tasks view.">
                     <FormatPicker
                       value={settings.task_date_format}
                       presets={DATE_PRESETS}
@@ -534,9 +653,22 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                       ariaLabel="Task due-date format"
                     />
                   </Row>
+                  <Row
+                    label="Highlight due dates"
+                    hint="Tint a task's 📅 / due:: date in the editor — red overdue, amber today, soft soon."
+                  >
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={settings.highlight_due_dates}
+                        onChange={(e) => set("highlight_due_dates", e.target.checked)}
+                      />
+                      <span className="switch-track" />
+                    </label>
+                  </Row>
                 </Group>
                 <Group
-                  title="Task completion"
+                  title="Completion"
                   desc="Stamp when a to-do is finished. Checking its box adds a done:: timestamp; unchecking removes it."
                 >
                   <Row
@@ -566,27 +698,78 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                       />
                     </Row>
                   )}
+                  {settings.stamp_done_date && (
+                    <Row
+                      label="Completion prefix"
+                      hint="Optional text before the timestamp, e.g. Done or 🎉 (the pill already shows a ✓). Blank for just the date."
+                    >
+                      <input
+                        className="setting-input"
+                        value={settings.done_date_prefix}
+                        placeholder="Done"
+                        maxLength={24}
+                        onChange={(e) => set("done_date_prefix", e.target.value)}
+                        aria-label="Completion prefix"
+                      />
+                    </Row>
+                  )}
                 </Group>
-                <Group title="Periodic notes" desc="The heading written into a new daily note.">
-                  <Row label="Daily note label">
-                    <FormatPicker
-                      value={settings.periodic_label_format}
-                      presets={DATE_PRESETS}
-                      sample={sample}
-                      onChange={(v) => set("periodic_label_format", v)}
-                      ariaLabel="Daily note label format"
+                <Group title="Appearance" desc="How to-dos and their fields look in the editor.">
+                  <Row
+                    label="Strike completed to-dos"
+                    hint="Cross out and dim the text of checked to-do items."
+                  >
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={settings.strike_done_tasks}
+                        onChange={(e) => set("strike_done_tasks", e.target.checked)}
+                      />
+                      <span className="switch-track" />
+                    </label>
+                  </Row>
+                  <Row
+                    label="Completed to-dos"
+                    hint="Keep finished to-dos visible, fade them back, or hide them in the editor."
+                  >
+                    <Select
+                      value={settings.completed_task_display}
+                      options={[
+                        { value: "show", label: "Show" },
+                        { value: "dim", label: "Dim" },
+                        { value: "hide", label: "Hide" },
+                      ]}
+                      onChange={(v) => set("completed_task_display", v as Settings["completed_task_display"])}
+                      ariaLabel="Completed to-do display"
+                    />
+                  </Row>
+                  <Row
+                    label="Priority display"
+                    hint="Show the priority:: field as a coloured flag and word, flag only, or word only."
+                  >
+                    <Select
+                      value={settings.priority_display}
+                      options={[
+                        { value: "both", label: "Flag + text" },
+                        { value: "flag", label: "Flag only" },
+                        { value: "text", label: "Text only" },
+                      ]}
+                      onChange={(v) => set("priority_display", v as Settings["priority_display"])}
+                      ariaLabel="Priority display"
                     />
                   </Row>
                 </Group>
-                <p className="settings-hint-block">
-                  Patterns use tokens like <code>YYYY</code> <code>MM</code> <code>DD</code>{" "}
-                  <code>ddd</code> <code>HH</code> <code>mm</code> <code>A</code>. Wrap literal text
-                  in <code>[brackets]</code>, e.g. <code>[Logged] YYYY-MM-DD</code>.
-                </p>
+                {!searching && (
+                  <p className="settings-hint-block">
+                    Formats use tokens like <code>YYYY</code> <code>MM</code> <code>DD</code>{" "}
+                    <code>ddd</code> <code>HH</code> <code>mm</code> <code>A</code>. Wrap literal
+                    text in <code>[brackets]</code>, e.g. <code>[Done] YYYY-MM-DD</code>.
+                  </p>
+                )}
               </>
             )}
 
-            {tab === "vault" && (
+            {(searching || tab === "vault") && (
               <>
                 <Group
                   title="Periodic notes"
@@ -637,7 +820,10 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                 </Group>
               </>
             )}
+
+            {searching && <NoResults query={query} pane={paneRef} />}
           </div>
+          </SearchContext.Provider>
 
           <p className="settings-footnote">
             Saved to <code>.pinpoint/settings.json</code> in your vault — travels with your notes.

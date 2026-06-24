@@ -35,6 +35,7 @@ import type { Theme } from "./types";
 import { slideFade, transition } from "./motion";
 import { useViewport } from "./hooks/useViewport";
 import Breadcrumb from "./components/Breadcrumb";
+import MobileNavbar, { type FolderOption } from "./components/MobileNavbar";
 import PathBreadcrumb from "./components/PathBreadcrumb";
 import FolderView from "./components/FolderView";
 import Tooltip from "./components/Tooltip";
@@ -107,6 +108,95 @@ function attachmentRelPath(mime: string, sourceName?: string): string {
   // Hyphenated, no spaces: a CommonMark image destination can't contain raw spaces, and the
   // editor stores images as plain `![](path)` markdown (the locked strict-round-trip constraint).
   return `${ATTACHMENTS_DIR}/Pasted-image-${stamp}${dedup}.${ext}`;
+}
+
+/** Matches a serialized task line (`- [ ] …` / `- [x] …`), at any indent — mirrors the editor's. */
+const TASK_LINE_RE = /^\s*-\s*\[[ xX]\]/;
+
+/**
+ * Ordinal (0-based) of the task at body line `line` among ALL task lines in `body`, in document
+ * order. The editor renders task items as `<li>` under `ul[data-type="taskList"]` in that same
+ * order, so this ordinal indexes straight into that DOM node list — the bridge that lets us scroll
+ * to a task picked in the calendar/Tasks panel (which only know the source line). Null if the line
+ * isn't a task line.
+ */
+function taskOrdinalForLine(body: string, line: number): number | null {
+  const lines = body.split("\n");
+  if (line < 0 || line >= lines.length || !TASK_LINE_RE.test(lines[line])) return null;
+  let ordinal = 0;
+  for (let i = 0; i < line; i++) if (TASK_LINE_RE.test(lines[i])) ordinal++;
+  return ordinal;
+}
+
+/**
+ * Locate the Nth task <li> in the editor mounted for `key`. `key` scopes the lookup to the
+ * destination editor: while navigating between pages the outgoing editor (with the previous
+ * reloadKey) lingers in the DOM under AnimatePresence's `mode="wait"` swap, so we only match
+ * `.editor-content[data-reload-key=key]` and the poll keeps retrying until that editor mounts.
+ */
+function findTaskRow(ordinal: number, key: string): HTMLElement | null {
+  const root = document.querySelector(`.editor-content[data-reload-key="${CSS.escape(key)}"]`);
+  // All task <li>s in document order — nested subtasks included, matching `taskOrdinalForLine`.
+  const items = root?.querySelectorAll('ul[data-type="taskList"] li');
+  return items && items.length > ordinal ? (items[ordinal] as HTMLElement) : null;
+}
+
+/**
+ * Smooth-scroll the open editor to the task at `ordinal` (its index among rendered task items) and
+ * flash an accent highlight on the row so the eye lands on it.
+ *
+ * Implementation note — why an overlay and not styling the <li>: Tiptap renders each task item as a
+ * React NodeView and CONTINUOUSLY reconciles the <li>, wiping any inline `style`/class we set within
+ * a frame (confirmed via logging — the paint applies then vanishes). So instead we drop an
+ * app-owned <div> on top of the row, positioned to its bounding rect and kept glued to it across the
+ * smooth-scroll via rAF. It lives outside the editor's managed DOM, so Tiptap can't touch it, and we
+ * drive its opacity fade from JS so the global `prefers-reduced-motion` duration reset can't kill it.
+ */
+function flashTaskRow(ordinal: number, key: string, attempt = 0): void {
+  const el = findTaskRow(ordinal, key);
+  if (!el) {
+    if (attempt < 40) setTimeout(() => flashTaskRow(ordinal, key, attempt + 1), 50);
+    return;
+  }
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  const overlay = document.createElement("div");
+  overlay.style.cssText = [
+    "position:fixed",
+    "z-index:50",
+    "pointer-events:none",
+    "border-radius:var(--r-sm)",
+    "background:color-mix(in srgb, var(--accent) 24%, transparent)",
+    "box-shadow:0 0 0 2px var(--accent), 0 0 16px 3px color-mix(in srgb, var(--accent) 55%, transparent)",
+    "opacity:1",
+  ].join(";");
+  document.body.appendChild(overlay);
+
+  // Keep the overlay glued to the row's rect while the smooth-scroll animates it into view.
+  const start = performance.now();
+  let raf = 0;
+  const track = (now: number) => {
+    const row = findTaskRow(ordinal, key) ?? el;
+    const r = row.getBoundingClientRect();
+    overlay.style.left = `${r.left - 6}px`;
+    overlay.style.top = `${r.top - 3}px`;
+    overlay.style.width = `${r.width + 12}px`;
+    overlay.style.height = `${r.height + 6}px`;
+    // Hold full strength for 1s, then fade opacity to 0 over the next 0.8s.
+    const elapsed = now - start;
+    overlay.style.opacity = elapsed < 1000 ? "1" : String(Math.max(0, 1 - (elapsed - 1000) / 800));
+    if (elapsed < 1800) {
+      raf = requestAnimationFrame(track);
+    } else {
+      overlay.remove();
+    }
+  };
+  raf = requestAnimationFrame(track);
+  // Safety: ensure cleanup even if rAF is throttled (e.g. tab backgrounded).
+  setTimeout(() => {
+    cancelAnimationFrame(raf);
+    overlay.remove();
+  }, 2500);
 }
 
 export default function App() {
@@ -201,22 +291,15 @@ export default function App() {
     return v >= RIGHT_MIN && v <= RIGHT_MAX ? v : 280;
   });
 
-  // Whether each sidebar is shown. Persisted in localStorage (app-global UI state). When a sidebar
-  // is hidden its grid column AND its resizer collapse to 0, so the editor reclaims the space; a
-  // toggle button in the tabs bar brings it back.
+  // Whether each sidebar is shown on DESKTOP. Persisted in localStorage (app-global UI state). When
+  // a sidebar is hidden its grid column AND its resizer collapse to 0, so the editor reclaims the
+  // space; a toggle button in the tabs bar brings it back. (Mobile drawers are driven separately —
+  // see `mobileDrawer` below — so the desktop "both open" state never leaks onto a phone.)
   const [leftOpen, setLeftOpen] = useState<boolean>(
     () => localStorage.getItem("pp.leftOpen") !== "0"
   );
   const [rightOpen, setRightOpen] = useState<boolean>(
     () => localStorage.getItem("pp.rightOpen") !== "0"
-  );
-  const toggleLeft = useCallback(
-    () => setLeftOpen((v) => (localStorage.setItem("pp.leftOpen", v ? "0" : "1"), !v)),
-    []
-  );
-  const toggleRight = useCallback(
-    () => setRightOpen((v) => (localStorage.setItem("pp.rightOpen", v ? "0" : "1"), !v)),
-    []
   );
 
   // ---- Responsive layout ----
@@ -228,14 +311,36 @@ export default function App() {
   useEffect(() => {
     document.body.dataset.vp = vp.breakpoint;
   }, [vp.breakpoint]);
+
+  // On mobile the two sidebars are mutually-exclusive overlay drawers driven by this session-local
+  // state (NOT the persisted desktop flags above), so a phone always opens with both closed. This is
+  // the fix for the old trap where two 86vw drawers buried the editor with no tappable scrim to
+  // escape. Only one drawer is ever open, so the scrim always has room to dismiss it.
+  const [mobileDrawer, setMobileDrawer] = useState<"left" | "right" | null>(null);
+  // Effective visibility: the mobile drawer on a phone, the persisted flag on desktop.
+  const showLeft = vp.isMobile ? mobileDrawer === "left" : leftOpen;
+  const showRight = vp.isMobile ? mobileDrawer === "right" : rightOpen;
+
+  const toggleLeft = useCallback(() => {
+    if (vp.isMobile) { setMobileDrawer((d) => (d === "left" ? null : "left")); return; }
+    setLeftOpen((v) => (localStorage.setItem("pp.leftOpen", v ? "0" : "1"), !v));
+  }, [vp.isMobile]);
+  const toggleRight = useCallback(() => {
+    if (vp.isMobile) { setMobileDrawer((d) => (d === "right" ? null : "right")); return; }
+    setRightOpen((v) => (localStorage.setItem("pp.rightOpen", v ? "0" : "1"), !v));
+  }, [vp.isMobile]);
+
   // Tapping the scrim (or selecting an item) dismisses whichever drawer is open on mobile.
-  const closeDrawers = useCallback(() => {
-    setLeftOpen((v) => (v ? (localStorage.setItem("pp.leftOpen", "0"), false) : v));
-    setRightOpen((v) => (v ? (localStorage.setItem("pp.rightOpen", "0"), false) : v));
-  }, []);
-  // Auto-close the left drawer after navigating to a file on mobile, so the editor is revealed.
+  const closeDrawers = useCallback(() => setMobileDrawer(null), []);
+  // Auto-close the drawer after navigating to a file on mobile, so the editor is revealed.
   const closeLeftOnMobile = useCallback(() => {
-    if (vp.isMobile) setLeftOpen((v) => (v ? (localStorage.setItem("pp.leftOpen", "0"), false) : v));
+    if (vp.isMobile) setMobileDrawer(null);
+  }, [vp.isMobile]);
+  // Open the left (file-tree) drawer to reveal something in it — the mobile overlay on a phone, the
+  // persisted panel on desktop. Used by reveal-in-tree and breadcrumb folder jumps.
+  const openLeftDrawer = useCallback(() => {
+    if (vp.isMobile) { setMobileDrawer("left"); return; }
+    setLeftOpen((v) => (v ? v : (localStorage.setItem("pp.leftOpen", "1"), true)));
   }, [vp.isMobile]);
 
   // Begin dragging a sidebar divider. `side` picks which edge; the handler tracks the pointer
@@ -330,6 +435,10 @@ export default function App() {
       root.classList.toggle("show-line-numbers", settings.show_line_numbers);
       // Strike through completed to-do items (and dim them) when enabled.
       root.classList.toggle("strike-done-tasks", settings.strike_done_tasks);
+      // Dim or hide completed to-dos in the editor body (data-attr so CSS can branch on the mode).
+      root.dataset.completedTasks = settings.completed_task_display;
+      // How inline `priority::` pills render: flag + word / flag only / word only.
+      root.dataset.priorityDisplay = settings.priority_display;
       // Collapses the custom titlebar to a top-edge hover strip ("semi-fullscreen").
       root.classList.toggle("titlebar-auto-hide", settings.auto_hide_titlebar);
     };
@@ -469,8 +578,10 @@ export default function App() {
     setHistTick((n) => n + 1);
   }, []);
 
+  // Open a page in the editor. When `taskLine` is given (a click on a task in the calendar agenda
+  // or Tasks panel), scroll to that task's row and flash it once the editor has rendered.
   const openPage = useCallback(
-    async (relPath: string) => {
+    async (relPath: string, taskLine?: number) => {
       const doc = await api.readPage(relPath);
       setActiveAsset(null);
       setActiveDb(null);
@@ -478,12 +589,19 @@ export default function App() {
       setActivePath(relPath);
       setBody(doc.body);
       setFrontmatter(doc.frontmatter as Record<string, unknown>);
-      setReloadKey(relPath + ":" + Date.now());
+      const key = relPath + ":" + Date.now();
+      setReloadKey(key);
       setTab("editor");
       setDirty(false);
       addTab(relPath, "page");
       pushHistory(relPath);
       closeLeftOnMobile();
+      if (taskLine != null) {
+        const ordinal = taskOrdinalForLine(doc.body, taskLine);
+        // Scope the flash to the editor that mounts for THIS key, so the poll waits out the
+        // AnimatePresence crossfade instead of flashing a row on the outgoing page.
+        if (ordinal != null) flashTaskRow(ordinal, key);
+      }
     },
     [addTab, pushHistory, closeLeftOnMobile]
   );
@@ -1134,6 +1252,89 @@ export default function App() {
   // Set of all existing markdown page rel_paths, so the calendar can show which days already
   // have a daily note (and which don't).
   const pagePaths = useMemo(() => new Set(pages.map((p) => p.rel_path)), [pages]);
+
+  // Flat, depth-tagged list of every (non-database) folder, in tree order, for the mobile
+  // quick-capture "New note" destination picker. Databases are excluded — a note isn't a row.
+  const folders = useMemo<FolderOption[]>(() => {
+    const out: FolderOption[] = [];
+    const visit = (n: TreeNode, depth: number) => {
+      if (n.is_dir && !n.is_database) {
+        out.push({ path: n.rel_path, depth });
+        n.children.forEach((c) => visit(c, depth + 1));
+      }
+    };
+    if (tree) tree.children.forEach((c) => visit(c, 0));
+    return out;
+  }, [tree]);
+
+  // ---- Mobile quick capture ----
+
+  // Append a task line to today's daily note (creating it from the daily template if missing).
+  // The note is created silently in the background — the user stays on their current page and gets
+  // a toast with an Open action. Keeping capture frictionless: a task you jot mid-flow shouldn't
+  // yank you out of the note you're in.
+  const quickAddTask = useCallback(
+    async (text: string) => {
+      const today = new Date();
+      const rel = pathFor(settings.periodic_folder, "daily", today);
+      const label = labelFor("daily", today, settings.periodic_label_format);
+      try {
+        // Ensure today's note exists, building it from the bound daily template (else the starter).
+        let exists = true;
+        try {
+          await api.readPage(rel);
+        } catch {
+          exists = false;
+        }
+        if (!exists) {
+          let starter = template("daily", today, settings.periodic_label_format);
+          const bound = settings.periodic_templates.daily;
+          if (bound) {
+            const leaf = (rel.split("/").pop() ?? rel).replace(/\.md$/i, "");
+            const filled = await applyTemplate(bound, {
+              title: leaf, date: today, period: "daily", periodDate: today, relPath: rel,
+            });
+            if (filled) starter = stripCursor(filled.body); // null = cancelled prompt → keep starter
+          }
+          await api.createPage(rel, starter);
+          await refreshTree();
+        }
+        // Append the task, keeping a single trailing newline.
+        const doc = await api.readPage(rel);
+        const trimmed = doc.body.replace(/\s*$/, "");
+        const next = `${trimmed}\n- [ ] ${text}\n`;
+        await api.writePage(rel, doc.frontmatter as Record<string, unknown>, next);
+        setTaskRefresh((k) => k + 1);
+        // If today's note happens to be the open doc, reload it so the new task shows immediately.
+        if (activePath === rel) {
+          setBody(next);
+          setReloadKey(rel + ":" + Date.now());
+        }
+        toast.show({
+          message: `Added to ${label}`,
+          action: { label: "Open", run: () => void openPage(rel) },
+        });
+      } catch (e) {
+        console.error(e);
+        toast.show({ message: "Couldn’t add the task." });
+      }
+    },
+    [settings.periodic_folder, settings.periodic_label_format, settings.periodic_templates,
+     applyTemplate, refreshTree, openPage, activePath]
+  );
+
+  // Create a new note under `parentRel` ("" = vault root) and open it. Delegates to newPage, which
+  // creates the file, refreshes the tree, and opens it in the editor.
+  const quickNewNote = useCallback(
+    async (title: string, parentRel: string) => {
+      const leaf = title.trim().replace(/\.md$/i, "");
+      if (!leaf) return;
+      const rel = (parentRel ? `${parentRel}/${leaf}` : leaf) + ".md";
+      await newPage(rel);
+      await openPage(rel);
+    },
+    [newPage, openPage]
+  );
 
   // Every tag in the vault, fed to the editor's `#` autocomplete. Refreshed on the same signal as
   // tasks (saves, reindex, file-watcher), so newly-typed tags become suggestable across pages.
@@ -2017,7 +2218,7 @@ export default function App() {
     >
       {/* Dim, tap-to-dismiss backdrop behind an open drawer on mobile. */}
       <AnimatePresence>
-        {vp.isMobile && (leftOpen || rightOpen) && (
+        {vp.isMobile && mobileDrawer && (
           <motion.div
             key="drawer-scrim"
             className="drawer-scrim"
@@ -2031,7 +2232,7 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence initial={false}>
-      {leftOpen && (
+      {showLeft && (
       <motion.aside
         className="sidebar"
         {...slideFade({ axis: "x", distance: vp.isMobile ? -340 : -24, speed: "slow" })}
@@ -2087,6 +2288,35 @@ export default function App() {
           <span className="sidebar-search-label">Search…</span>
           <kbd className="sidebar-search-kbd">{IS_MAC ? "⌘K" : "Ctrl K"}</kbd>
         </button>
+        {/* Mobile only: the drawer doubles as the navigation hub, so the views that live in the
+            desktop top bar (Tasks / Query / Tags) are reachable here. Picking one switches the main
+            view and dismisses the drawer to reveal it. Settings (header gear) and Trash (footer)
+            round out the hub. */}
+        {vp.isMobile && (
+          <nav className="sidebar-views" aria-label="Views">
+            <button
+              className={`sidebar-view${tab === "tasks" ? " active" : ""}`}
+              onClick={() => { setTab("tasks"); setMobileDrawer(null); }}
+            >
+              <CheckCircle size={16} weight={tab === "tasks" ? "fill" : "regular"} />
+              <span>Tasks</span>
+            </button>
+            <button
+              className={`sidebar-view${tab === "query" ? " active" : ""}`}
+              onClick={() => { setTab("query"); setMobileDrawer(null); }}
+            >
+              <MagnifyingGlass size={16} weight={tab === "query" ? "fill" : "regular"} />
+              <span>Query</span>
+            </button>
+            <button
+              className={`sidebar-view${tab === "tags" ? " active" : ""}`}
+              onClick={() => { setTab("tags"); setMobileDrawer(null); }}
+            >
+              <Tag size={16} weight={tab === "tags" ? "fill" : "regular"} />
+              <span>Tags</span>
+            </button>
+          </nav>
+        )}
         <div className="tree">
           <FileTree
             node={tree}
@@ -2139,11 +2369,7 @@ export default function App() {
         {vp.isMobile && (
           <Breadcrumb
             path={activePath ?? ""}
-            onToggleLeft={toggleLeft}
-            onToggleRight={toggleRight}
             onNavigateFolder={openFolderCrumb}
-            leftOpen={leftOpen}
-            rightOpen={rightOpen}
           />
         )}
         <div className="tabs">
@@ -2315,7 +2541,7 @@ export default function App() {
                 }
                 onRevealInTree={openFolderCrumb}
                 onNavigateRoot={() => {
-                  if (!leftOpen) toggleLeft();
+                  openLeftDrawer();
                 }}
               />
             ) : activeDb ? (
@@ -2367,6 +2593,8 @@ export default function App() {
                 taskDateFormat={settings.task_date_format}
                 stampDoneDate={settings.stamp_done_date}
                 doneDateFormat={settings.done_date_format}
+                doneDatePrefix={settings.done_date_prefix}
+                highlightDueDates={settings.highlight_due_dates}
                 insertText={tokenInsert}
                 smartReplacements={settings.smart_replacements}
                 snippets={settings.snippets}
@@ -2379,7 +2607,7 @@ export default function App() {
                         path={activePath}
                         icons={settings.node_icons}
                         onNavigateRoot={() => {
-                          if (!leftOpen) toggleLeft();
+                          openLeftDrawer();
                         }}
                         onNavigateFolder={openFolderCrumb}
                       />
@@ -2464,7 +2692,7 @@ export default function App() {
       )}
 
       <AnimatePresence initial={false}>
-      {rightOpen && (
+      {showRight && (
       <motion.div
         key="right-sidebar"
         className="right-sidebar-wrap"
@@ -2587,6 +2815,18 @@ export default function App() {
       <AnimatePresence>
         {shortcutsOpen && <ShortcutsPopup onClose={() => setShortcutsOpen(false)} />}
       </AnimatePresence>
+
+      {vp.isMobile && (
+        <MobileNavbar
+          onToggleLeft={toggleLeft}
+          onToggleRight={toggleRight}
+          leftOpen={showLeft}
+          rightOpen={showRight}
+          onAddTask={quickAddTask}
+          onNewNote={quickNewNote}
+          folders={folders}
+        />
+      )}
 
       <DialogHost />
       <ToastHost />

@@ -42,8 +42,9 @@ interface Props {
   tasks: TaskItem[];
   /** Pattern for rendering due dates (see dateformat.ts). */
   dateFormat: string;
-  /** Open the task's source page (click on the text). Omit to render non-interactive. */
-  onOpen?: (relPath: string) => void;
+  /** Open the task's source page (click on the text), scrolling to and flashing its row via the
+   *  task's body `line`. Omit to render non-interactive. */
+  onOpen?: (relPath: string, line?: number) => void;
   /** Open a page by its `[[wikilink]]` name (click on a wikilink in the task text). */
   onOpenName?: (name: string) => void;
   /**
@@ -154,7 +155,7 @@ export default function TaskList({ tasks, dateFormat, onOpen, onOpenName, onTogg
             <TaskText
               text={t.text}
               title={onOpen ? t.rel_path : undefined}
-              onOpenSource={onOpen ? () => onOpen(t.rel_path) : undefined}
+              onOpenSource={onOpen ? () => onOpen(t.rel_path, t.line) : undefined}
               onOpenName={onOpenName}
             />
             {t.priority && PRIORITY_META[t.priority] && (
