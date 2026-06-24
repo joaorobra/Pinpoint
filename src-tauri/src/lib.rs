@@ -578,9 +578,18 @@ fn seed_themes(starters: Vec<(String, String)>, state: State<AppState>) -> Resul
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init());
+
+    // The updater plugin only exists on desktop targets.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             open_vault,

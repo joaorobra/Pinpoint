@@ -1064,3 +1064,5 @@
 [2m00:05:58[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
 [2m00:07:18[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
 [2m00:13:52[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m12:31:17[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx[22m
+[2m12:31:49[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2msrc/main.tsx[22m

@@ -56,6 +56,22 @@ npm run tauri:build    # produce installers + standalone .exe
 - Standalone executable: `src-tauri/target/release/pinpoint.exe`
 - Installers: `src-tauri/target/release/bundle/nsis/*.exe` and `bundle/msi/*.msi`
 
+## Releasing a new version
+
+One command bumps the version everywhere (`package.json`, `tauri.conf.json`, `Cargo.toml`), commits, tags, and pushes:
+
+```bash
+npm run release           # patch: 0.1.0 → 0.1.1
+npm run release minor     # 0.1.0 → 0.2.0
+npm run release 1.4.2     # exact version
+```
+
+Pushing the `v*` tag triggers [the release workflow](.github/workflows/release.yml), which builds the signed installer and publishes a GitHub Release (as a **draft** — review, then Publish).
+
+## Auto-update
+
+The desktop app checks for a newer release on launch and prompts to download + install it (Tauri updater, signed). Updates are served from this repo's [latest release](https://github.com/joaorobra/Pinpoint/releases/latest) via the `latest.json` manifest the workflow publishes. CI signs each update with a private key stored in the `TAURI_SIGNING_PRIVATE_KEY` Actions secret; the matching public key lives in `tauri.conf.json`.
+
 ## Roadmap
 
 - [ ] Inline query embeds inside pages (` ```pinpoint ` code fences)

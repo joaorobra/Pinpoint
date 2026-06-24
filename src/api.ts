@@ -16,7 +16,7 @@ import {
 // We pick the backend at runtime so neither path's APIs are invoked in the wrong host.
 
 /** True when running inside the Tauri webview (its globals are injected on the window). */
-function isTauri(): boolean {
+export function isTauri(): boolean {
   return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 }
 

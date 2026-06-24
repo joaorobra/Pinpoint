@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis", "msi"],
     "icon": [
       "icons/icon.ico",
@@ -41,5 +42,12 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/joaorobra/Pinpoint/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE2NTAwRkMwNUQ4MzREMDkKUldRSlRZTmR3QTlRcHVibkxxQTY3akd6YXFPUUFHTlRFRFdFWW0xWW84clJBeC93Y0JMcDI4cisK"
+    }
+  }
 }

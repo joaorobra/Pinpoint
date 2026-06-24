@@ -51,10 +51,16 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update package so the in-app updater trusts it.
+          # Add these in repo Settings → Secrets and variables → Actions.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "PINPOINT ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install PINPOINT."
+          releaseBody: "See the assets below to download and install PINPOINT. Existing desktop installs will offer this update automatically."
           releaseDraft: true
           prerelease: false
+          # Publishes latest.json (the updater manifest) alongside the installers.
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
