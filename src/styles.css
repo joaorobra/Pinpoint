@@ -4629,6 +4629,70 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   }
   .ctx-item { min-height: var(--touch-target); }
 
+  /* ---- JS-anchored popups: ignore their inline anchor, dock as bottom sheets ----
+     These are positioned at a caret/anchor rect via inline top/left from JS and have fixed widths
+     that crop on a phone. Override to a full-width bottom sheet (same convention as .ctx-menu). The
+     !important is required to beat the inline styles React writes for the anchor position. */
+  .date-picker,
+  .task-hint-menu {
+    position: fixed !important;
+    top: auto !important; bottom: 0 !important;
+    left: 0 !important; right: 0 !important;
+    width: 100% !important; min-width: 0; max-width: none;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding-bottom: calc(var(--sp-2) + var(--safe-b));
+  }
+  /* The /due calendar wants comfortable tap targets and breathing room when full-width. */
+  .date-picker { padding: var(--sp-3) var(--sp-4) calc(var(--sp-3) + var(--safe-b)); }
+  .dp-day { height: 40px; font-size: 0.92em; }
+  .dp-quick-btn { padding: 9px 6px; }
+  .dp-nav { width: 32px; height: 32px; }
+  .task-hint-menu .slash-item { min-height: var(--touch-target); }
+
+  /* Slash command menu: it's anchored to the caret with a fixed min-width that can push off-screen.
+     Cap it to the viewport and let it scroll; keep it inline-positioned (it tracks the caret) but
+     never let it exceed the screen width. */
+  .slash-menu {
+    min-width: 0;
+    max-width: calc(100vw - 2 * var(--sp-3));
+  }
+  .slash-item { min-height: var(--touch-target); }
+
+  /* ---- Anchor-relative dropdowns: keep them within the viewport ----
+     These open relative to their trigger (Select, ColorPicker). On a narrow screen a trigger near an
+     edge can push the menu off-screen, so cap the width and let CSS overflow-wrap keep them inside.
+     position:fixed isn't used (they must track the trigger), but the width cap prevents cropping. */
+  .select-menu {
+    max-width: calc(100vw - 2 * var(--sp-3));
+  }
+  .select-option { min-height: 40px; white-space: normal; }
+  .select-option-label { white-space: normal; }
+  .cp-popover {
+    max-width: calc(100vw - 2 * var(--sp-3));
+  }
+
+  /* Query-helper (/query) popup: dock to the bottom as a sheet — its 420px width and right-pin don't
+     fit a phone, and it's tall enough to deserve sheet treatment. */
+  .query-helper {
+    position: fixed !important;
+    top: auto !important; bottom: 0 !important;
+    left: 0 !important; right: 0 !important;
+    width: 100% !important; max-width: none;
+    max-height: 80vh;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding-bottom: calc(var(--sp-4) + var(--safe-b));
+  }
+
+  /* Database toolbar popovers (Filter / Sort / Properties / Layout): 380px min-width overflows a
+     phone, and they anchor left:0 under the toolbar. Dock them as full-width bottom sheets. */
+  .db-popover {
+    position: fixed; top: auto; bottom: 0; left: 0; right: 0; margin-top: 0;
+    min-width: 0; width: 100%; max-height: 80vh; overflow-y: auto;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding-bottom: calc(var(--sp-3) + var(--safe-b));
+  }
+  .db-props-pop, .db-layout-pop { min-width: 0; }
+
   /* ---- Other database views ---- */
   /* Gallery cards shrink so two fit a phone width without overflowing. */
   .db-gallery { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
