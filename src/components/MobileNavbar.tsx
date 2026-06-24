@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useDragControls } from "framer-motion";
 import {
-  SidebarSimple,
   Plus,
   CheckSquare,
   FileText,
@@ -10,8 +9,11 @@ import {
   X,
   Folder,
   House,
+  MagnifyingGlass,
+  SidebarSimple,
 } from "@phosphor-icons/react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { haptic } from "../lib/haptics";
 
 /** Vault-relative folder paths offered as a new note's destination. "" = vault root. */
 export interface FolderOption {
@@ -28,6 +30,8 @@ interface MobileNavbarProps {
   onToggleRight: () => void;
   leftOpen: boolean;
   rightOpen: boolean;
+  /** Open the search & command palette (the persistent search box taps into this). */
+  onSearch: () => void;
   /** Append a `- [ ] …` line to today's daily note (created if missing). */
   onAddTask: (text: string) => Promise<void> | void;
   /** Create a new note titled `title` inside `parentRel` ("" = vault root) and open it. */
@@ -39,9 +43,10 @@ interface MobileNavbarProps {
 type Mode = "menu" | "task" | "note";
 
 /**
- * Mobile-only bottom navigation bar with one dominant primary action: Quick Capture (＋). It is
- * flanked by the two drawer toggles (Files / Outline) so the bar is also the persistent reach for
- * navigation on a phone, mirroring the top Breadcrumb's toggles within thumb range.
+ * Mobile-only floating bottom bar. Its persistent left element is a Search box (tap to open the
+ * command palette); the right is the dominant Quick Capture action (＋). The two side panels (Files /
+ * Outline) are reached by swiping the editor left/right — the bar shows a chevron hint on each edge
+ * that lights up while its drawer is open, and the chevrons remain tappable as a fallback.
  *
  * Tapping ＋ raises a bottom sheet offering the two fastest capture intents:
  *   • Task for today — one field, Enter to file it under today's daily note (zero folder decisions).
@@ -53,6 +58,7 @@ export default function MobileNavbar({
   onToggleRight,
   leftOpen,
   rightOpen,
+  onSearch,
   onAddTask,
   onNewNote,
   folders,
@@ -65,6 +71,9 @@ export default function MobileNavbar({
   const [busy, setBusy] = useState(false);
 
   const sheetRef = useRef<HTMLDivElement>(null);
+  // Drag-to-dismiss is initiated only from the grip, so the form's inputs and the scrollable folder
+  // list stay fully interactive (a body-wide drag would swallow taps and vertical scrolls).
+  const dragControls = useDragControls();
   const taskInputRef = useRef<HTMLInputElement>(null);
   const noteInputRef = useRef<HTMLInputElement>(null);
   useFocusTrap(sheetRef, mode !== null);
@@ -73,6 +82,7 @@ export default function MobileNavbar({
 
   // Reset the form each time the sheet opens fresh from the bar (not on internal step changes).
   const openSheet = () => {
+    haptic("impact");
     setTaskText("");
     setNoteTitle("");
     setNoteParent("");
@@ -80,6 +90,20 @@ export default function MobileNavbar({
     setMode("menu");
   };
   const close = () => setMode(null);
+
+  // Drawer toggles (the chevron hints) get a light tick so the bar feels physical under the thumb.
+  const handleToggleLeft = () => {
+    haptic("tap");
+    onToggleLeft();
+  };
+  const handleToggleRight = () => {
+    haptic("tap");
+    onToggleRight();
+  };
+  const handleSearch = () => {
+    haptic("tap");
+    onSearch();
+  };
 
   // Escape closes the sheet (matches the app's dialog/palette dismissal).
   useEffect(() => {
@@ -111,6 +135,7 @@ export default function MobileNavbar({
     setBusy(true);
     try {
       await onAddTask(text);
+      haptic("success");
       close();
     } finally {
       setBusy(false);
@@ -123,6 +148,7 @@ export default function MobileNavbar({
     setBusy(true);
     try {
       await onNewNote(title, noteParent);
+      haptic("success");
       close();
     } finally {
       setBusy(false);
@@ -132,33 +158,48 @@ export default function MobileNavbar({
   return (
     <>
       <nav className="mobile-navbar" aria-label="Quick actions">
+        {/* Left edge: swipe-hint chevron for the Files drawer. Lights up while that drawer is open;
+            still tappable as a fallback for the swipe gesture. */}
         <button
-          className={`mnav-btn${leftOpen ? " active" : ""}`}
-          onClick={onToggleLeft}
-          aria-label="Files"
+          className={`mnav-edge mnav-edge-l${leftOpen ? " active" : ""}`}
+          onClick={handleToggleLeft}
+          aria-label="Files panel"
           aria-expanded={leftOpen}
         >
-          <SidebarSimple size={22} weight={leftOpen ? "fill" : "regular"} />
-          <span className="mnav-label">Files</span>
+          <SidebarSimple size={20} weight={leftOpen ? "fill" : "regular"} />
         </button>
 
+        {/* The persistent search box — the bar's primary, always-visible element. Tapping it opens
+            the search & command palette. A button (not a real input) so the native palette owns focus
+            and the on-screen keyboard, but it reads and behaves as a search field. */}
+        <button
+          className="mnav-search"
+          onClick={handleSearch}
+          aria-label="Search"
+          aria-keyshortcuts="Control+K"
+        >
+          <MagnifyingGlass size={18} weight="bold" className="mnav-search-ico" />
+          <span className="mnav-search-text">Search…</span>
+        </button>
+
+        {/* Right edge: swipe-hint chevron for the Outline drawer. */}
+        <button
+          className={`mnav-edge mnav-edge-r${rightOpen ? " active" : ""}`}
+          onClick={handleToggleRight}
+          aria-label="Outline panel"
+          aria-expanded={rightOpen}
+        >
+          <SidebarSimple size={20} weight={rightOpen ? "fill" : "regular"} style={{ transform: "scaleX(-1)" }} />
+        </button>
+
+        {/* The dominant Quick Capture action, raised and ringed so it floats above the bar. */}
         <button
           className="mnav-fab"
           onClick={openSheet}
           aria-label="Quick capture"
           aria-haspopup="dialog"
         >
-          <Plus size={24} weight="bold" />
-        </button>
-
-        <button
-          className={`mnav-btn${rightOpen ? " active" : ""}`}
-          onClick={onToggleRight}
-          aria-label="Outline and calendar"
-          aria-expanded={rightOpen}
-        >
-          <SidebarSimple size={22} weight={rightOpen ? "fill" : "regular"} style={{ transform: "scaleX(-1)" }} />
-          <span className="mnav-label">Outline</span>
+          <Plus size={26} weight="bold" />
         </button>
       </nav>
 
@@ -185,8 +226,27 @@ export default function MobileNavbar({
               animate={{ y: 0 }}
               exit={{ y: "100%" }}
               transition={{ type: "spring", stiffness: 520, damping: 44 }}
+              // Drag down to dismiss — the native bottom-sheet gesture, started only from the grip
+              // (see onPointerDown below) so inputs and the folder list keep their own touch handling.
+              // Resists upward pull (constraint top: 0) and snaps back unless flung past a threshold.
+              drag="y"
+              dragControls={dragControls}
+              dragListener={false}
+              dragConstraints={{ top: 0, bottom: 0 }}
+              dragElastic={{ top: 0, bottom: 0.6 }}
+              onDragEnd={(_, info) => {
+                if (info.offset.y > 120 || info.velocity.y > 600) {
+                  haptic("tap");
+                  close();
+                }
+              }}
             >
-              <div className="sheet-grip" aria-hidden />
+              <div
+                className="sheet-grip-zone"
+                onPointerDown={(e) => dragControls.start(e)}
+              >
+                <div className="sheet-grip" aria-hidden />
+              </div>
 
               {mode === "menu" && (
                 <div className="capture-menu">
@@ -196,7 +256,7 @@ export default function MobileNavbar({
                       <X size={18} weight="bold" />
                     </button>
                   </header>
-                  <button className="capture-option" onClick={() => setMode("task")}>
+                  <button className="capture-option" onClick={() => { haptic("select"); setMode("task"); }}>
                     <span className="capture-icon task">
                       <CheckSquare size={22} weight="fill" />
                     </span>
@@ -206,7 +266,7 @@ export default function MobileNavbar({
                     </span>
                     <CaretRight size={16} className="capture-go" />
                   </button>
-                  <button className="capture-option" onClick={() => setMode("note")}>
+                  <button className="capture-option" onClick={() => { haptic("select"); setMode("note"); }}>
                     <span className="capture-icon note">
                       <FileText size={22} weight="fill" />
                     </span>
@@ -285,7 +345,7 @@ export default function MobileNavbar({
                       className={`capture-folder${noteParent === "" ? " selected" : ""}`}
                       role="radio"
                       aria-checked={noteParent === ""}
-                      onClick={() => setNoteParent("")}
+                      onClick={() => { haptic("select"); setNoteParent(""); }}
                     >
                       <House size={16} weight={noteParent === "" ? "fill" : "regular"} />
                       <span>Vault root</span>
@@ -297,7 +357,7 @@ export default function MobileNavbar({
                         role="radio"
                         aria-checked={noteParent === f.path}
                         style={{ paddingLeft: `calc(var(--sp-3) + ${f.depth * 14}px)` }}
-                        onClick={() => setNoteParent(f.path)}
+                        onClick={() => { haptic("select"); setNoteParent(f.path); }}
                       >
                         <Folder size={16} weight={noteParent === f.path ? "fill" : "regular"} />
                         <span>{f.path.split("/").pop()}</span>

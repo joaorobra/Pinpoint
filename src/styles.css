@@ -1139,7 +1139,7 @@ code, .dsl-preview, .dsl-input {
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .tb-btn:hover { background: var(--bg-hover); color: var(--text); }
-.tb-btn.active { background: var(--accent-soft); color: var(--accent); }
+.tb-btn.active { background: var(--accent-soft); color: var(--accent); border-radius: var(--r-md); }
 .tb-sep { width: 1px; align-self: stretch; background: var(--border); margin: var(--sp-1) var(--sp-1); }
 
 .editor-content {
@@ -4636,8 +4636,9 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   .db-board { scroll-snap-type: x proximity; }
   .db-lane { scroll-snap-align: start; }
 
-  /* Reserve room at the bottom of the editor so the last lines clear the fixed quick-capture bar. */
-  .editor-content { padding-bottom: calc(30vh + var(--navbar-h) + var(--safe-b)); }
+  /* Reserve room at the bottom of the editor so the last lines clear the floating quick-capture
+     bar (its height + the gap it floats above the bottom edge). */
+  .editor-content { padding-bottom: calc(30vh + var(--navbar-h) + var(--sp-3) + var(--safe-b)); }
 }
 
 /* ============================================================
@@ -4652,41 +4653,104 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
    toast host both offset by this so nothing hides behind the bar. */
 :root { --navbar-h: 56px; }
 
+/* A floating "island" bar: detached from the screen edges with a margin all around, fully rounded,
+   frosted, and shadowed so it reads as a premium control hovering over the content. */
 .mobile-navbar {
   position: fixed; z-index: 60;
-  left: 0; right: 0; bottom: 0;
-  height: calc(var(--navbar-h) + var(--safe-b));
-  padding: 0 max(var(--sp-4), var(--safe-r)) var(--safe-b) max(var(--sp-4), var(--safe-l));
-  display: flex; align-items: center; justify-content: space-between;
-  background: color-mix(in srgb, var(--bg-2) 92%, transparent);
-  backdrop-filter: blur(12px);
-  border-top: 1px solid var(--border);
+  left: max(var(--sp-4), var(--safe-l)); right: max(var(--sp-4), var(--safe-r));
+  bottom: calc(var(--sp-3) + var(--safe-b));
+  height: var(--navbar-h);
+  padding: 0 var(--sp-2) 0 var(--sp-1);
+  display: flex; align-items: center; gap: var(--sp-1);
+  border-radius: var(--r-xl);
+  /* Frosted glass over a subtle vertical sheen so the bar has depth, not a flat fill. */
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bg-3) 70%, transparent),
+      color-mix(in srgb, var(--bg-2) 80%, transparent));
+  backdrop-filter: blur(22px) saturate(1.5);
+  -webkit-backdrop-filter: blur(22px) saturate(1.5);
+  /* Hairline outline + an inner top highlight (the glassy edge) + a grounded drop shadow. */
+  border: 1px solid color-mix(in srgb, var(--border-strong) 60%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 8%, transparent),
+    0 8px 28px hsl(var(--shadow-color) / calc(0.30 * var(--shadow-strength))),
+    0 2px 8px hsl(var(--shadow-color) / calc(0.20 * var(--shadow-strength)));
 }
 
-/* Side toggles: icon + tiny label, dimmed until their drawer is open. */
-.mnav-btn {
-  flex: 1 1 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-  min-height: var(--navbar-h);
-  background: transparent; border: none; color: var(--text-dim);
-  font-size: 0.66rem; font-weight: 500; letter-spacing: 0.01em;
-  transition: color var(--dur) var(--ease);
+/* Edge sidebar toggles: the side-panel affordances flanking the search box. Dimmed by default; when
+   their drawer is open the icon fills and turns accent — no background, just the icon state change.
+   Still tappable as a fallback for the swipe gesture. */
+.mnav-edge {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 40px;
+  border: none; background: transparent; color: var(--text-dim);
+  border-radius: var(--r-md);
+  -webkit-tap-highlight-color: transparent;
+  transition: color var(--dur) var(--ease), transform 120ms var(--ease);
 }
-.mnav-btn:active { color: var(--text); }
-.mnav-btn.active { color: var(--accent); }
-.mnav-label { line-height: 1; }
+.mnav-edge:active { transform: scale(0.86); color: var(--text); }
+.mnav-edge.active { color: var(--accent); }
+/* Never paint a background — not on focus, hover, or while the drawer is open. Only the icon's color
+   and fill weight signal state. (Some webviews leave a focus background on a tapped <button>.) */
+.mnav-edge,
+.mnav-edge:focus,
+.mnav-edge:focus-visible,
+.mnav-edge:hover,
+.mnav-edge.active { background: transparent; }
+.mnav-edge:focus { outline: none; }
 
-/* The primary action: a raised accent pill, optically centered and lifted above the bar. */
+/* The persistent search box — the bar's primary, always-visible element. Reads as an input (rounded
+   well, magnifier, placeholder text) though it's a button that opens the command palette. */
+.mnav-search {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; gap: var(--sp-2);
+  height: 40px; padding: 0 var(--sp-3);
+  border-radius: var(--r-lg); border: none;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--text-dim); text-align: left;
+  font-size: 0.9rem; font-weight: 500;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+              transform 120ms var(--ease);
+}
+.mnav-search-ico { flex: none; color: var(--text-faint); }
+.mnav-search-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mnav-search:active {
+  transform: scale(0.99);
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+/* The primary action: a circular, raised accent button that overhangs the bar's top edge, ringed by
+   the page background so it reads as floating proud of the island. */
 .mnav-fab {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
-  width: 52px; height: 52px; margin-bottom: 8px;
-  border-radius: var(--r-lg);
-  background: var(--accent); color: var(--accent-contrast);
-  border: none; box-shadow: var(--shadow-md);
-  transition: transform var(--dur) var(--ease), background var(--dur) var(--ease);
+  width: 50px; height: 50px; margin-top: -16px;
+  border-radius: 50%;
+  background: radial-gradient(120% 120% at 50% 0%,
+    color-mix(in srgb, var(--accent) 80%, white 20%),
+    var(--accent) 70%);
+  color: var(--accent-contrast);
+  /* The page-colored ring that visually lifts the FAB off the bar, plus an accent glow. */
+  border: 3px solid var(--bg);
+  box-shadow:
+    0 4px 12px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 2px 6px hsl(var(--shadow-color) / calc(0.30 * var(--shadow-strength)));
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 220ms var(--ease), box-shadow var(--dur) var(--ease),
+              filter var(--dur) var(--ease);
 }
-.mnav-fab:active { transform: scale(0.94); background: var(--accent-hover); }
+.mnav-fab:active {
+  transform: scale(0.9) rotate(90deg);
+  filter: brightness(0.97);
+  box-shadow:
+    0 2px 8px color-mix(in srgb, var(--accent) 36%, transparent),
+    0 1px 3px hsl(var(--shadow-color) / calc(0.24 * var(--shadow-strength)));
+}
 
 /* ---- Bottom sheet ---- */
 .sheet-backdrop {
@@ -4703,10 +4767,24 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   border-radius: var(--r-xl) var(--r-xl) 0 0;
   box-shadow: var(--shadow-lg);
 }
-.sheet-grip {
-  flex: none; width: 36px; height: 4px; margin: var(--sp-1) auto var(--sp-2);
-  border-radius: 999px; background: var(--border-strong);
+/* The grip zone is a generous, full-width drag handle at the top of the sheet — a comfortable target
+   that won't conflict with the form below. It owns the vertical drag-to-dismiss gesture. */
+.sheet-grip-zone {
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--sp-2) 0 var(--sp-1);
+  cursor: grab;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
+.sheet-grip-zone:active { cursor: grabbing; }
+/* The pull tab itself; it brightens and widens while being dragged for a responsive, physical feel. */
+.sheet-grip {
+  width: 40px; height: 5px; margin: var(--sp-1) 0 var(--sp-2);
+  border-radius: 999px; background: var(--border-strong);
+  transition: background var(--dur) var(--ease), width var(--dur) var(--ease);
+}
+.sheet-grip-zone:active .sheet-grip { background: var(--text-faint); width: 52px; }
 .sheet-header {
   display: flex; align-items: center; gap: var(--sp-2);
   margin-bottom: var(--sp-3);
@@ -4728,11 +4806,16 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 .capture-option {
   display: flex; align-items: center; gap: var(--sp-3); text-align: left;
   padding: var(--sp-3);
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
   color: var(--text);
-  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+              transform 120ms var(--ease);
 }
-.capture-option:active { background: var(--bg-hover); border-color: var(--border-strong); }
+.capture-option:active {
+  background: var(--bg-hover); border-color: var(--border-strong);
+  transform: scale(0.985);
+}
 .capture-icon {
   flex: none;
   display: flex; align-items: center; justify-content: center;
@@ -4749,10 +4832,11 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
 .capture-form { display: flex; flex-direction: column; gap: var(--sp-3); min-height: 0; }
 .capture-input {
   width: 100%;
-  padding: var(--sp-3);
-  font-size: 1rem;
+  padding: var(--sp-3) var(--sp-4);
+  font-size: 1rem; min-height: var(--touch-target);
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: var(--r-md);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .capture-input:focus {
   outline: none;
@@ -4767,6 +4851,9 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   max-height: 38vh; overflow-y: auto;
   padding: var(--sp-1);
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-md);
+  /* Owns its own vertical scroll; keep it from being swallowed by the sheet's drag-to-dismiss. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
 }
 .capture-folder {
   display: flex; align-items: center; gap: var(--sp-2); text-align: left;
@@ -4774,27 +4861,43 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   background: transparent; border: none; border-radius: var(--r-sm);
   color: var(--text); font-size: 0.92rem;
 }
+.capture-folder { -webkit-tap-highlight-color: transparent; transition: background var(--dur) var(--ease); }
 .capture-folder:active { background: var(--bg-hover); }
 .capture-folder.selected { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .capture-folder span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .capture-submit {
   display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
-  width: 100%; min-height: var(--touch-target); margin-top: var(--sp-1);
+  width: 100%; min-height: calc(var(--touch-target) + 4px); margin-top: var(--sp-1);
   font-size: 0.95rem; font-weight: 600;
   background: var(--accent); color: var(--accent-contrast);
   border: none; border-radius: var(--r-md);
-  transition: background var(--dur) var(--ease), opacity var(--dur) var(--ease);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 30%, transparent);
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--dur) var(--ease), opacity var(--dur) var(--ease),
+              transform 120ms var(--ease), box-shadow var(--dur) var(--ease);
 }
-.capture-submit:active { background: var(--accent-hover); }
-.capture-submit:disabled { opacity: 0.5; }
+.capture-submit:active {
+  background: var(--accent-hover);
+  transform: scale(0.98);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.capture-submit:disabled {
+  opacity: 0.5; box-shadow: none;
+}
 
 /* Lift the toast clear of the bottom bar so they never overlap on a phone (the navbar renders
    only at the mobile breakpoint, which <body> exposes as data-vp). */
-body[data-vp="mobile"] .toast-host { bottom: calc(var(--navbar-h) + var(--sp-3) + var(--safe-b)); }
+body[data-vp="mobile"] .toast-host { bottom: calc(var(--navbar-h) + 2 * var(--sp-3) + var(--safe-b)); }
 
 /* ---- Touch devices: reveal hover-only affordances, enlarge tap targets ---- */
 @media (hover: none) {
+  /* Kill the grey flash iOS/Android paint over tapped controls — we provide our own crisp :active
+     feedback everywhere, and the default highlight reads as cheap and laggy next to it. */
+  button, a, [role="button"], .ctx-item, .palette-item, .capture-folder {
+    -webkit-tap-highlight-color: transparent;
+  }
+
   /* Controls that are normally revealed on hover must be always visible without a pointer. */
   .recent-row .recent-go,
   .theme-card-actions,
@@ -4811,4 +4914,15 @@ body[data-vp="mobile"] .toast-host { bottom: calc(var(--navbar-h) + var(--sp-3) 
     min-width: var(--touch-target);
     min-height: var(--touch-target);
   }
+
+  /* A gentle press-in on the primary touch controls so taps feel physical and acknowledged. */
+  .tb-btn:active { transform: scale(0.92); }
+}
+
+/* Honour reduced-motion: drop the press-scale micro-interactions added for touch. */
+@media (hover: none) and (prefers-reduced-motion: reduce) {
+  .mnav-fab:active, .mnav-edge:active, .mnav-search:active,
+  .capture-option:active, .capture-submit:active,
+  .tb-btn:active,
+  .sheet-grip-zone:active .sheet-grip { transform: none; }
 }

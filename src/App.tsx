@@ -34,6 +34,8 @@ import { applyTheme, resolveMode } from "./theme-apply";
 import type { Theme } from "./types";
 import { slideFade, transition } from "./motion";
 import { useViewport } from "./hooks/useViewport";
+import { useSwipeNav } from "./hooks/useSwipeNav";
+import { haptic } from "./lib/haptics";
 import Breadcrumb from "./components/Breadcrumb";
 import MobileNavbar, { type FolderOption } from "./components/MobileNavbar";
 import PathBreadcrumb from "./components/PathBreadcrumb";
@@ -331,7 +333,7 @@ export default function App() {
   }, [vp.isMobile]);
 
   // Tapping the scrim (or selecting an item) dismisses whichever drawer is open on mobile.
-  const closeDrawers = useCallback(() => setMobileDrawer(null), []);
+  const closeDrawers = useCallback(() => { haptic("tap"); setMobileDrawer(null); }, []);
   // Auto-close the drawer after navigating to a file on mobile, so the editor is revealed.
   const closeLeftOnMobile = useCallback(() => {
     if (vp.isMobile) setMobileDrawer(null);
@@ -339,9 +341,19 @@ export default function App() {
   // Open the left (file-tree) drawer to reveal something in it — the mobile overlay on a phone, the
   // persisted panel on desktop. Used by reveal-in-tree and breadcrumb folder jumps.
   const openLeftDrawer = useCallback(() => {
-    if (vp.isMobile) { setMobileDrawer("left"); return; }
+    if (vp.isMobile) { haptic("tap"); setMobileDrawer("left"); return; }
     setLeftOpen((v) => (v ? v : (localStorage.setItem("pp.leftOpen", "1"), true)));
   }, [vp.isMobile]);
+
+  // Pane-swipe navigation (mobile): a horizontal flick moves left drawer ⇄ editor ⇄ right drawer,
+  // one step per swipe, mirroring the navbar toggles and their haptic tap. Swipe-left steps toward
+  // the right pane, swipe-right toward the left. Bound to the app root so it works over the editor
+  // and an open drawer alike; the hook leaves vertical scroll, inner horizontal scrollers, and
+  // modals untouched.
+  const appRef = useRef<HTMLDivElement>(null);
+  const stepTowardRight = useCallback(() => { haptic("tap"); setMobileDrawer((d) => (d === "left" ? null : "right")); }, []);
+  const stepTowardLeft = useCallback(() => { haptic("tap"); setMobileDrawer((d) => (d === "right" ? null : "left")); }, []);
+  useSwipeNav(appRef, { enabled: vp.isMobile, onSwipeLeft: stepTowardRight, onSwipeRight: stepTowardLeft });
 
   // Begin dragging a sidebar divider. `side` picks which edge; the handler tracks the pointer
   // until release, clamps the new width, and persists it.
@@ -2205,6 +2217,7 @@ export default function App() {
     <Titlebar title={vaultName} autoHide={settings.auto_hide_titlebar} />
     <div
       className="app"
+      ref={appRef}
       data-mobile={vp.isMobile ? "" : undefined}
       style={{
         // On mobile the grid collapses to a single column; the sidebars become fixed overlay
@@ -2296,21 +2309,21 @@ export default function App() {
           <nav className="sidebar-views" aria-label="Views">
             <button
               className={`sidebar-view${tab === "tasks" ? " active" : ""}`}
-              onClick={() => { setTab("tasks"); setMobileDrawer(null); }}
+              onClick={() => { haptic("select"); setTab("tasks"); setMobileDrawer(null); }}
             >
               <CheckCircle size={16} weight={tab === "tasks" ? "fill" : "regular"} />
               <span>Tasks</span>
             </button>
             <button
               className={`sidebar-view${tab === "query" ? " active" : ""}`}
-              onClick={() => { setTab("query"); setMobileDrawer(null); }}
+              onClick={() => { haptic("select"); setTab("query"); setMobileDrawer(null); }}
             >
               <MagnifyingGlass size={16} weight={tab === "query" ? "fill" : "regular"} />
               <span>Query</span>
             </button>
             <button
               className={`sidebar-view${tab === "tags" ? " active" : ""}`}
-              onClick={() => { setTab("tags"); setMobileDrawer(null); }}
+              onClick={() => { haptic("select"); setTab("tags"); setMobileDrawer(null); }}
             >
               <Tag size={16} weight={tab === "tags" ? "fill" : "regular"} />
               <span>Tags</span>
@@ -2822,6 +2835,7 @@ export default function App() {
           onToggleRight={toggleRight}
           leftOpen={showLeft}
           rightOpen={showRight}
+          onSearch={() => setPaletteOpen(true)}
           onAddTask={quickAddTask}
           onNewNote={quickNewNote}
           folders={folders}
