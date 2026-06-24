@@ -81,3 +81,16 @@ export const TIME_PRESETS: { value: string; label: string }[] = [
   { value: "h:mm A", label: "2:30 PM (12-hour)" },
   { value: "h:mm:ss A", label: "2:30:05 PM" },
 ];
+
+/**
+ * Presets for the task-completion stamp (`done:: …`). Mixes date-only and date+time options so
+ * "date only vs date + time" is a single pick; the FormatPicker still allows any custom pattern.
+ */
+export const DONE_PRESETS: { value: string; label: string }[] = [
+  { value: "YYYY-MM-DD HH:mm", label: "2026-06-23 14:30 (date + time)" },
+  { value: "YYYY-MM-DD", label: "2026-06-23 (date only)" },
+  { value: "DD/MM/YYYY HH:mm", label: "23/06/2026 14:30" },
+  { value: "D MMM YYYY, HH:mm", label: "23 Jun 2026, 14:30" },
+  { value: "ddd, D MMM YYYY", label: "Tue, 23 Jun 2026 (date only)" },
+  { value: "D MMMM YYYY [at] h:mm A", label: "23 June 2026 at 2:30 PM" },
+];

@@ -428,6 +428,17 @@ export interface Settings {
   time_format: string;
   /** Pattern for rendering task due-dates in the Tasks view. */
   task_date_format: string;
+  /**
+   * Stamp a `done:: <timestamp>` field onto a to-do when its checkbox is ticked (removed when
+   * unticked). Off leaves checkboxes untouched.
+   */
+  stamp_done_date: boolean;
+  /**
+   * Pattern (see dateformat.ts tokens) for the completion timestamp written by the checkbox stamp.
+   * A date-only pattern (e.g. `YYYY-MM-DD`) records just the day; include time tokens (`HH:mm`) for
+   * date + time.
+   */
+  done_date_format: string;
   /** Pattern for the human label of a daily periodic note. */
   periodic_label_format: string;
   /** Per-node icon overrides, keyed by the node's vault-relative path. */
@@ -650,6 +661,8 @@ export const DEFAULT_SETTINGS: Settings = {
   date_format: "YYYY-MM-DD",
   time_format: "HH:mm",
   task_date_format: "ddd, D MMM",
+  stamp_done_date: true,
+  done_date_format: "YYYY-MM-DD HH:mm",
   periodic_label_format: "dddd, MMMM D",
   node_icons: {},
   auto_hide_titlebar: false,

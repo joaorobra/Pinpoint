@@ -15,7 +15,7 @@ import Select, { type SelectGroup, type SelectOption } from "./Select";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import ColorPicker from "./ColorPicker";
 import ThemeManager from "./ThemeManager";
-import { formatDate, DATE_PRESETS, TIME_PRESETS } from "../dateformat";
+import { formatDate, DATE_PRESETS, TIME_PRESETS, DONE_PRESETS } from "../dateformat";
 import { PERIODS } from "../periodic";
 import type { TemplateInfo } from "../templates";
 
@@ -534,6 +534,38 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                       ariaLabel="Task due-date format"
                     />
                   </Row>
+                </Group>
+                <Group
+                  title="Task completion"
+                  desc="Stamp when a to-do is finished. Checking its box adds a done:: timestamp; unchecking removes it."
+                >
+                  <Row
+                    label="Record completion date"
+                    hint="Add a done:: timestamp to a to-do when you check it off."
+                  >
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={settings.stamp_done_date}
+                        onChange={(e) => set("stamp_done_date", e.target.checked)}
+                      />
+                      <span className="switch-track" />
+                    </label>
+                  </Row>
+                  {settings.stamp_done_date && (
+                    <Row
+                      label="Completion format"
+                      hint="Pick a date-only or date + time pattern (or type your own)."
+                    >
+                      <FormatPicker
+                        value={settings.done_date_format}
+                        presets={DONE_PRESETS}
+                        sample={sample}
+                        onChange={(v) => set("done_date_format", v)}
+                        ariaLabel="Task completion timestamp format"
+                      />
+                    </Row>
+                  )}
                 </Group>
                 <Group title="Periodic notes" desc="The heading written into a new daily note.">
                   <Row label="Daily note label">

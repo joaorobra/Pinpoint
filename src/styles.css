@@ -59,8 +59,16 @@
   --prio-medium-soft: color-mix(in srgb, var(--prio-medium) 16%, transparent);
   --prio-low: var(--text-faint);
   --prio-low-soft: color-mix(in srgb, var(--text-faint) 18%, transparent);
+  /* ---- task completion ----
+     One green base for the inline `done::` timestamp pill; the soft fill derives via color-mix so a
+     theme can recolor it by overriding just --done. Bright on dark surfaces; light themes darken it
+     below for legibility, exactly like --prio-medium. */
+  --done: #22c55e;
+  --done-soft: color-mix(in srgb, var(--done) 16%, transparent);
   /* Phosphor "flag-fill" silhouette, as a mask image for the inline priority pill's flag glyph. */
   --flag-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><path d="M42.76,50.13A8,8,0,0,0,40,56.18V216a8,8,0,0,0,16,0V179.92c44.27-26.49,76.06,1.07,77.4,2.27l.18.15c19.41,16,40.39,17.39,55.85,13.81,16.83-3.9,30.62-13.46,35.78-17.69a8,8,0,0,0,2.79-6.09V56.18a8,8,0,0,0-13.21-6.08c-.34.28-34.22,28-64.61,1.39C147.66,21.46,93.69,8.31,42.76,50.13Z"/></svg>');
+  /* Phosphor "check-circle-fill" silhouette, as a mask for the inline completion pill's check glyph. */
+  --check-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm45.66,85.66-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35a8,8,0,0,1,11.32,11.32Z"/></svg>');
 
   /* ---- spacing scale (4px base) ---- */
   --sp-1: 4px;
@@ -124,6 +132,8 @@
   --danger-strong: color-mix(in srgb, var(--danger) 88%, black 12%);
   /* A darker amber so Medium-priority text stays legible on light surfaces. */
   --prio-medium: #b45309;
+  /* A darker green so the completion pill stays legible on light surfaces. */
+  --done: #15803d;
 }
 
 @media (prefers-color-scheme: light) {
@@ -143,6 +153,7 @@
     --danger: #dc2626;
     --danger-strong: color-mix(in srgb, var(--danger) 88%, black 12%);
     --prio-medium: #b45309;
+    --done: #15803d;
   }
 }
 
@@ -1130,23 +1141,41 @@ code, .dsl-preview, .dsl-input {
 .block-drag-handle {
   position: absolute; display: none;
   align-items: center; justify-content: center;
-  width: 22px; height: 24px; border-radius: var(--r-sm);
+  width: 24px; height: 26px; border-radius: var(--r-sm);
   color: var(--text-dim); opacity: 0; cursor: grab;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+  /* Pointer-event driven drag: stop the gesture from scrolling/selecting instead of dragging. */
+  touch-action: none; -webkit-user-drag: none;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease, transform 0.08s ease;
   z-index: 4; user-select: none;
 }
+/* Transparent bridge spanning the gutter gap to the text, plus a little vertical slack, so the
+   pointer can travel from the line to the grip without "falling off" into a dead zone. */
+.block-drag-handle::after {
+  content: ""; position: absolute; left: 100%; top: -5px; bottom: -5px; width: 26px;
+}
 .block-drag-handle:hover { opacity: 1; background: var(--bg-3); color: var(--text); }
-/* Reveal the grip when the pointer is anywhere over the editor column. */
-.editor-content:hover .block-drag-handle { opacity: 0.55; }
+/* Reveal the grip when the pointer is anywhere over the editor column, so it's easy to find. */
+.editor-content:hover .block-drag-handle { opacity: 0.65; }
 .editor-content:hover .block-drag-handle:hover { opacity: 1; }
-.block-drag-handle.dragging { cursor: grabbing; opacity: 1; }
+.block-drag-handle.dragging { cursor: grabbing; opacity: 1; background: var(--bg-3); color: var(--text); transform: scale(1.08); }
 .block-drag-handle svg { fill: currentColor; pointer-events: none; }
 
-/* `left`/`right` are set inline by the plugin to span the dragged line's sibling column. */
+/* The row currently being dragged — dimmed so it reads as "lifted / in flight". */
+.block-drag-source { opacity: 0.4; transition: opacity 0.1s ease; }
+
+/* `left`/`right` are set inline by the plugin to span the dragged line's sibling column. A leading
+   dot + glow makes the landing point unmistakable. */
 .block-drop-indicator {
-  position: absolute; height: 2px;
-  background: var(--accent); border-radius: 2px; pointer-events: none;
-  z-index: 4; box-shadow: 0 0 0 1px var(--accent-ring);
+  position: absolute; height: 1px;
+  background: var(--accent); border-radius: 1px; pointer-events: none;
+  z-index: 4;
+  box-shadow: 0 0 0 1px var(--accent-ring), 0 1px 6px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.block-drop-indicator::before {
+  content: ""; position: absolute; left: -3px; top: 50%;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent); transform: translateY(-50%);
+  box-shadow: 0 0 0 1px var(--accent-ring);
 }
 
 /* ---- Page-width ruler (Ctrl+R) ----
@@ -1648,6 +1677,33 @@ code, .dsl-preview, .dsl-input {
   background-color: currentColor;
   -webkit-mask: var(--flag-mask) center / contain no-repeat;
   mask: var(--flag-mask) center / contain no-repeat;
+}
+
+/* Completion timestamp pill — the inline `done:: <date time>` field (DonePill decoration). Same
+   collapse-keyword + pill-the-value pattern as the priority pill; coloured green from --done. The
+   doc text stays literal `done:: …` (the markdown source of truth is untouched). */
+.done-kw {
+  /* Keep it in the doc (caret + markdown) but visually gone. */
+  font-size: 0; letter-spacing: -1em; opacity: 0;
+}
+.done-pill {
+  color: var(--done);
+  background: var(--done-soft);
+  border-radius: 99px;
+  padding: 0.05em 0.5em 0.05em 0.4em;
+  font-size: 0.84em; font-weight: 600;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+/* A Phosphor "check-circle-fill" glyph before the timestamp, recolored to the pill colour via mask. */
+.done-pill::before {
+  content: ""; display: inline-block;
+  width: 0.9em; height: 0.9em; margin-right: 0.3em;
+  vertical-align: -0.13em;
+  background-color: currentColor;
+  -webkit-mask: var(--check-mask) center / contain no-repeat;
+  mask: var(--check-mask) center / contain no-repeat;
 }
 
 /* ---------- Panels (tasks/query) ---------- */

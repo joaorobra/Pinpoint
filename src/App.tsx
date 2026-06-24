@@ -2365,6 +2365,8 @@ export default function App() {
                 dateFormat={settings.date_format}
                 timeFormat={settings.time_format}
                 taskDateFormat={settings.task_date_format}
+                stampDoneDate={settings.stamp_done_date}
+                doneDateFormat={settings.done_date_format}
                 insertText={tokenInsert}
                 smartReplacements={settings.smart_replacements}
                 snippets={settings.snippets}

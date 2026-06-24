@@ -35,6 +35,10 @@ pub struct Settings {
     pub date_format: String,           // editor /today + /date default
     pub time_format: String,           // editor /time
     pub task_date_format: String,      // Tasks view due dates
+    /// Stamp a `done:: <timestamp>` field onto a to-do when its checkbox is ticked.
+    pub stamp_done_date: bool,
+    /// dateformat.ts pattern for the completion stamp (date-only or date + time).
+    pub done_date_format: String,
     pub periodic_label_format: String, // daily periodic-note heading
     /// Per-node icon overrides, keyed by the node's vault-relative path.
     pub node_icons: HashMap<String, NodeIcon>,
@@ -83,6 +87,8 @@ impl Default for Settings {
             date_format: "YYYY-MM-DD".into(),
             time_format: "HH:mm".into(),
             task_date_format: "ddd, D MMM".into(),
+            stamp_done_date: true,
+            done_date_format: "YYYY-MM-DD HH:mm".into(),
             periodic_label_format: "dddd, MMMM D".into(),
             node_icons: HashMap::new(),
             auto_hide_titlebar: false,

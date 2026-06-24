@@ -177,6 +177,8 @@ export function inlineMd(text: string): string {
  */
 export function stripTaskMeta(text: string): string {
   return text
+    // `done:: 2026-06-23 14:30` — completion timestamp field; value runs to the next field marker.
+    .replace(/\bdone::\s*[^📅🔁⏳✅]*/gi, "")
     // `priority:: high` — the dataview-style field (value is a single word).
     .replace(/\bpriority::\s*\S+/gi, "")
     // 📅/🔁/✅ marker + its trailing value (date, rrule, …), up to the next marker.

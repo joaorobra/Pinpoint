@@ -897,3 +897,37 @@
 [2m21:00:45[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/RightSidebar.tsx[22m
 [2m21:01:04[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
 [2m21:02:40[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:05:42[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:06:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:06:27[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:08:47[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:09:23[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:10:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:10:14[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:15:47[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:16:00[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:16:07[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:16:22[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:16:28[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:16:36[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:16:41[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:17:12[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:17:16[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:17:44[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:17:50[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:17:59[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m21:18:36[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:18:49[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:18:55[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:19:09[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:19:25[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m21:20:38[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m22:00:53[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx, /src/components/FileTree.tsx, /src/components/ColorPicker.tsx, /src/components/DbTableView.tsx[22m
+[2m22:00:59[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx, /src/components/FileTree.tsx, /src/components/ColorPicker.tsx, /src/components/DbTableView.tsx[22m
+[2m22:01:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SettingsPanel.tsx, /src/components/RightSidebar.tsx, /src/components/Editor.tsx, /src/components/DbShared.tsx, /src/components/TaskList.tsx[22m
+[2m22:01:21[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SettingsPanel.tsx[22m
+[2m22:01:33[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SettingsPanel.tsx[22m
+[2m22:01:55[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m22:02:12[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m22:02:29[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m22:02:51[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m

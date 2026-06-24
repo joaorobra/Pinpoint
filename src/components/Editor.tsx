@@ -149,6 +149,17 @@ interface Props {
   timeFormat?: string;
   /** Pattern for rendering task due-dates in inline TASK query blocks. */
   taskDateFormat?: string;
+  /**
+   * When true, checking a to-do stamps a `done:: <timestamp>` field onto it (unchecking removes it).
+   * Default true. Set false to leave checkboxes untouched.
+   */
+  stampDoneDate?: boolean;
+  /**
+   * Pattern (dateformat.ts tokens) for the completion timestamp written by the checkbox stamp. A
+   * date-only pattern records just the day; include time tokens for date + time. Default
+   * `YYYY-MM-DD HH:mm`.
+   */
+  doneDateFormat?: string;
   /** Current editor page-column width in px (drives the draggable ruler and the column max-width). */
   pageWidth?: number;
   /**
@@ -423,52 +434,132 @@ function lineAtCoords(
   return { pos, dom };
 }
 
+type DragLine = {
+  pos: number; nodeSize: number; depth: number; parentPos: number;
+  index: number; typeName: string; dom: HTMLElement;
+};
+
 /**
- * The sibling rows of the line whose node starts at `linePos`, as {pos, dom} pairs in document
- * order — i.e. the children of that line's parent at the same depth. Used to compute the drop gap
- * and indicator, so dragging reorders strictly within the same list/level the line belongs to.
+ * Every draggable "line" in the document, in visual (top-to-bottom) order: each top-level block,
+ * plus each list item, recursing through nested sub-lists. For each we keep its document position,
+ * size, nesting depth (0 = top level), index among its siblings, type name, and DOM element —
+ * everything the drag needs to find a drop gap and re-nest a moved line anywhere in the document.
  */
-function siblingRows(view: any, linePos: number): { pos: number; dom: HTMLElement }[] {
-  const { state } = view;
-  const $line = state.doc.resolve(linePos + 1);
-  const depth = $line.depth;
-  const parent = $line.node(depth - 1);
-  const parentStart = $line.start(depth - 1);
-  const rows: { pos: number; dom: HTMLElement }[] = [];
-  let at = parentStart;
-  for (let i = 0; i < parent.childCount; i++) {
-    const dom = view.nodeDOM(at) as HTMLElement | null;
-    if (dom && dom.nodeType === 1) rows.push({ pos: at, dom });
-    at += parent.child(i).nodeSize;
+function collectLines(view: any): DragLine[] {
+  const { doc } = view.state;
+  const lines: DragLine[] = [];
+  const walk = (node: any, pos: number, depth: number, parentPos: number, index: number) => {
+    const name = node.type.name;
+    if (LIST_NAMES.has(name)) {
+      // A list is a container, not a line of its own — recurse into its items at the same depth.
+      let at = pos + 1;
+      for (let i = 0; i < node.childCount; i++) {
+        walk(node.child(i), at, depth, pos, i);
+        at += node.child(i).nodeSize;
+      }
+      return;
+    }
+    const dom = view.nodeDOM(pos) as HTMLElement | null;
+    if (dom && dom.nodeType === 1)
+      lines.push({ pos, nodeSize: node.nodeSize, depth, parentPos, index, typeName: name, dom });
+    // Descend into any sub-lists nested inside this item, one level deeper.
+    if (name === "listItem" || name === "taskItem") {
+      let at = pos + 1;
+      for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i);
+        if (LIST_NAMES.has(child.type.name)) walk(child, at, depth + 1, parentPos, index);
+        at += child.nodeSize;
+      }
+    }
+  };
+  let at = 0;
+  for (let i = 0; i < doc.childCount; i++) {
+    walk(doc.child(i), at, 0, -1, i);
+    at += doc.child(i).nodeSize;
   }
-  return rows;
+  return lines;
+}
+
+// Re-type a list item to the other kind (listItem⇄taskItem) while keeping its content, so a row can
+// move between a bullet/numbered list and a task list. Task items gain an unchecked `checked` attr.
+function retypeItem(item: any, newType: any): any {
+  return newType.create(newType.name === "taskItem" ? { checked: false } : null, item.content);
 }
 
 /**
- * Move the line whose node starts at `fromPos` (a list item or top-level block) so it lands before
- * the sibling at `targetIndex`, reordering among its same-depth siblings only. The node (with any
- * nested sub-list) rides along, in one transaction (single undo). A no-op when order wouldn't change.
+ * Notion-style free move: relocate the line at `srcPos` to sit just before (or `after`) the line at
+ * `refPos`, adopting that target's container and nesting level. Re-wraps as the schema requires —
+ * a bare paragraph wraps into a list item when dropped into a list; an item's contents lift out when
+ * dropped at top level; a bullet item re-types to a task item across list kinds. `deleteRange` clears
+ * any list/item left empty by the move. One transaction (single undo). Returns false on a no-op or
+ * any move the schema can't represent (validated before dispatch), so the document never corrupts.
  */
-function moveLineTo(view: any, fromPos: number, targetIndex: number): boolean {
+function moveLineToTarget(view: any, srcPos: number, refPos: number, after: boolean): boolean {
   const { state } = view;
-  const $from = state.doc.resolve(fromPos + 1);
-  const depth = $from.depth;
-  const parent = $from.node(depth - 1);
-  const srcIndex = $from.index(depth - 1);
-  // Dropping into the line's own slot, or the slot right after it, is a no-op.
-  if (targetIndex === srcIndex || targetIndex === srcIndex + 1) return false;
-  if (targetIndex < 0 || targetIndex > parent.childCount) return false;
+  const schema = state.schema;
+  const srcNode = state.doc.nodeAt(srcPos);
+  if (!srcNode) return false;
+  // Never drop a line into itself or its own subtree.
+  if (refPos >= srcPos && refPos < srcPos + srcNode.nodeSize) return false;
 
-  const node = parent.child(srcIndex);
-  // Start position of `targetIndex` among the parent's children, on the CURRENT doc.
-  const parentStart = $from.start(depth - 1);
+  // Resolve the target's parent container + the index to insert at among its children.
+  const $ref = state.doc.resolve(refPos + 1);
+  const tDepth = $ref.depth;
+  let parent = $ref.node(tDepth - 1);
+  let parentStart = tDepth - 1 === 0 ? 0 : $ref.start(tDepth - 1);
+  let targetIndex = $ref.index(tDepth - 1) + (after ? 1 : 0);
+
+  const srcIsItem = srcNode.type.name === "listItem" || srcNode.type.name === "taskItem";
+  let toInsert: any[] | null = null;
+
+  if (LIST_NAMES.has(parent.type.name)) {
+    // Destination is a list → it must hold items of the matching kind.
+    const itemTypeName = parent.type.name === "taskList" ? "taskItem" : "listItem";
+    const itemType = schema.nodes[itemTypeName];
+    if (srcIsItem) {
+      toInsert = srcNode.type.name === itemTypeName ? [srcNode] : [retypeItem(srcNode, itemType)];
+    } else if (srcNode.type.name === "paragraph") {
+      toInsert = [itemType.create(itemTypeName === "taskItem" ? { checked: false } : null, srcNode)];
+    } else {
+      // A heading/quote/etc. can't lead a list item — drop it beside the WHOLE list instead, at the
+      // list's own parent level (the nearest position where the block is valid).
+      const listPos = $ref.before(tDepth - 1);
+      const $list = state.doc.resolve(listPos);
+      parent = $list.parent;
+      parentStart = $list.depth === 0 ? 0 : $list.start();
+      targetIndex = $list.index() + (after ? 1 : 0);
+      toInsert = [srcNode];
+    }
+  } else if (srcIsItem) {
+    // Destination takes blocks (the doc, or a list item's content) → lift the item's blocks out.
+    const blocks: any[] = [];
+    srcNode.forEach((c: any) => blocks.push(c));
+    toInsert = blocks;
+  } else {
+    toInsert = [srcNode];
+  }
+  if (!toInsert || !toInsert.length) return false;
+
+  // Flat insertion offset among the parent's children, measured on the CURRENT doc.
   let insertAt = parentStart;
   for (let i = 0; i < targetIndex; i++) insertAt += parent.child(i).nodeSize;
 
+  // No-op: dropping back into the slot the source already occupies.
+  const $src = state.doc.resolve(srcPos + 1);
+  const srcParentStart = $src.depth - 1 === 0 ? 0 : $src.start($src.depth - 1);
+  if (parentStart === srcParentStart) {
+    const srcIndex = $src.index($src.depth - 1);
+    if (targetIndex === srcIndex || targetIndex === srcIndex + 1) return false;
+  }
+
   const tr = state.tr;
-  tr.delete(fromPos, fromPos + node.nodeSize);
-  const mappedInsert = insertAt > fromPos ? insertAt - node.nodeSize : insertAt;
-  tr.insert(mappedInsert, node);
+  tr.deleteRange(srcPos, srcPos + srcNode.nodeSize); // also removes any now-empty list/item wrapper
+  const mappedInsert = tr.mapping.map(insertAt, -1);
+  tr.insert(mappedInsert, Fragment.fromArray(toInsert));
+
+  // Guard against any schema-invalid result rather than corrupting the document.
+  try { tr.doc.check(); } catch { return false; }
+
   tr.setSelection(TextSelection.near(tr.doc.resolve(mappedInsert + 1)));
   view.dispatch(tr.scrollIntoView());
   return true;
@@ -500,7 +591,6 @@ const BlockDragHandle = Extension.create({
           // The grip. `draggable` so a real HTML5 drag starts; positioned over the left gutter.
           const handle = document.createElement("div");
           handle.className = "block-drag-handle";
-          handle.setAttribute("draggable", "true");
           handle.setAttribute("contenteditable", "false");
           handle.title = "Drag to move • click to select";
           handle.innerHTML =
@@ -518,7 +608,7 @@ const BlockDragHandle = Extension.create({
 
           let hoverPos: number | null = null; // doc pos of the block the handle is pinned to
           let dragging = false;
-          let dropIndex: number | null = null; // top-level index the block would land before
+          let dropTarget: { refPos: number; after: boolean } | null = null; // where the line will land
 
           // Pin the grip a fixed gap to the LEFT of the block's own left edge, vertically aligned to
           // its first text line. Both offsets are measured against the block's box (not the centered
@@ -543,6 +633,9 @@ const BlockDragHandle = Extension.create({
 
           const onMove = (e: MouseEvent) => {
             if (dragging) return;
+            // Track over the WHOLE editor column (text + left gutter), not just the text — otherwise
+            // moving left toward the grip leaves the text box and the handle vanishes before you can
+            // grab it. `lineAtCoords` clamps x into the text column, so gutter rows still resolve.
             const hit = lineAtCoords(view, e.clientX, e.clientY);
             if (!hit) {
               hoverPos = null;
@@ -553,104 +646,176 @@ const BlockDragHandle = Extension.create({
             place(hit.dom);
           };
           const onLeave = (e: MouseEvent) => {
-            // Keep the handle while the pointer is over it (so it stays grabbable).
+            // Keep the handle as long as the pointer is still somewhere in the editor column.
             if (dragging) return;
             const to = e.relatedTarget as Node | null;
-            if (to && (handle.contains(to) || view.dom.contains(to))) return;
+            if (to && wrap.contains(to)) return;
             handle.style.display = "none";
             hoverPos = null;
           };
 
-          view.dom.addEventListener("mousemove", onMove);
-          view.dom.addEventListener("mouseleave", onLeave);
+          wrap.addEventListener("mousemove", onMove);
+          wrap.addEventListener("mouseleave", onLeave);
 
-          // Compute the drop index + indicator Y from a pointer Y, by finding the nearest gap between
-          // the dragged line's SIBLINGS (same list/level). `left`/`right` bound the indicator to the
-          // sibling column so it reads as "drop among these rows". Returns the sibling index to insert
-          // before. Falls back to no-op data when the source line can't be resolved mid-drag.
+          // From a pointer Y, find the drop gap among ALL lines in the document (any list, any level).
+          // The dropped line will land beside the gap's reference line and adopt its nesting, so the
+          // indicator is inset to that line's left edge — you see both WHERE and at WHAT LEVEL it
+          // lands. Returns the reference line's position + which side, or null when over the dragged
+          // line itself (a no-op target).
           const computeDrop = (
             clientY: number
-          ): { index: number; y: number; left: number; right: number } | null => {
+          ): { refPos: number; after: boolean; y: number; left: number; right: number } | null => {
             if (hoverPos == null) return null;
-            const rows = siblingRows(view, hoverPos);
-            if (!rows.length) return null;
+            const lines = collectLines(view);
+            if (!lines.length) return null;
             // Same origin the indicator is positioned against (its offsetParent), see `place`.
             const wrapBox = (indicator.offsetParent ?? wrap).getBoundingClientRect();
-            const first = rows[0].dom.getBoundingClientRect();
-            const last = rows[rows.length - 1].dom.getBoundingClientRect();
-            const left = first.left - wrapBox.left;
-            const right = wrapBox.right - last.right;
-            for (let i = 0; i < rows.length; i++) {
-              const box = rows[i].dom.getBoundingClientRect();
-              const mid = box.top + box.height / 2;
-              if (clientY < mid) return { index: i, y: box.top - wrapBox.top, left, right };
+            let gap = lines.length; // default: below the last line
+            for (let i = 0; i < lines.length; i++) {
+              const b = lines[i].dom.getBoundingClientRect();
+              if (clientY < b.top + b.height / 2) { gap = i; break; }
             }
-            return { index: rows.length, y: last.bottom - wrapBox.top, left, right };
+            const after = gap >= lines.length;
+            const ref = after ? lines[lines.length - 1] : lines[gap];
+            // Skip drops onto the dragged line or anything inside it — there's no valid landing there.
+            const srcNode = view.state.doc.nodeAt(hoverPos);
+            if (srcNode && ref.pos >= hoverPos && ref.pos < hoverPos + srcNode.nodeSize) return null;
+            const rb = ref.dom.getBoundingClientRect();
+            return {
+              refPos: ref.pos,
+              after,
+              y: (after ? rb.bottom : rb.top) - wrapBox.top,
+              left: rb.left - wrapBox.left,
+              right: wrapBox.right - rb.right,
+            };
           };
 
-          handle.addEventListener("dragstart", (e) => {
-            if (hoverPos == null) { e.preventDefault(); return; }
-            dragging = true;
-            handle.classList.add("dragging");
-            // A drag image isn't useful here (the grip is tiny); use a transparent 1px.
-            const img = new Image();
-            img.src = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
-            e.dataTransfer?.setDragImage(img, 0, 0);
-            if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-          });
+          // ── Dragging via Pointer Events (not native HTML5 DnD) ─────────────────────────────────
+          // Native drag made the tiny grip finicky to grab and gave no feedback about WHAT was
+          // moving or WHERE it would land. Pointer capture lets us own the whole gesture: press the
+          // grip, move, release — the events keep flowing to the handle even when the pointer roams
+          // far from it. A small movement threshold separates a real drag from a plain click.
+          let pointerId: number | null = null;
+          let startX = 0, startY = 0;
+          let pendingPos: number | null = null; // line captured on pointerdown; promoted on first move
+          let sourceDom: HTMLElement | null = null; // dragged row, dimmed so it reads as "in flight"
 
-          const onDragOver = (e: DragEvent) => {
-            if (!dragging) return;
-            e.preventDefault();
-            if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-            const drop = computeDrop(e.clientY);
-            if (!drop) { indicator.style.display = "none"; dropIndex = null; return; }
-            dropIndex = drop.index;
-            indicator.style.top = `${drop.y - 1}px`;
+          // Auto-scroll when the pointer nears the top/bottom edge of the scroll container, so a long
+          // document can be reordered without ever releasing the grip.
+          const scroller = (() => {
+            let el: HTMLElement | null = wrap;
+            while (el) {
+              const oy = getComputedStyle(el).overflowY;
+              if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) return el;
+              el = el.parentElement;
+            }
+            return null;
+          })();
+          let scrollVel = 0;
+          let rafScroll = 0;
+          const stepScroll = () => {
+            rafScroll = 0;
+            if (!dragging || !scroller || scrollVel === 0) return;
+            scroller.scrollTop += scrollVel;
+            rafScroll = requestAnimationFrame(stepScroll);
+          };
+
+          const showDropAt = (clientY: number) => {
+            const drop = computeDrop(clientY);
+            if (!drop) { indicator.style.display = "none"; dropTarget = null; return; }
+            dropTarget = { refPos: drop.refPos, after: drop.after };
+            indicator.style.top = `${drop.y - 1.5}px`;
             indicator.style.left = `${drop.left}px`;
             indicator.style.right = `${drop.right}px`;
             indicator.style.display = "block";
           };
-          wrap.addEventListener("dragover", onDragOver);
 
           const finishDrag = () => {
             dragging = false;
-            dropIndex = null;
+            dropTarget = null;
+            scrollVel = 0;
+            if (rafScroll) { cancelAnimationFrame(rafScroll); rafScroll = 0; }
             handle.classList.remove("dragging");
             indicator.style.display = "none";
+            sourceDom?.classList.remove("block-drag-source");
+            sourceDom = null;
           };
 
-          const onDrop = (e: DragEvent) => {
-            if (!dragging) return;
+          const onPointerDown = (e: PointerEvent) => {
+            if (e.button !== 0 || hoverPos == null) return;
             e.preventDefault();
-            if (hoverPos != null && dropIndex != null) {
-              moveLineTo(view, hoverPos, dropIndex);
-            }
-            finishDrag();
-            handle.style.display = "none";
-            hoverPos = null;
+            pointerId = e.pointerId;
+            pendingPos = hoverPos;
+            startX = e.clientX; startY = e.clientY;
+            handle.setPointerCapture(e.pointerId);
           };
-          wrap.addEventListener("drop", onDrop);
-          handle.addEventListener("dragend", finishDrag);
 
-          // Click the grip (no drag) to select the whole block — handy before formatting/deleting it.
-          handle.addEventListener("click", () => {
-            if (hoverPos == null) return;
-            const node = view.state.doc.nodeAt(hoverPos);
-            if (!node) return;
-            const tr = view.state.tr.setSelection(
-              TextSelection.create(view.state.doc, hoverPos + 1, hoverPos + node.nodeSize - 1)
-            );
-            view.dispatch(tr);
-            view.focus();
+          const onPointerMove = (e: PointerEvent) => {
+            if (pendingPos == null) return;
+            if (!dragging) {
+              // Promote to a drag only after the pointer clears a small threshold, so a slightly
+              // shaky click still selects the block instead of "moving" it nowhere.
+              if (Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return;
+              dragging = true;
+              hoverPos = pendingPos;
+              handle.classList.add("dragging");
+              sourceDom = view.nodeDOM(hoverPos) as HTMLElement | null;
+              sourceDom?.classList.add("block-drag-source");
+            }
+            e.preventDefault();
+            showDropAt(e.clientY);
+            if (scroller) {
+              const box = scroller.getBoundingClientRect();
+              const EDGE = 48;
+              if (e.clientY < box.top + EDGE) scrollVel = -Math.ceil((box.top + EDGE - e.clientY) / 6);
+              else if (e.clientY > box.bottom - EDGE) scrollVel = Math.ceil((e.clientY - (box.bottom - EDGE)) / 6);
+              else scrollVel = 0;
+              if (scrollVel !== 0 && !rafScroll) rafScroll = requestAnimationFrame(stepScroll);
+            }
+          };
+
+          const onPointerUp = () => {
+            if (pendingPos == null) return;
+            if (pointerId != null) { try { handle.releasePointerCapture(pointerId); } catch {} }
+            if (dragging) {
+              if (hoverPos != null && dropTarget != null)
+                moveLineToTarget(view, hoverPos, dropTarget.refPos, dropTarget.after);
+              finishDrag();
+              handle.style.display = "none";
+              hoverPos = null;
+            } else {
+              // No real movement → treat as a click: select the whole block (handy before
+              // formatting/deleting it).
+              const pos = pendingPos;
+              const node = view.state.doc.nodeAt(pos);
+              if (node) {
+                view.dispatch(
+                  view.state.tr.setSelection(
+                    TextSelection.create(view.state.doc, pos + 1, pos + node.nodeSize - 1)
+                  )
+                );
+                view.focus();
+              }
+            }
+            pendingPos = null;
+            pointerId = null;
+          };
+
+          handle.addEventListener("pointerdown", onPointerDown);
+          handle.addEventListener("pointermove", onPointerMove);
+          handle.addEventListener("pointerup", onPointerUp);
+          // If capture is yanked away (e.g. the browser cancels the gesture), clean up gracefully.
+          handle.addEventListener("lostpointercapture", () => {
+            if (dragging) finishDrag();
+            pendingPos = null;
+            pointerId = null;
           });
 
           return {
             destroy() {
-              view.dom.removeEventListener("mousemove", onMove);
-              view.dom.removeEventListener("mouseleave", onLeave);
-              wrap.removeEventListener("dragover", onDragOver);
-              wrap.removeEventListener("drop", onDrop);
+              wrap.removeEventListener("mousemove", onMove);
+              wrap.removeEventListener("mouseleave", onLeave);
+              if (rafScroll) cancelAnimationFrame(rafScroll);
               handle.remove();
               indicator.remove();
             },
@@ -951,6 +1116,141 @@ const PriorityPill = Extension.create({
                 decos.push(
                   Decoration.inline(kwEnd, valEnd, { class: `priority-pill prio-${level}` })
                 );
+              }
+            });
+            return DecorationSet.create(state.doc, decos);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * Stamp a `done:: <date> <time>` field onto a to-do the moment its checkbox is ticked, and strip it
+ * again when unticked — so every completed task records WHEN it was finished. The field is plain text
+ * (the dataview-style `done::`, same family as `due::`/`priority::`), so it round-trips through the
+ * markdown source untouched and is rendered as a pretty pill by `DonePill`.
+ *
+ * Implemented as an `appendTransaction` plugin rather than overriding the checkbox command, so it
+ * covers EVERY way a box flips — the click handler, keyboard toggle, paste, undo/redo — uniformly.
+ * We diff task items by document order: only a checkbox tick changes a `taskItem`'s `checked` attr
+ * without adding/removing items, so the Nth item before and after a toggle is the same task, and we
+ * rewrite just the ones whose `checked` actually changed. Editing the `done::` text doesn't touch
+ * `checked`, so the appended transaction never re-triggers this (no loop).
+ *
+ * `getStamp()` returns the formatted "now" string (date + time) from the user's live format
+ * settings; a getter so Settings edits apply without re-creating the editor.
+ */
+const completionStampKey = new PluginKey("completionStamp");
+// The `done:: <value>` field for detect/replace/remove. The value (a date+time, never containing
+// `::`) runs to the next field — an emoji marker OR another `word::` keyword — or end-of-text, so
+// removing the stamp on uncheck never swallows an adjacent `priority::`/`due::` on the same line,
+// whatever the field order. `\s*` on the front also eats the separating space so no double-space is
+// left behind. Mirrors the bound used by the DonePill decoration.
+const DONE_FIELD_RE = /\s*\bdone::\s*(?:(?!\s+\w+::)[^📅🔁⏳✅])*/i;
+
+interface CompletionStampOptions {
+  /** Formatted completion timestamp ("now"), e.g. "2026-06-23 14:30". Empty string disables stamping. */
+  getStamp: () => string;
+}
+
+/** Every taskItem's checked state in document order, with its paragraph's bounds + text. */
+function taskItemsInOrder(
+  doc: any
+): { checked: boolean; paraFrom: number; paraTo: number; text: string }[] {
+  const out: { checked: boolean; paraFrom: number; paraTo: number; text: string }[] = [];
+  doc.descendants((node: any, pos: number) => {
+    if (node.type.name !== "taskItem") return true;
+    const para = node.firstChild;
+    const paraFrom = pos + 2; // +1 into taskItem, +1 into its first child (the paragraph)
+    const size = para?.content.size ?? 0;
+    out.push({
+      checked: !!node.attrs?.checked,
+      paraFrom,
+      paraTo: paraFrom + size,
+      text: para?.textContent ?? "",
+    });
+    return true; // keep descending so nested task items are counted too, in their own order
+  });
+  return out;
+}
+
+const CompletionStamp = Extension.create<CompletionStampOptions>({
+  name: "completionStamp",
+  addOptions() {
+    return { getStamp: () => "" };
+  },
+  addProseMirrorPlugins() {
+    const getStamp = this.options.getStamp;
+    return [
+      new Plugin({
+        key: completionStampKey,
+        appendTransaction(transactions, oldState, newState) {
+          if (!transactions.some((t) => t.docChanged)) return null;
+          const before = taskItemsInOrder(oldState.doc);
+          const after = taskItemsInOrder(newState.doc);
+          // A pure checkbox toggle keeps the item count stable; if items were added/removed (typing,
+          // paste, etc.) the ordinals no longer line up — skip rather than risk stamping a wrong line.
+          if (before.length !== after.length) return null;
+
+          const tr = newState.tr;
+          let touched = false;
+          for (let i = 0; i < after.length; i++) {
+            if (before[i].checked === after[i].checked) continue;
+            const { paraFrom, paraTo, text } = after[i];
+            if (after[i].checked) {
+              // Just checked: append a fresh stamp, unless one is somehow already there.
+              const stamp = getStamp();
+              if (!stamp || DONE_FIELD_RE.test(text)) continue;
+              const lead = text.length === 0 || text.endsWith(" ") ? "" : " ";
+              tr.insertText(`${lead}done:: ${stamp}`, tr.mapping.map(paraTo));
+            } else {
+              // Just unchecked: remove the stamp field if there is one.
+              const m = DONE_FIELD_RE.exec(text);
+              if (!m) continue;
+              const from = paraFrom + m.index;
+              tr.delete(tr.mapping.map(from), tr.mapping.map(from + m[0].length));
+            }
+            touched = true;
+          }
+          return touched ? tr : null;
+        },
+      }),
+    ];
+  },
+});
+
+// Render the inline `done:: <date time>` field as a green "completed" pill — same decoration-overlay
+// approach as PriorityPill, so the document text stays literal `done:: …` (the source of truth is
+// untouched). The `done:: ` keyword is visually collapsed; the timestamp becomes the pill, with a
+// check glyph added via CSS `::before`.
+const donePillKey = new PluginKey("donePill");
+// Capture the keyword (incl. trailing space) and the value separately. The value runs to the next
+// known field keyword or end-of-text, so a trailing `priority:: …` on the same line isn't eaten.
+const DONE_DECO_RE =
+  /(done::\s*)([^📅🔁⏳✅\n]+?)(?=\s+(?:priority::|due::|repeat::)|\s*$)/gi;
+const DonePill = Extension.create({
+  name: "donePill",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: donePillKey,
+        props: {
+          decorations(state) {
+            const decos: Decoration[] = [];
+            state.doc.descendants((node, pos) => {
+              if (!node.isText || !node.text) return;
+              if (node.marks.some((m) => m.type.name === "code")) return;
+              const text = node.text;
+              DONE_DECO_RE.lastIndex = 0;
+              let m: RegExpExecArray | null;
+              while ((m = DONE_DECO_RE.exec(text))) {
+                const kwStart = pos + m.index;
+                const kwEnd = kwStart + m[1].length; // end of "done:: "
+                const valEnd = kwEnd + m[2].length; // end of the timestamp value
+                decos.push(Decoration.inline(kwStart, kwEnd, { class: "done-kw" }));
+                decos.push(Decoration.inline(kwEnd, valEnd, { class: "done-pill" }));
               }
             });
             return DecorationSet.create(state.doc, decos);
@@ -1665,6 +1965,8 @@ export default function Editor({
   dateFormat = "YYYY-MM-DD",
   timeFormat = "HH:mm",
   taskDateFormat = "YYYY-MM-DD",
+  stampDoneDate = true,
+  doneDateFormat = "YYYY-MM-DD HH:mm",
   pageWidth = 820,
   onPageWidthChange,
   headerSlot,
@@ -1700,6 +2002,12 @@ export default function Editor({
   onTaskToggledRef.current = onTaskToggled;
   const onSendTaskRef = useRef(onSendTask);
   onSendTaskRef.current = onSendTask;
+  // Builds the `done:: …` completion timestamp on demand from the user's live format setting, or ""
+  // to disable stamping entirely (CompletionStamp treats an empty stamp as "skip"). A ref so the
+  // extension (configured once) always reads the current pattern / on-off without an editor re-create.
+  const doneStampRef = useRef<() => string>(() => "");
+  doneStampRef.current = () =>
+    stampDoneDate ? formatDate(new Date(), doneDateFormat).trim() : "";
   const lastEmitted = useRef<string>(value);
   const [slash, setSlash] = useState<{ query: string; left: number; top: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -1884,8 +2192,10 @@ export default function Editor({
         TableHeader,
         TableCell,
         SubtaskRollup,
+        CompletionStamp.configure({ getStamp: () => doneStampRef.current() }),
         TagPill.configure({ onOpenTag: (tag) => onOpenTagRef.current?.(tag) }),
         PriorityPill,
+        DonePill,
         ImageNode,
         WikiLink.configure({ onOpen: (name) => onOpenPageRef.current?.(name) }),
         QueryBlock.configure({
