@@ -53,7 +53,13 @@ export async function pickVaultFolder(): Promise<string | null> {
 /** Recently-opened vaults, most-recent first. Empty before any vault is opened. */
 export async function listRecentVaults(): Promise<RecentVault[]> {
   if (isTauri()) {
-    return invoke<RecentVault[]>("list_recent_vaults");
+    // The Rust side returns `{ path, name, last_opened }`; the rest of the app (and the
+    // web build) speak `RecentVault.id`. On desktop the id *is* the absolute folder path,
+    // so map it across — otherwise `id` is undefined and opening a recent does nothing.
+    const raw = await invoke<{ path: string; name: string; last_opened: number }[]>(
+      "list_recent_vaults"
+    );
+    return raw.map((r) => ({ id: r.path, name: r.name, last_opened: r.last_opened }));
   }
   return listRecentVaultsWeb();
 }
