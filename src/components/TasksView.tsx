@@ -5,11 +5,26 @@ import {
   Funnel,
   ListBullets,
   SortAscending,
+  SortDescending,
   Stack,
   CalendarBlank,
+  CalendarDots,
+  Calendar,
   CheckCircle,
   Circle,
   Warning,
+  Flag,
+  ArrowsClockwise,
+  Hash,
+  FileText,
+  Folder,
+  Rows,
+  TextAa,
+  TreeStructure,
+  ArrowUp,
+  ArrowDown,
+  Sparkle,
+  Check,
 } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { TaskRow } from "../types";
@@ -17,10 +32,10 @@ import { upcoming } from "../recurrence";
 import { parseISODate, formatDate } from "../dateformat";
 import { labelFor, periodRange, pathFor, template, type Period } from "../periodic";
 import { stripTaskMeta } from "../markdown";
-import TaskList, { type TaskItem } from "./TaskList";
+import TaskList, { type TaskItem, PRIORITY_META } from "./TaskList";
 import TaskActionMenu, { type SendTarget } from "./TaskActionMenu";
 import { toast } from "./Toast";
-import Select from "./Select";
+import { type SelectOption } from "./Select";
 
 interface Props {
   onOpen: (relPath: string) => void;
@@ -39,10 +54,19 @@ interface Props {
 
 /** Open-task status filter. */
 type StatusFilter = "all" | "open" | "done" | "overdue";
+/** Priority buckets for the (multi-select) priority filter; "none" = no priority set. */
+type PriorityKey = "high" | "medium" | "low" | "none";
+/** Due-date window filter (single-select): by date presence or how soon it falls. */
+type DueFilter = "any" | "dated" | "undated" | "today" | "week";
+/** Task-kind filter (single-select): recurring vs one-off. */
+type TypeFilter = "any" | "recurring" | "oneoff";
+/** Whether the active tag chips combine with AND ("all") or OR ("any"). */
+type TagMatch = "all" | "any";
 /** How rows are bucketed into groups. */
-type GroupBy = "tag" | "due" | "status" | "page" | "none";
-/** Row ordering within each group. */
-type SortBy = "due-asc" | "due-desc" | "alpha";
+type GroupBy = "tag" | "due" | "priority" | "status" | "page" | "folder" | "none";
+/** Row ordering within each group. "doc" keeps each page's source (document) order — the only
+ *  ordering that was previously possible in the hierarchical Page/Folder/None groupings. */
+type SortBy = "doc" | "due-asc" | "due-desc" | "prio-desc" | "alpha";
 /**
  * When a flat group contains parent tasks that have children, what the active task-sort applies to:
  * - "all": sort parents, and recursively sort each parent's children (hierarchy preserved).
@@ -70,36 +94,59 @@ const STATUS_OPTIONS = [
   { value: "done", label: "Done" },
   { value: "overdue", label: "Overdue" },
 ];
-const GROUP_OPTIONS = [
-  { value: "tag", label: "Tag" },
-  { value: "due", label: "Due date" },
-  { value: "status", label: "Status" },
-  { value: "page", label: "Page" },
+/** Priority filter chips (multi-select). Colour-coded by level via the `--prio-*` tokens. */
+const PRIORITY_FILTER_OPTIONS: { value: PriorityKey; label: string }[] = [
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
   { value: "none", label: "None" },
 ];
-const SORT_OPTIONS = [
-  { value: "due-asc", label: "Due ↑ (soonest)" },
-  { value: "due-desc", label: "Due ↓ (latest)" },
-  { value: "alpha", label: "A → Z" },
+const DUE_FILTER_OPTIONS = [
+  { value: "any", label: "Any" },
+  { value: "dated", label: "Has date" },
+  { value: "undated", label: "No date" },
+  { value: "today", label: "Today" },
+  { value: "week", label: "This week" },
 ];
-const SORT_SCOPE_OPTIONS = [
-  { value: "all", label: "Sort ALL (keep hierarchy)" },
-  { value: "parents", label: "Parents only" },
-  { value: "children", label: "Children only" },
+const TYPE_FILTER_OPTIONS = [
+  { value: "any", label: "Any" },
+  { value: "recurring", label: "Recurring" },
+  { value: "oneoff", label: "One-off" },
 ];
-const GROUP_SORT_OPTIONS = [
-  { value: "default", label: "Default order" },
-  { value: "name-asc", label: "Name A → Z" },
-  { value: "name-desc", label: "Name Z → A" },
-  { value: "count-desc", label: "Most tasks" },
-  { value: "count-asc", label: "Fewest tasks" },
-  { value: "due-asc", label: "Soonest due" },
+const GROUP_OPTIONS: SelectOption[] = [
+  { value: "tag", label: "Tag", icon: <Hash size={15} /> },
+  { value: "due", label: "Due date", icon: <CalendarBlank size={15} /> },
+  { value: "priority", label: "Priority", icon: <Flag size={15} /> },
+  { value: "status", label: "Status", icon: <CheckCircle size={15} /> },
+  { value: "page", label: "Page", icon: <FileText size={15} /> },
+  { value: "folder", label: "Folder", icon: <Folder size={15} /> },
+  { value: "none", label: "None", icon: <Rows size={15} /> },
 ];
-const DUE_PERIOD_OPTIONS = [
-  { value: "smart", label: "Smart (Overdue / Today / …)" },
-  { value: "day", label: "By day" },
-  { value: "week", label: "By week" },
-  { value: "month", label: "By month" },
+const SORT_OPTIONS: SelectOption[] = [
+  { value: "doc", label: "Document order", icon: <ListBullets size={15} /> },
+  { value: "due-asc", label: "Due ↑ (soonest)", icon: <SortAscending size={15} /> },
+  { value: "due-desc", label: "Due ↓ (latest)", icon: <SortDescending size={15} /> },
+  { value: "prio-desc", label: "Priority (high → low)", icon: <Flag size={15} /> },
+  { value: "alpha", label: "A → Z", icon: <TextAa size={15} /> },
+];
+const SORT_SCOPE_OPTIONS: SelectOption[] = [
+  { value: "all", label: "Sort ALL (keep hierarchy)", icon: <TreeStructure size={15} /> },
+  { value: "parents", label: "Parents only", icon: <ArrowUp size={15} /> },
+  { value: "children", label: "Children only", icon: <ArrowDown size={15} /> },
+];
+const GROUP_SORT_OPTIONS: SelectOption[] = [
+  { value: "default", label: "Default order", icon: <Stack size={15} /> },
+  { value: "name-asc", label: "Name A → Z", icon: <SortAscending size={15} /> },
+  { value: "name-desc", label: "Name Z → A", icon: <SortDescending size={15} /> },
+  { value: "count-desc", label: "Most tasks", icon: <Hash size={15} /> },
+  { value: "count-asc", label: "Fewest tasks", icon: <Hash size={15} /> },
+  { value: "due-asc", label: "Soonest due", icon: <CalendarBlank size={15} /> },
+];
+const DUE_PERIOD_OPTIONS: SelectOption[] = [
+  { value: "smart", label: "Smart (Overdue / Today / …)", icon: <Sparkle size={15} /> },
+  { value: "day", label: "By day", icon: <CalendarBlank size={15} /> },
+  { value: "week", label: "By week", icon: <CalendarDots size={15} /> },
+  { value: "month", label: "By month", icon: <Calendar size={15} /> },
 ];
 
 /** Start-of-today, memo-friendly (recomputed only when rows change). */
@@ -161,6 +208,35 @@ function pageName(relPath: string): string {
   return (relPath.split("/").pop() ?? relPath).replace(/\.md$/i, "");
 }
 
+/** Containing folder of a page path; pages at the vault root bucket under "Vault root". */
+function folderName(relPath: string): string {
+  const i = relPath.lastIndexOf("/");
+  return i === -1 ? "Vault root" : relPath.slice(0, i);
+}
+
+/** Priority bucket key for a task (for filtering): its level, or "none" when unset. */
+function prioKey(t: TaskItem): PriorityKey {
+  return (t.priority as PriorityKey) || "none";
+}
+
+/** Ordering weight for a task's priority (high=3 … none=0), used by the priority sort. */
+function prioWeight(t: TaskItem): number {
+  return t.priority && PRIORITY_META[t.priority] ? PRIORITY_META[t.priority].weight : 0;
+}
+
+/** True when a task's due date satisfies the due-window filter (presence / today / this week). */
+function dueMatches(t: TaskItem, filter: DueFilter, today: Date): boolean {
+  if (filter === "any") return true;
+  if (filter === "dated") return !!t.due;
+  if (filter === "undated") return !t.due;
+  if (!t.due) return false;
+  const due = parseISODate(t.due).getTime();
+  const day = 86400000;
+  if (filter === "today") return due >= today.getTime() && due < today.getTime() + day;
+  if (filter === "week") return due >= today.getTime() && due < today.getTime() + day * 7;
+  return true;
+}
+
 /**
  * Persist the Tasks toolbar (search/filter/group/sort) in localStorage so leaving the page and
  * coming back restores the same view. Mirrors App.tsx's `pp.`-prefixed UI-state convention.
@@ -169,7 +245,11 @@ const TASKS_STATE_KEY = "pp.tasksView";
 interface TasksState {
   query: string;
   status: StatusFilter;
+  activePrios: PriorityKey[];
+  dueFilter: DueFilter;
+  typeFilter: TypeFilter;
   activeTags: string[];
+  tagMatch: TagMatch;
   groupBy: GroupBy;
   sortBy: SortBy;
   sortScope: SortScope;
@@ -201,6 +281,55 @@ function taskKey(t: TaskItem): string {
  * depth visible in the bucket so indentation always starts at the left edge.
  */
 function nestRows(items: TaskItem[], matchedKeys: Set<string>, byKey: Map<string, TaskItem>): TaskItem[] {
+  // Pull in any unmatched ancestors as faint context rows, then group by page.
+  const byPage = withAncestors(items, matchedKeys, byKey);
+
+  // Within each page emit rows in document order with depth re-based to that page's shallowest visible
+  // task — so indentation always starts at the gutter even when only a deep subtask matched. Pages are
+  // ordered by path for a stable layout.
+  const out: TaskItem[] = [];
+  for (const [, pageRows] of [...byPage.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    pageRows.sort((a, b) => a.line - b.line);
+    const base = pageRows.reduce((min, r) => Math.min(min, r.depth ?? 0), Infinity);
+    const norm = Number.isFinite(base) ? base : 0;
+    for (const r of pageRows) out.push({ ...r, depth: (r.depth ?? 0) - norm });
+  }
+  return out;
+}
+
+/**
+ * Like {@link nestRows}, but sorts the rows *within each page* by the active task-sort while keeping
+ * the parent→child tree intact (via {@link flatSorted}). Used by the hierarchical groupings
+ * (Page/Folder/None) when a sort other than "Document order" is chosen — so e.g. grouping by Page can
+ * still list each page's tasks soonest-due-first. Pages themselves stay path-ordered; injected
+ * ancestors come along as context rows so deep subtasks never render orphaned.
+ */
+function nestSorted(
+  items: TaskItem[],
+  matchedKeys: Set<string>,
+  byKey: Map<string, TaskItem>,
+  sortBy: SortBy,
+  scope: SortScope
+): TaskItem[] {
+  const byPage = withAncestors(items, matchedKeys, byKey);
+  const out: TaskItem[] = [];
+  for (const [, pageRows] of [...byPage.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    // flatSorted rebuilds the page's forest, sorts per scope, and re-bases depth to the gutter.
+    out.push(...flatSorted(pageRows, sortBy, scope));
+  }
+  return out;
+}
+
+/**
+ * Re-introduce every matched row's unmatched ancestors as faint `contextOnly` rows (so a deep subtask
+ * never renders orphaned), then bucket all rows — matches and injected ancestors — by their page path.
+ * Shared by the document-order ({@link nestRows}) and sorted ({@link nestSorted}) hierarchical paths.
+ */
+function withAncestors(
+  items: TaskItem[],
+  matchedKeys: Set<string>,
+  byKey: Map<string, TaskItem>
+): Map<string, TaskItem[]> {
   // Render every matched row as-is (a recurring task contributes several rows sharing one line, so we
   // must not dedup them by key). Track which task keys are already present so we don't double-add an
   // ancestor that also matched.
@@ -220,27 +349,25 @@ function nestRows(items: TaskItem[], matchedKeys: Set<string>, byKey: Map<string
     }
   }
 
-  // Group the rows by page, then within each page emit them in document order with depth re-based to
-  // that page's shallowest visible task — so indentation always starts at the gutter even when only a
-  // deep subtask matched. Pages are ordered by path for a stable layout.
   const byPage = new Map<string, TaskItem[]>();
   for (const r of [...items, ...ancestors.values()]) {
     if (!byPage.has(r.rel_path)) byPage.set(r.rel_path, []);
     byPage.get(r.rel_path)!.push(r);
   }
-  const out: TaskItem[] = [];
-  for (const [, pageRows] of [...byPage.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    pageRows.sort((a, b) => a.line - b.line);
-    const base = pageRows.reduce((min, r) => Math.min(min, r.depth ?? 0), Infinity);
-    const norm = Number.isFinite(base) ? base : 0;
-    for (const r of pageRows) out.push({ ...r, depth: (r.depth ?? 0) - norm });
-  }
-  return out;
+  return byPage;
 }
 
-/** Compare two rows by the active task-sort (A→Z, or due ascending/descending). */
+/** Compare two rows by the active task-sort (document order, A→Z, priority, or due asc/desc). */
 function sortCmp(a: TaskItem, b: TaskItem, sortBy: SortBy): number {
+  // Document order = source line order within a page (callers only compare rows from one page).
+  if (sortBy === "doc") return a.line - b.line;
   if (sortBy === "alpha") return a.text.localeCompare(b.text);
+  if (sortBy === "prio-desc") {
+    // Most-urgent first; tasks of equal priority fall back to soonest due so the order stays useful.
+    const d = prioWeight(b) - prioWeight(a);
+    if (d !== 0) return d;
+    return (a.due ?? "9999").localeCompare(b.due ?? "9999");
+  }
   const cmp = (a.due ?? "9999").localeCompare(b.due ?? "9999");
   return sortBy === "due-desc" ? -cmp : cmp;
 }
@@ -313,7 +440,11 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
   // Toolbar state.
   const [query, setQuery] = useState(saved.query ?? "");
   const [status, setStatus] = useState<StatusFilter>(saved.status ?? "all");
+  const [activePrios, setActivePrios] = useState<PriorityKey[]>(saved.activePrios ?? []);
+  const [dueFilter, setDueFilter] = useState<DueFilter>(saved.dueFilter ?? "any");
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>(saved.typeFilter ?? "any");
   const [activeTags, setActiveTags] = useState<string[]>(saved.activeTags ?? []);
+  const [tagMatch, setTagMatch] = useState<TagMatch>(saved.tagMatch ?? "all");
   const [groupBy, setGroupBy] = useState<GroupBy>(saved.groupBy ?? "tag");
   const [sortBy, setSortBy] = useState<SortBy>(saved.sortBy ?? "due-asc");
   const [sortScope, setSortScope] = useState<SortScope>(saved.sortScope ?? "all");
@@ -323,13 +454,16 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
 
   // Persist toolbar state whenever any part of it changes.
   useEffect(() => {
-    const state: TasksState = { query, status, activeTags, groupBy, sortBy, sortScope, groupSort, duePeriod, showAhead };
+    const state: TasksState = {
+      query, status, activePrios, dueFilter, typeFilter, activeTags, tagMatch,
+      groupBy, sortBy, sortScope, groupSort, duePeriod, showAhead,
+    };
     try {
       localStorage.setItem(TASKS_STATE_KEY, JSON.stringify(state));
     } catch {
       /* storage may be unavailable; restoring is best-effort */
     }
-  }, [query, status, activeTags, groupBy, sortBy, sortScope, groupSort, duePeriod, showAhead]);
+  }, [query, status, activePrios, dueFilter, typeFilter, activeTags, tagMatch, groupBy, sortBy, sortScope, groupSort, duePeriod, showAhead]);
 
   const reload = () => api.listTasks().then(setRows).catch(console.error);
 
@@ -457,13 +591,14 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
     return { total, open, done, overdue, pct };
   }, [allTasks]);
 
-  // When grouping by Page (or not grouping), tasks within a page stay in document order and we
-  // reconstruct the parent→child tree. The other groupings (tag/status/due) can scatter a parent
-  // and child into different buckets, so there we render every matching task flat at depth 0.
-  const hierarchical = groupBy === "page" || groupBy === "none";
+  // When grouping by Page/Folder (or not grouping) we reconstruct the parent→child tree per page. By
+  // default rows stay in document order; choosing any other task-sort orders them within each page
+  // while keeping the tree intact (see nestSorted). The other groupings (tag/status/due/priority) can
+  // scatter a parent and child into different buckets, so there we render every matching task flat.
+  const hierarchical = groupBy === "page" || groupBy === "folder" || groupBy === "none";
 
-  // Apply search + status + tag filters. Keep the set of matched keys so we can re-introduce a
-  // matched subtask's ancestors as faint context rows (per the "always nest, keep parents" rule).
+  // Apply search + status + priority + due + type + tag filters. Keep the set of matched keys so we
+  // can re-introduce a matched subtask's ancestors as faint context rows (the "always nest" rule).
   const { matched, matchedKeys } = useMemo(() => {
     const today = startOfToday();
     const q = query.trim().toLowerCase();
@@ -473,11 +608,21 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
       if (status === "open" && t.done) return false;
       if (status === "done" && !t.done) return false;
       if (status === "overdue" && !isOverdue(t, today)) return false;
-      if (activeTags.length && !activeTags.every((tg) => t.tags.includes(tg))) return false;
+      if (activePrios.length && !activePrios.includes(prioKey(t))) return false;
+      if (!dueMatches(t, dueFilter, today)) return false;
+      if (typeFilter === "recurring" && !t.recurring) return false;
+      if (typeFilter === "oneoff" && t.recurring) return false;
+      if (activeTags.length) {
+        const ok =
+          tagMatch === "all"
+            ? activeTags.every((tg) => t.tags.includes(tg))
+            : activeTags.some((tg) => t.tags.includes(tg));
+        if (!ok) return false;
+      }
       return true;
     });
     return { matched, matchedKeys: new Set(matched.map(taskKey)) };
-  }, [allTasks, query, status, activeTags]);
+  }, [allTasks, query, status, activePrios, dueFilter, typeFilter, activeTags, tagMatch]);
 
   // Per-page index of real (non-virtual) tasks by key, for walking parent chains.
   const byKey = useMemo(() => {
@@ -512,6 +657,10 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
         ? t.tags[0]
           ? `#${t.tags[0]}`
           : "Untagged"
+        : groupBy === "priority"
+        ? t.priority && PRIORITY_META[t.priority]
+          ? PRIORITY_META[t.priority].label
+          : "No priority"
         : groupBy === "status"
         ? t.done
           ? "Done"
@@ -520,6 +669,8 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
           : "Open"
         : groupBy === "page"
         ? pageName(t.rel_path)
+        : groupBy === "folder"
+        ? folderName(t.rel_path)
         : groupBy === "due"
         ? dueBucket(t, today)
         : "All tasks";
@@ -552,26 +703,38 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
     else if (groupBy === "status") {
       const order = ["Overdue", "Open", "Done"];
       entries.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+    } else if (groupBy === "priority") {
+      // Most-urgent bucket first, unset priority last.
+      const order = ["High", "Medium", "Low", "No priority"];
+      entries.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
     } else if (groupBy !== "none") entries.sort((a, b) => a[0].localeCompare(b[0]));
 
-    // Within each bucket, build the render list.
+    // Within each bucket, build the render list. Hierarchical groups stay in document order ("doc")
+    // by default, but honour any other task-sort within each page; flat groups always sort.
     return entries.map(([name, items]) => {
       const rows = hierarchical
-        ? nestRows(items, matchedKeys, byKey)
+        ? sortBy === "doc"
+          ? nestRows(items, matchedKeys, byKey)
+          : nestSorted(items, matchedKeys, byKey, sortBy, sortScope)
         : flatSorted(items, sortBy, sortScope);
       return [name, rows] as const;
     });
   }, [matched, matchedKeys, byKey, groupBy, sortBy, sortScope, groupSort, duePeriod, dateFormat, hierarchical]);
 
-  // Whether any flat bucket actually contains a parent with a child alongside it — only then is the
-  // parent/child sort-scope choice meaningful, so the scope picker is offered conditionally.
+  // Whether any bucket actually contains a parent with a child alongside it — only then is the
+  // parent/child sort-scope choice meaningful, so the scope picker is offered conditionally. (Now that
+  // hierarchical groups can be sorted too, this is no longer restricted to the flat groupings.)
   const sortHasNesting = useMemo(() => {
-    if (hierarchical) return false;
     return groups.some(([, rows]) => bucketHasNesting(rows));
-  }, [groups, hierarchical]);
+  }, [groups]);
 
   const today = startOfToday();
-  const filterCount = (status !== "all" ? 1 : 0) + activeTags.length;
+  const filterCount =
+    (status !== "all" ? 1 : 0) +
+    activePrios.length +
+    (dueFilter !== "any" ? 1 : 0) +
+    (typeFilter !== "any" ? 1 : 0) +
+    activeTags.length;
   const hasTasks = allTasks.length > 0;
   const hasResults = resultCount > 0;
 
@@ -585,17 +748,40 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
         </label>
       </div>
 
-      {/* Aggregation summary — live counts + completion bar. */}
+      {/* Aggregation summary — live counts + completion bar. The count pills double as a quick
+          status filter: clicking one sets the Status filter (re-clicking the active one clears it
+          back to "all"). */}
       {hasTasks && (
         <div className="tasks-summary">
-          <Stat icon={<ListBullets size={15} />} label="Total" value={stats.total} />
-          <Stat icon={<Circle size={15} />} label="Open" value={stats.open} />
-          <Stat icon={<CheckCircle size={15} weight="fill" />} label="Done" value={stats.done} tone="accent" />
+          <Stat
+            icon={<ListBullets size={15} />}
+            label="Total"
+            value={stats.total}
+            active={status === "all"}
+            onClick={() => setStatus("all")}
+          />
+          <Stat
+            icon={<Circle size={15} />}
+            label="Open"
+            value={stats.open}
+            active={status === "open"}
+            onClick={() => setStatus(status === "open" ? "all" : "open")}
+          />
+          <Stat
+            icon={<CheckCircle size={15} weight="fill" />}
+            label="Done"
+            value={stats.done}
+            tone="accent"
+            active={status === "done"}
+            onClick={() => setStatus(status === "done" ? "all" : "done")}
+          />
           <Stat
             icon={<Warning size={15} weight="fill" />}
             label="Overdue"
             value={stats.overdue}
             tone={stats.overdue ? "danger" : undefined}
+            active={status === "overdue"}
+            onClick={() => setStatus(status === "overdue" ? "all" : "overdue")}
           />
           <div className="tasks-progress" title={`${stats.pct}% complete`}>
             <div className="tasks-progress-bar">
@@ -645,24 +831,30 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
               <Stack size={14} /> Sort groups
             </ToolBtn>
           )}
-          {/* In hierarchical groupings (Page/None) rows follow document order to keep the tree intact,
-              so task sorting only applies to the flat groupings. */}
-          {!hierarchical && (
-            <ToolBtn
-              active={sortBy !== "due-asc" || (sortHasNesting && sortScope !== "all")}
-              onClick={() => setOpenPop(openPop === "sort" ? null : "sort")}
-            >
-              <SortAscending size={14} /> Sort tasks
-            </ToolBtn>
-          )}
+          {/* Task sorting applies inside every grouping now: flat groups sort directly, hierarchical
+              groups (Page/Folder/None) sort within each page while keeping the parent→child tree. */}
+          <ToolBtn
+            active={sortBy !== "due-asc" || (sortHasNesting && sortScope !== "all")}
+            onClick={() => setOpenPop(openPop === "sort" ? null : "sort")}
+          >
+            <SortAscending size={14} /> Sort tasks
+          </ToolBtn>
 
           {openPop === "filter" && (
             <FilterPopover
               status={status}
               setStatus={setStatus}
+              activePrios={activePrios}
+              setActivePrios={setActivePrios}
+              dueFilter={dueFilter}
+              setDueFilter={setDueFilter}
+              typeFilter={typeFilter}
+              setTypeFilter={setTypeFilter}
               allTags={allTags}
               activeTags={activeTags}
               setActiveTags={setActiveTags}
+              tagMatch={tagMatch}
+              setTagMatch={setTagMatch}
               onClose={() => setOpenPop(null)}
             />
           )}
@@ -693,7 +885,7 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
               onClose={() => setOpenPop(null)}
             />
           )}
-          {openPop === "sort" && !hierarchical && (
+          {openPop === "sort" && (
             <SortPopover
               sortBy={sortBy}
               onSortBy={(v) => setSortBy(v)}
@@ -767,24 +959,34 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
   );
 }
 
-/* ---- Summary stat pill ---------------------------------------------------------------------- */
+/* ---- Summary stat pill (doubles as a one-click status filter) ------------------------------- */
 function Stat({
   icon,
   label,
   value,
   tone,
+  active,
+  onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   value: number;
   tone?: "accent" | "danger";
+  active?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <div className={`tasks-stat${tone ? ` ${tone}` : ""}`}>
+    <button
+      type="button"
+      className={`tasks-stat${tone ? ` ${tone}` : ""}${active ? " active" : ""}`}
+      onClick={onClick}
+      aria-pressed={active}
+      title={`Filter by ${label}`}
+    >
       <span className="tasks-stat-icon">{icon}</span>
       <span className="tasks-stat-value">{value}</span>
       <span className="tasks-stat-label">{label}</span>
-    </div>
+    </button>
   );
 }
 
@@ -817,26 +1019,47 @@ function useDismiss(onClose: () => void) {
   return ref;
 }
 
-/* ---- Filter popover: status segmented control + tag chips ----------------------------------- */
+/* ---- Filter popover: status / priority / due / type / tags, all behind one toolbar button -----
+   Single-select dimensions render as segmented controls; multi-select ones (priority, tags) render
+   as toggleable chips. Sections for priority/tags only appear when there's data to act on. */
 function FilterPopover({
   status,
   setStatus,
+  activePrios,
+  setActivePrios,
+  dueFilter,
+  setDueFilter,
+  typeFilter,
+  setTypeFilter,
   allTags,
   activeTags,
   setActiveTags,
+  tagMatch,
+  setTagMatch,
   onClose,
 }: {
   status: StatusFilter;
   setStatus: (s: StatusFilter) => void;
+  activePrios: PriorityKey[];
+  setActivePrios: (p: PriorityKey[]) => void;
+  dueFilter: DueFilter;
+  setDueFilter: (d: DueFilter) => void;
+  typeFilter: TypeFilter;
+  setTypeFilter: (t: TypeFilter) => void;
   allTags: string[];
   activeTags: string[];
   setActiveTags: (t: string[]) => void;
+  tagMatch: TagMatch;
+  setTagMatch: (m: TagMatch) => void;
   onClose: () => void;
 }) {
   const ref = useDismiss(onClose);
   const toggleTag = (tag: string) =>
     setActiveTags(activeTags.includes(tag) ? activeTags.filter((t) => t !== tag) : [...activeTags, tag]);
-  const dirty = status !== "all" || activeTags.length > 0;
+  const togglePrio = (p: PriorityKey) =>
+    setActivePrios(activePrios.includes(p) ? activePrios.filter((x) => x !== p) : [...activePrios, p]);
+  const dirty =
+    status !== "all" || activePrios.length > 0 || dueFilter !== "any" || typeFilter !== "any" || activeTags.length > 0;
 
   return (
     <div className="db-popover tasks-pop" ref={ref}>
@@ -847,6 +1070,9 @@ function FilterPopover({
             className="tasks-pop-reset"
             onClick={() => {
               setStatus("all");
+              setActivePrios([]);
+              setDueFilter("any");
+              setTypeFilter("any");
               setActiveTags([]);
             }}
           >
@@ -868,15 +1094,69 @@ function FilterPopover({
         ))}
       </div>
 
+      <div className="tasks-pop-label">Priority</div>
+      <div className="tasks-chip-row">
+        {PRIORITY_FILTER_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            className={`tasks-chip tasks-prio-chip prio-${o.value}${activePrios.includes(o.value) ? " active" : ""}`}
+            onClick={() => togglePrio(o.value)}
+            aria-pressed={activePrios.includes(o.value)}
+          >
+            <Flag size={11} weight={o.value === "none" ? "regular" : "fill"} />
+            {o.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="tasks-pop-label">Due</div>
+      <div className="seg tasks-seg-wrap">
+        {DUE_FILTER_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            className={`tasks-seg-btn${dueFilter === o.value ? " active" : ""}`}
+            onClick={() => setDueFilter(o.value as DueFilter)}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="tasks-pop-label">Type</div>
+      <div className="seg tasks-seg-wrap">
+        {TYPE_FILTER_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            className={`tasks-seg-btn${typeFilter === o.value ? " active" : ""}`}
+            onClick={() => setTypeFilter(o.value as TypeFilter)}
+          >
+            {o.value === "recurring" && <ArrowsClockwise size={11} weight="bold" />}
+            {o.label}
+          </button>
+        ))}
+      </div>
+
       {allTags.length > 0 && (
         <>
-          <div className="tasks-pop-label">Tags</div>
+          <div className="tasks-pop-label tasks-pop-label-row">
+            <span>Tags</span>
+            {/* Combine the selected tags with AND ("all") or OR ("any"); only matters with 2+ selected. */}
+            <span className="tasks-match-toggle" role="group" aria-label="Combine tags with">
+              <button className={tagMatch === "all" ? "active" : ""} onClick={() => setTagMatch("all")}>
+                All
+              </button>
+              <button className={tagMatch === "any" ? "active" : ""} onClick={() => setTagMatch("any")}>
+                Any
+              </button>
+            </span>
+          </div>
           <div className="tasks-tag-chips">
             {allTags.map((tag) => (
               <button
                 key={tag}
                 className={`tasks-chip${activeTags.includes(tag) ? " active" : ""}`}
                 onClick={() => toggleTag(tag)}
+                aria-pressed={activeTags.includes(tag)}
               >
                 #{tag}
               </button>
@@ -888,7 +1168,63 @@ function FilterPopover({
   );
 }
 
-/* ---- Single-choice popover (Group by / Sort by), using the shared Select for keyboard nav --- */
+/* ---- Inline single-choice list: the options ARE the menu, shown the moment the popover opens, so
+   picking takes a single click (no nested collapsed dropdown to expand first). Mirrors the Select
+   option row visually; `<button>`s keep it keyboard-reachable, with Arrow Up/Down roving focus and
+   focus landing on the current choice when shown. --------------------------------------------------- */
+function ChoiceList({
+  value,
+  options,
+  onPick,
+  autoFocus,
+}: {
+  value: string;
+  options: SelectOption[];
+  onPick: (v: string) => void;
+  autoFocus?: boolean;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!autoFocus) return;
+    (listRef.current?.querySelector<HTMLElement>('[data-selected="true"]') ??
+      listRef.current?.querySelector<HTMLElement>("button"))?.focus();
+  }, [autoFocus]);
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const items = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+    const i = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === "ArrowDown" ? Math.min(i + 1, items.length - 1) : Math.max(i - 1, 0);
+    items[next < 0 ? 0 : next]?.focus();
+  };
+
+  return (
+    <div className="tasks-choice-list" role="listbox" ref={listRef} onKeyDown={onKeyDown}>
+      {options.map((o) => {
+        const sel = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="option"
+            aria-selected={sel}
+            data-selected={sel}
+            className={`tasks-choice-item${sel ? " selected" : ""}`}
+            onClick={() => onPick(o.value)}
+          >
+            {o.icon && <span className="tasks-choice-icon">{o.icon}</span>}
+            <span className="tasks-choice-label">{o.label}</span>
+            {sel && <Check size={14} weight="bold" className="tasks-choice-check" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---- Single-choice popover (Group by / Due period / Sort groups): the option list shows directly,
+   and picking applies it and closes — one click to open, one click to choose. */
 function ChoicePopover({
   title,
   value,
@@ -898,7 +1234,7 @@ function ChoicePopover({
 }: {
   title: string;
   value: string;
-  options: { value: string; label: string }[];
+  options: SelectOption[];
   onChange: (v: string) => void;
   onClose: () => void;
 }) {
@@ -908,14 +1244,22 @@ function ChoicePopover({
       <div className="db-popover-head">
         <span>{title}</span>
       </div>
-      <Select value={value} options={options} onChange={onChange} ariaLabel={title} />
+      <ChoiceList
+        value={value}
+        options={options}
+        autoFocus
+        onPick={(v) => {
+          onChange(v);
+          onClose();
+        }}
+      />
     </div>
   );
 }
 
 /* ---- Sort-tasks popover: order + (when the view has nested tasks) the parent/child scope -------
-   The scope picker only appears when the visible results actually contain a parent with a child
-   alongside it — otherwise "Sort ALL / Parents only / Children only" would be a no-op choice. */
+   Both lists show directly. With no nesting, the order is the only decision, so picking it closes;
+   when the scope picker is present the popover stays open until you pick a scope (the final say). */
 function SortPopover({
   sortBy,
   onSortBy,
@@ -937,20 +1281,25 @@ function SortPopover({
       <div className="db-popover-head">
         <span>Sort tasks by</span>
       </div>
-      <Select
+      <ChoiceList
         value={sortBy}
         options={SORT_OPTIONS}
-        onChange={(v) => onSortBy(v as SortBy)}
-        ariaLabel="Sort tasks by"
+        autoFocus
+        onPick={(v) => {
+          onSortBy(v as SortBy);
+          if (!hasNesting) onClose();
+        }}
       />
       {hasNesting && (
         <>
           <div className="tasks-pop-label">Some tasks have children — apply sort to</div>
-          <Select
+          <ChoiceList
             value={scope}
             options={SORT_SCOPE_OPTIONS}
-            onChange={(v) => onScope(v as SortScope)}
-            ariaLabel="Sort scope"
+            onPick={(v) => {
+              onScope(v as SortScope);
+              onClose();
+            }}
           />
         </>
       )}

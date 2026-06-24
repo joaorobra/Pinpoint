@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CaretLeft, CaretRight } from "@phosphor-icons/react";
 import { PERIODS, Period, labelFor, pathFor, step, template } from "../periodic";
 
 interface Props {
@@ -30,11 +31,15 @@ export default function PeriodicBar({ periodicFolder, dailyFormat, onOpenPeriodi
         ))}
       </div>
       <div className="periodic-nav">
-        <button onClick={() => setAnchor((d) => step(period, d, -1))}>◀</button>
+        <button aria-label={`Previous ${period.replace(/ly$/, "")}`} title="Previous" onClick={() => setAnchor((d) => step(period, d, -1))}>
+          <CaretLeft size={15} weight="bold" />
+        </button>
         <button className="periodic-label" onClick={go} title="Open / create this note">
           {labelFor(period, anchor, dailyFormat)}
         </button>
-        <button onClick={() => setAnchor((d) => step(period, d, 1))}>▶</button>
+        <button aria-label={`Next ${period.replace(/ly$/, "")}`} title="Next" onClick={() => setAnchor((d) => step(period, d, 1))}>
+          <CaretRight size={15} weight="bold" />
+        </button>
         <button className="today" onClick={() => setAnchor(new Date())}>
           Today
         </button>

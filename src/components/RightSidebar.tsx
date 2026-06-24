@@ -7,11 +7,12 @@ import {
   NotePencil,
   CheckCircle,
   Circle,
+  Flag,
 } from "@phosphor-icons/react";
 import { pathFor, template, labelFor, step, type Period } from "../periodic";
 import { api } from "../api";
 import { formatDate } from "../dateformat";
-import { stripTaskMeta } from "../markdown";
+import { stripTaskMeta, inlineMd } from "../markdown";
 import type { TaskRow } from "../types";
 
 type RightTab = "hierarchy" | "calendar";
@@ -44,6 +45,8 @@ interface Props {
   onOpenPeriodic: (relPath: string, fallbackBody: string, period?: Period, date?: Date) => void;
   /** Open an existing page (used by the agenda to jump to a task's source). */
   onOpenPath: (relPath: string) => void;
+  /** Open a page by its `[[wikilink]]` name (clicking a wikilink inside an agenda task). */
+  onOpenName: (name: string) => void;
   /** Bumped when tasks/pages change, so the calendar agenda re-fetches. */
   taskRefresh: number;
 }
@@ -95,6 +98,7 @@ export default function RightSidebar({
   existingPaths,
   onOpenPeriodic,
   onOpenPath,
+  onOpenName,
   taskRefresh,
 }: Props) {
   const [tab, setTab] = useState<RightTab>("hierarchy");
@@ -155,6 +159,7 @@ export default function RightSidebar({
             existingPaths={existingPaths}
             onOpenPeriodic={onOpenPeriodic}
             onOpenPath={onOpenPath}
+            onOpenName={onOpenName}
             taskRefresh={taskRefresh}
           />
         )}
@@ -239,10 +244,11 @@ function Calendar({
   existingPaths,
   onOpenPeriodic,
   onOpenPath,
+  onOpenName,
   taskRefresh,
 }: Pick<
   Props,
-  "periodicFolder" | "dailyFormat" | "activePath" | "existingPaths" | "onOpenPeriodic" | "onOpenPath" | "taskRefresh"
+  "periodicFolder" | "dailyFormat" | "activePath" | "existingPaths" | "onOpenPeriodic" | "onOpenPath" | "onOpenName" | "taskRefresh"
 >) {
   // The month being viewed (anchored to its first day). Date.now() is fine in the webview runtime.
   const [view, setView] = useState<Date>(() => {
@@ -328,14 +334,34 @@ function Calendar({
     }
   };
 
-  // Agenda for the selected day: its tasks (done last), plus a link to open/create the note.
+  // Agenda for the selected day, in two sections (done sorted last within each):
+  //  • "Due today"   — tasks whose due date is this day, from anywhere in the vault.
+  //  • "In this note"— every task that lives inside this day's daily note, regardless of due date,
+  //                    minus those already listed above (a task both due-today and in the note shows once).
   const selectedKey = dayKey(selected);
-  const agendaTasks = useMemo(() => {
-    const list = tasksByDay.get(selectedKey) ?? [];
-    return [...list].sort((a, b) => Number(a.done) - Number(b.done));
-  }, [tasksByDay, selectedKey]);
   const selectedPath = pathFor(periodicFolder, "daily", selected);
   const selectedHasNote = existingPaths.has(selectedPath);
+  const { dueTasks, pageTasks } = useMemo(() => {
+    const byDone = (a: TaskRow, b: TaskRow) => Number(a.done) - Number(b.done);
+    // "Due today" is pulled from across pages by due date — there's no coherent tree, so it stays a
+    // flat list with done last and no indentation.
+    const dueTasks = [...(tasksByDay.get(selectedKey) ?? [])]
+      .sort(byDone)
+      .map((t) => ({ task: t, depth: 0 }));
+    const dueKeys = new Set(dueTasks.map((d) => `${d.task.rel_path}:${d.task.line}`));
+    // "In this note" is one page's tasks — keep document order (by source line) so the parent→child
+    // hierarchy reads top-to-bottom, and indent each row by its nesting depth re-based to the
+    // shallowest visible task (so indentation always starts at the gutter even if no top-level task
+    // is present). Done-sorting would scatter children away from parents, so we don't sort here.
+    const inNote = tasks
+      .filter((t) => t.rel_path === selectedPath && !dueKeys.has(`${t.rel_path}:${t.line}`))
+      .sort((a, b) => a.line - b.line);
+    const base = inNote.reduce((min, t) => Math.min(min, t.depth ?? 0), Infinity);
+    const norm = Number.isFinite(base) ? base : 0;
+    const pageTasks = inNote.map((t) => ({ task: t, depth: (t.depth ?? 0) - norm }));
+    return { dueTasks, pageTasks };
+  }, [tasks, tasksByDay, selectedKey, selectedPath]);
+  const agendaCount = dueTasks.length + pageTasks.length;
 
   return (
     <div className="calendar">
@@ -429,8 +455,8 @@ function Calendar({
         >
           <span className="cal-agenda-date">
             {labelForDay(selected, dailyFormat)}
-            {agendaTasks.length > 0 && (
-              <span className="cal-agenda-count">{agendaTasks.length}</span>
+            {agendaCount > 0 && (
+              <span className="cal-agenda-count">{agendaCount}</span>
             )}
           </span>
           <span className={"cal-agenda-open" + (selectedHasNote ? " exists" : "")}>
@@ -438,28 +464,31 @@ function Calendar({
             {selectedHasNote ? "Open" : "New note"}
           </span>
         </button>
-        {agendaTasks.length === 0 ? (
+        {agendaCount === 0 ? (
           <button className="cal-agenda-empty" onClick={() => openDay(selected)}>
-            No tasks due — open this day’s note
+            No tasks — open this day’s note
           </button>
         ) : (
-          <ul className="cal-agenda-list">
-            {agendaTasks.map((t, i) => (
-              <li
-                key={t.rel_path + ":" + t.line + ":" + i}
-                className={"cal-agenda-task" + (t.done ? " done" : "")}
-                title={t.rel_path}
-                onClick={() => onOpenPath(t.rel_path)}
-              >
-                {t.done ? (
-                  <CheckCircle size={14} weight="fill" />
-                ) : (
-                  <Circle size={14} />
-                )}
-                <span className="cal-agenda-text">{taskLabel(t.text)}</span>
-              </li>
-            ))}
-          </ul>
+          <div className="cal-agenda-sections">
+            {dueTasks.length > 0 && (
+              <AgendaSection
+                // Only label the sections when both are present — otherwise the single list speaks
+                // for itself and a lone header is just noise.
+                label={pageTasks.length > 0 ? "Due today" : undefined}
+                tasks={dueTasks}
+                onOpenPath={onOpenPath}
+                onOpenName={onOpenName}
+              />
+            )}
+            {pageTasks.length > 0 && (
+              <AgendaSection
+                label={dueTasks.length > 0 ? "In this note" : undefined}
+                tasks={pageTasks}
+                onOpenPath={onOpenPath}
+                onOpenName={onOpenName}
+              />
+            )}
+          </div>
         )}
       </div>
 
@@ -475,12 +504,105 @@ function Calendar({
   );
 }
 
+/** One labelled list of agenda tasks (a "Due today" or "In this note" section). The label is omitted
+ *  when only one section is shown, so a single list renders headerless as before. */
+function AgendaSection({
+  label,
+  tasks,
+  onOpenPath,
+  onOpenName,
+}: {
+  label?: string;
+  /** Each row carries its (re-based) nesting depth so children indent under their parent. */
+  tasks: { task: TaskRow; depth: number }[];
+  onOpenPath: (relPath: string) => void;
+  onOpenName: (name: string) => void;
+}) {
+  return (
+    <div className="cal-agenda-section">
+      {label && <div className="cal-agenda-section-label">{label}</div>}
+      <ul className="cal-agenda-list">
+        {tasks.map(({ task: t, depth }, i) => (
+          <li
+            key={t.rel_path + ":" + t.line + ":" + i}
+            className={"cal-agenda-task" + (t.done ? " done" : "") + (depth ? " nested" : "")}
+            style={depth ? { marginLeft: `calc(var(--sp-4) * ${depth})` } : undefined}
+            title={t.rel_path}
+            onClick={() => onOpenPath(t.rel_path)}
+          >
+            {t.done ? <CheckCircle size={14} weight="fill" /> : <Circle size={14} />}
+            {/* Body: task text with #tags flowing inline right after it (wrapping with the text). The
+                priority flag is a row-level element after the body, pushed to the far right edge. */}
+            <span className="cal-agenda-body">
+              <AgendaText
+                text={t.text}
+                onOpenSource={() => onOpenPath(t.rel_path)}
+                onOpenName={onOpenName}
+              />
+              {(t.tags ?? "")
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map((tag) => (
+                  <span key={tag} className="cal-agenda-tag">
+                    #{tag}
+                  </span>
+                ))}
+            </span>
+            {t.priority && (
+              <Flag size={12} weight="fill" className={`cal-agenda-flag prio-${t.priority}`} />
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Class `inlineMd` tags a `[[wikilink]]` span with, so a click can resolve it to a page name. */
+const PAGE_LINK_ATTR = "data-page-link";
+
+/**
+ * Agenda task text rendered with the editor's inline markdown (bold, code, links, images,
+ * `[[wikilinks]]`) so the agenda never shows raw `**`/`[[ ]]`/`[ ]( )` markup — mirrors TaskList's
+ * `TaskText`. Clicks are delegated: a wikilink opens that page by name; any other click (incl. a
+ * regular markdown link, which we neutralize) opens the task's own source page.
+ */
+function AgendaText({
+  text,
+  onOpenSource,
+  onOpenName,
+}: {
+  text: string;
+  onOpenSource: () => void;
+  onOpenName: (name: string) => void;
+}) {
+  const stripped = stripTaskMeta(text);
+  const html = stripped.trim()
+    ? inlineMd(stripped)
+    : "<span class='task-untitled'>(untitled task)</span>";
+  const onClick = (e: React.MouseEvent<HTMLSpanElement>) => {
+    const link = (e.target as HTMLElement).closest(`[${PAGE_LINK_ATTR}]`);
+    if (link) {
+      e.stopPropagation();
+      onOpenName(link.getAttribute(PAGE_LINK_ATTR) ?? "");
+      return;
+    }
+    const anchor = (e.target as HTMLElement).closest("a");
+    if (anchor) e.preventDefault();
+    onOpenSource();
+  };
+  return (
+    <span
+      className="cal-agenda-text"
+      onClick={onClick}
+      // Inline markdown only (no block tags); produced by the editor's own serializer.
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
 /** A human date for the agenda header, using the user's daily-note format when available. */
 function labelForDay(d: Date, fmt?: string): string {
   return fmt ? formatDate(d, fmt) : d.toDateString();
-}
-
-/** Strip task metadata (📅/🔁 markers, #tags) for a clean agenda label. */
-function taskLabel(text: string): string {
-  return stripTaskMeta(text) || "(untitled task)";
 }

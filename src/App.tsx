@@ -42,7 +42,7 @@ import StartScreen from "./components/StartScreen";
 import type { NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS, extForMime } from "./types";
 import { collectTemplates, fillTemplate, stripCursor, type FillContext, type TemplateInfo } from "./templates";
-import type { Period } from "./periodic";
+import { pathFor, labelFor, template, type Period } from "./periodic";
 import Editor from "./components/Editor";
 import FileTree, { type SelectMods, type TreeCommands } from "./components/FileTree";
 import ContextMenu from "./components/ContextMenu";
@@ -767,6 +767,76 @@ export default function App() {
     [openPage, refreshTree, settings.periodic_templates, applyTemplate]
   );
 
+  // Editor context-menu "Send to": MOVE the task line (and its subtasks) under the caret into a
+  // periodic note — the same action as the Tasks view's "Send to", not a due-date stamp. `line` is
+  // the 0-based index of the task in the live editor's serialized markdown; we flush the open doc to
+  // disk first so that index lines up with what `moveTaskBlock` reads. If the destination note
+  // doesn't exist we ask before creating it (from the period's bound template, else the starter).
+  const onSendTaskFromEditor = useCallback(
+    async (line: number, target: { period: Period; date: Date }) => {
+      if (!activePath) return;
+      const toRel = pathFor(settings.periodic_folder, target.period, target.date);
+      const label = labelFor(target.period, target.date, settings.periodic_label_format);
+      if (toRel === activePath) {
+        toast.show({ message: "That task is already in this note." });
+        return;
+      }
+      try {
+        // Flush the open document so the on-disk body matches the line index we were handed.
+        if (saveTimer.current) {
+          window.clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        await api.writePage(activePath, frontmatter, body);
+        setDirty(false);
+
+        // Ensure the destination exists — warn before creating it, then build from the template.
+        let exists = true;
+        try {
+          await api.readPage(toRel);
+        } catch {
+          exists = false;
+        }
+        if (!exists) {
+          const ok = await dialogs.confirm({
+            title: "Create destination note?",
+            message: `“${label}” doesn’t exist yet. It will be created from the ${target.period} template before the task is moved there.`,
+            confirmLabel: "Create & move",
+          });
+          if (!ok) return;
+          let starter = template(target.period, target.date, settings.periodic_label_format);
+          const bound = settings.periodic_templates[target.period];
+          if (bound) {
+            const leaf = (toRel.split("/").pop() ?? toRel).replace(/\.md$/i, "");
+            const filled = await applyTemplate(bound, {
+              title: leaf, date: target.date, period: target.period, periodDate: target.date, relPath: toRel,
+            });
+            if (filled) starter = stripCursor(filled.body); // null = cancelled prompt → keep starter
+          }
+          await api.createPage(toRel, starter);
+          await refreshTree();
+        }
+
+        await api.moveTaskBlock(activePath, line, toRel);
+        // Reload the editor so the moved task disappears from the current doc, and refresh tasks.
+        const doc = await api.readPage(activePath);
+        setBody(doc.body);
+        setFrontmatter(doc.frontmatter);
+        setReloadKey(activePath + ":" + Date.now());
+        setTaskRefresh((k) => k + 1);
+        toast.show({
+          message: `Moved to ${label}`,
+          action: { label: "Open", run: () => openPage(toRel) },
+        });
+      } catch (e) {
+        console.error(e);
+        toast.show({ message: "Couldn’t move the task." });
+      }
+    },
+    [activePath, body, frontmatter, settings.periodic_folder, settings.periodic_label_format,
+     settings.periodic_templates, applyTemplate, refreshTree, openPage]
+  );
+
   const onEditorChange = useCallback(
     (md: string) => {
       setBody(md);
@@ -1251,6 +1321,87 @@ export default function App() {
       setTaskRefresh((k) => k + 1);
     },
     [activePath, openPage, openAsset, refreshTree]
+  );
+
+  // Move one or more nodes into a destination folder (destDir = "" is the vault root) by renaming
+  // each to `<destDir>/<leaf>`. This is the drop handler for sidebar drag-and-drop. It reuses the
+  // same icon / open-tab / history re-keying as a rename, since a move is a rename to a new parent.
+  const moveNodes = useCallback(
+    async (paths: string[], destDir: string) => {
+      // Resolve each path to its node for ext / is_dir, via a flat tree lookup.
+      const byPath = new Map<string, TreeNode>();
+      const index = (n: TreeNode) => {
+        if (n.rel_path) byPath.set(n.rel_path, n);
+        n.children.forEach(index);
+      };
+      if (tree) index(tree);
+
+      // Skip no-op and invalid moves: a node already in destDir, dropping a folder into itself or a
+      // descendant, or dropping onto its own current parent.
+      const plans: { from: string; to: string; node: TreeNode }[] = [];
+      for (const from of paths) {
+        const node = byPath.get(from);
+        if (!node) continue;
+        const parent = from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : "";
+        if (parent === destDir) continue; // already here
+        if (node.is_dir && (destDir === from || destDir.startsWith(from + "/"))) continue; // into self/descendant
+        const leaf = from.split("/").pop() ?? from;
+        const to = destDir ? `${destDir}/${leaf}` : leaf;
+        plans.push({ from, to, node });
+      }
+      if (!plans.length) return;
+
+      // Deepest paths first so a folder's descendants move before the folder itself re-keys them.
+      plans.sort((a, b) => b.from.split("/").length - a.from.split("/").length);
+      const failed: string[] = [];
+      for (const { from, to, node } of plans) {
+        try {
+          await api.renamePath(from, to);
+        } catch (e) {
+          failed.push(`${from} → ${to}: ${String(e)}`);
+          continue;
+        }
+        // Carry icon overrides across to the new path (and re-key descendants for folders).
+        setSettings((prev) => {
+          const fromPrefix = from + "/";
+          const toPrefix = to + "/";
+          let changed = false;
+          const node_icons: Record<string, NodeIcon> = {};
+          for (const [key, val] of Object.entries(prev.node_icons)) {
+            if (key === from) {
+              node_icons[to] = val;
+              changed = true;
+            } else if (node.is_dir && key.startsWith(fromPrefix)) {
+              node_icons[toPrefix + key.slice(fromPrefix.length)] = val;
+              changed = true;
+            } else {
+              node_icons[key] = val;
+            }
+          }
+          if (!changed) return prev;
+          const next = { ...prev, node_icons };
+          api.saveSettings(next).catch(console.error);
+          return next;
+        });
+        // Re-key open tabs + history entries for the moved path (and a folder's descendants).
+        const fromPrefix = from + "/";
+        const toPrefix = to + "/";
+        const remap = (p: string) =>
+          p === from ? to : node.is_dir && p.startsWith(fromPrefix) ? toPrefix + p.slice(fromPrefix.length) : p;
+        setOpenDocs((prev) => prev.map((d) => ({ ...d, path: remap(d.path) })));
+        histRef.current = histRef.current.map(remap);
+        if (activePath === from || (node.is_dir && activePath?.startsWith(fromPrefix))) {
+          setActivePath((cur) => (cur ? remap(cur) : cur));
+        }
+      }
+      await refreshTree();
+      setSelected(new Set());
+      setTaskRefresh((k) => k + 1);
+      if (failed.length) {
+        await dialogs.alert({ title: "Some moves failed", message: failed.join("\n") });
+      }
+    },
+    [tree, activePath, refreshTree]
   );
 
   const duplicateNode = useCallback(
@@ -1954,6 +2105,8 @@ export default function App() {
               setMenu({ node, x, y });
             }}
             onPickIcon={(node) => setIconTarget(node.rel_path)}
+            selectedSnapshot={selected}
+            onMove={moveNodes}
             renamingPath={renamingPath}
             onRenameCommit={commitRename}
             onRenameCancel={() => setRenamingPath(null)}
@@ -2206,6 +2359,7 @@ export default function App() {
                 onAddAttachment={addAttachment}
                 onAttachmentRemoved={onAttachmentRemoved}
                 onTaskToggled={onTaskToggled}
+                onSendTask={onSendTaskFromEditor}
                 pageWidth={settings.page_width || 820}
                 onPageWidthChange={setPageWidth}
                 dateFormat={settings.date_format}
@@ -2215,6 +2369,7 @@ export default function App() {
                 smartReplacements={settings.smart_replacements}
                 snippets={settings.snippets}
                 snippetDelimiter={settings.snippet_delimiter}
+                showToolbar={settings.show_format_toolbar}
                 headerSlot={
                   <>
                     {activePath && !vp.isMobile && (
@@ -2324,6 +2479,7 @@ export default function App() {
           existingPaths={pagePaths}
           onOpenPeriodic={openPeriodic}
           onOpenPath={openPage}
+          onOpenName={openPageByName}
           taskRefresh={taskRefresh}
         />
       </motion.div>

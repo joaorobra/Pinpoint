@@ -59,11 +59,24 @@ import { QueryBlock } from "./QueryBlock";
 import { docToMarkdown, markdownToHtml } from "../markdown";
 import { formatDate } from "../dateformat";
 import { CURSOR_SENTINEL } from "../templates";
+import type { Period } from "../periodic";
 
 /** A page the `/link` command can reference. */
 export interface PageRef {
   name: string;
   rel_path: string;
+}
+
+/**
+ * Where a task should be *moved* (not due-dated) by the context menu's "Send to". `line` is the
+ * 0-based index of the task's line in the document's serialized markdown body — what the host's
+ * `moveTaskBlock` expects. `date` is any date inside the destination period; the host derives the
+ * exact note path. The editor flushes its pending markdown before computing `line` so it matches
+ * what the host reads from disk.
+ */
+export interface SendTaskTarget {
+  period: Period;
+  date: Date;
 }
 
 interface Props {
@@ -121,6 +134,15 @@ interface Props {
    * refresh without a manual F5.
    */
   onTaskToggled?: (relPath: string) => void;
+  /**
+   * Move the task under the caret (and its subtasks) into another periodic note — the context
+   * menu's "Send to". `line` is the 0-based index of the task line in the *current* serialized
+   * markdown body (the editor flushes pending edits before computing it). The host derives the
+   * destination path from `target`, creating that note from the period's template if it doesn't
+   * exist yet (warning the user first). When absent, "Send to" is hidden. Distinct from setting a
+   * due date — this relocates the task line itself.
+   */
+  onSendTask?: (line: number, target: SendTaskTarget) => void;
   /** Pattern for /today and the /date default. */
   dateFormat?: string;
   /** Pattern for the /time command. */
@@ -151,6 +173,8 @@ interface Props {
   snippets?: Record<string, string>;
   /** Delimiter that wraps a snippet name to fire it (default `_`). */
   snippetDelimiter?: string;
+  /** Show the floating formatting toolbar at the top of the editor (Settings → Editor). Default true. */
+  showToolbar?: boolean;
 }
 
 /** Slash-menu command groups, in display order. */
@@ -355,6 +379,285 @@ const MoveBlock = Extension.create({
       "Alt-ArrowDown": ({ editor }) =>
         moveBlock(editor.state, editor.view.dispatch, 1),
     };
+  },
+});
+
+/**
+ * Resolve the top-level block (a direct child of the doc) under viewport point (x, y) to the
+ * document position just BEFORE it, plus its node and DOM. We map the point to a doc position, then
+ * walk up to depth 1 — so hovering anywhere inside a nested list item still grabs the whole
+ * top-level block it belongs to (matching the keyboard `moveBlock`, which also operates on whole
+ * top-level blocks). Returns null off any block.
+ */
+/**
+ * Resolve the draggable "line" under viewport point (x, y) — matching what the user sees and what
+ * the line-number gutter counts: a LIST ITEM (`listItem`/`taskItem`) when the point is inside a
+ * list, otherwise the top-level block. Returns that node's start position, its parent (for sibling
+ * reordering), its index among the parent's children, and its DOM element. Null off any line.
+ */
+function lineAtCoords(
+  view: any,
+  x: number,
+  y: number
+): { pos: number; dom: HTMLElement } | null {
+  // The gutter where the handle lives sits LEFT of the text column, so a point there often misses
+  // every block. Clamp x into the text column before mapping, so hovering the gutter still resolves
+  // to the line on that row.
+  const domBox = view.dom.getBoundingClientRect();
+  const clampedX = Math.max(domBox.left + 4, Math.min(x, domBox.right - 4));
+  const found = view.posAtCoords({ left: clampedX, top: y });
+  if (!found) return null;
+  const $pos = view.state.doc.resolve(Math.min(found.pos, view.state.doc.content.size));
+  if ($pos.depth < 1) return null;
+
+  // Prefer the DEEPEST list item ancestor (so each row of a list is its own draggable line); fall
+  // back to the top-level block (depth 1) for plain paragraphs/headings/etc.
+  let depth = 1;
+  for (let d = $pos.depth; d >= 1; d--) {
+    const name = $pos.node(d).type.name;
+    if (name === "listItem" || name === "taskItem") { depth = d; break; }
+  }
+  const pos = $pos.before(depth);
+  const dom = view.nodeDOM(pos) as HTMLElement | null;
+  if (!dom || dom.nodeType !== 1) return null;
+  return { pos, dom };
+}
+
+/**
+ * The sibling rows of the line whose node starts at `linePos`, as {pos, dom} pairs in document
+ * order — i.e. the children of that line's parent at the same depth. Used to compute the drop gap
+ * and indicator, so dragging reorders strictly within the same list/level the line belongs to.
+ */
+function siblingRows(view: any, linePos: number): { pos: number; dom: HTMLElement }[] {
+  const { state } = view;
+  const $line = state.doc.resolve(linePos + 1);
+  const depth = $line.depth;
+  const parent = $line.node(depth - 1);
+  const parentStart = $line.start(depth - 1);
+  const rows: { pos: number; dom: HTMLElement }[] = [];
+  let at = parentStart;
+  for (let i = 0; i < parent.childCount; i++) {
+    const dom = view.nodeDOM(at) as HTMLElement | null;
+    if (dom && dom.nodeType === 1) rows.push({ pos: at, dom });
+    at += parent.child(i).nodeSize;
+  }
+  return rows;
+}
+
+/**
+ * Move the line whose node starts at `fromPos` (a list item or top-level block) so it lands before
+ * the sibling at `targetIndex`, reordering among its same-depth siblings only. The node (with any
+ * nested sub-list) rides along, in one transaction (single undo). A no-op when order wouldn't change.
+ */
+function moveLineTo(view: any, fromPos: number, targetIndex: number): boolean {
+  const { state } = view;
+  const $from = state.doc.resolve(fromPos + 1);
+  const depth = $from.depth;
+  const parent = $from.node(depth - 1);
+  const srcIndex = $from.index(depth - 1);
+  // Dropping into the line's own slot, or the slot right after it, is a no-op.
+  if (targetIndex === srcIndex || targetIndex === srcIndex + 1) return false;
+  if (targetIndex < 0 || targetIndex > parent.childCount) return false;
+
+  const node = parent.child(srcIndex);
+  // Start position of `targetIndex` among the parent's children, on the CURRENT doc.
+  const parentStart = $from.start(depth - 1);
+  let insertAt = parentStart;
+  for (let i = 0; i < targetIndex; i++) insertAt += parent.child(i).nodeSize;
+
+  const tr = state.tr;
+  tr.delete(fromPos, fromPos + node.nodeSize);
+  const mappedInsert = insertAt > fromPos ? insertAt - node.nodeSize : insertAt;
+  tr.insert(mappedInsert, node);
+  tr.setSelection(TextSelection.near(tr.doc.resolve(mappedInsert + 1)));
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
+/**
+ * Notion-style block drag handle. A floating `⋮⋮` grip appears in the left gutter beside whichever
+ * "line" the pointer is over — a list item when inside a list, otherwise the top-level block, which
+ * matches what the user sees and what the line-number gutter counts. Grabbing it drags that line to
+ * reorder it among its siblings, with a horizontal drop line showing where it will land. A
+ * pointer-driven complement to the Alt+↑/↓ keyboard move.
+ *
+ * Built as a ProseMirror plugin so it lives and dies with the editor view. The handle and the drop
+ * indicator are plain DOM nodes appended to the editor's parent (`.editor-content`), positioned
+ * absolutely; no React state is touched during a drag, so dragging stays smooth.
+ */
+const blockDragKey = new PluginKey("blockDragHandle");
+const BlockDragHandle = Extension.create({
+  name: "blockDragHandle",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: blockDragKey,
+        view(view) {
+          const wrap = view.dom.parentElement as HTMLElement | null; // .editor-content
+          if (!wrap) return {};
+          if (getComputedStyle(wrap).position === "static") wrap.style.position = "relative";
+
+          // The grip. `draggable` so a real HTML5 drag starts; positioned over the left gutter.
+          const handle = document.createElement("div");
+          handle.className = "block-drag-handle";
+          handle.setAttribute("draggable", "true");
+          handle.setAttribute("contenteditable", "false");
+          handle.title = "Drag to move • click to select";
+          handle.innerHTML =
+            '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+            '<circle cx="5" cy="3" r="1.4"/><circle cx="11" cy="3" r="1.4"/>' +
+            '<circle cx="5" cy="8" r="1.4"/><circle cx="11" cy="8" r="1.4"/>' +
+            '<circle cx="5" cy="13" r="1.4"/><circle cx="11" cy="13" r="1.4"/></svg>';
+          wrap.appendChild(handle);
+
+          // Horizontal drop indicator, shown only while dragging.
+          const indicator = document.createElement("div");
+          indicator.className = "block-drop-indicator";
+          indicator.style.display = "none";
+          wrap.appendChild(indicator);
+
+          let hoverPos: number | null = null; // doc pos of the block the handle is pinned to
+          let dragging = false;
+          let dropIndex: number | null = null; // top-level index the block would land before
+
+          // Pin the grip a fixed gap to the LEFT of the block's own left edge, vertically aligned to
+          // its first text line. Both offsets are measured against the block's box (not the centered
+          // .editor-content column), so the handle stays glued to the line under any page width,
+          // column centering, or list indentation — no drift.
+          const HANDLE_GAP = 26; // px between the grip's right side and the line's left edge
+          // With line numbers on, the number column lives in the block's left padding (≈2.6rem), so
+          // a plain gap would drop the grip over the digits. Push it further left to clear them.
+          const LINE_NUM_CLEAR = 44;
+          const place = (dom: HTMLElement) => {
+            // Measure against the element the browser actually positions the handle against (its
+            // offsetParent) — NOT an assumed `wrap`. If those differ, `left`/`top` would be applied
+            // to a different origin and the grip drifts (e.g. far to the right). This keeps it exact.
+            const originBox = (handle.offsetParent ?? wrap).getBoundingClientRect();
+            const box = dom.getBoundingClientRect();
+            const lineNums = document.documentElement.classList.contains("show-line-numbers");
+            const gap = lineNums ? HANDLE_GAP + LINE_NUM_CLEAR : HANDLE_GAP;
+            handle.style.left = `${box.left - originBox.left - gap}px`;
+            handle.style.top = `${box.top - originBox.top + 1}px`;
+            handle.style.display = "flex";
+          };
+
+          const onMove = (e: MouseEvent) => {
+            if (dragging) return;
+            const hit = lineAtCoords(view, e.clientX, e.clientY);
+            if (!hit) {
+              hoverPos = null;
+              handle.style.display = "none";
+              return;
+            }
+            hoverPos = hit.pos;
+            place(hit.dom);
+          };
+          const onLeave = (e: MouseEvent) => {
+            // Keep the handle while the pointer is over it (so it stays grabbable).
+            if (dragging) return;
+            const to = e.relatedTarget as Node | null;
+            if (to && (handle.contains(to) || view.dom.contains(to))) return;
+            handle.style.display = "none";
+            hoverPos = null;
+          };
+
+          view.dom.addEventListener("mousemove", onMove);
+          view.dom.addEventListener("mouseleave", onLeave);
+
+          // Compute the drop index + indicator Y from a pointer Y, by finding the nearest gap between
+          // the dragged line's SIBLINGS (same list/level). `left`/`right` bound the indicator to the
+          // sibling column so it reads as "drop among these rows". Returns the sibling index to insert
+          // before. Falls back to no-op data when the source line can't be resolved mid-drag.
+          const computeDrop = (
+            clientY: number
+          ): { index: number; y: number; left: number; right: number } | null => {
+            if (hoverPos == null) return null;
+            const rows = siblingRows(view, hoverPos);
+            if (!rows.length) return null;
+            // Same origin the indicator is positioned against (its offsetParent), see `place`.
+            const wrapBox = (indicator.offsetParent ?? wrap).getBoundingClientRect();
+            const first = rows[0].dom.getBoundingClientRect();
+            const last = rows[rows.length - 1].dom.getBoundingClientRect();
+            const left = first.left - wrapBox.left;
+            const right = wrapBox.right - last.right;
+            for (let i = 0; i < rows.length; i++) {
+              const box = rows[i].dom.getBoundingClientRect();
+              const mid = box.top + box.height / 2;
+              if (clientY < mid) return { index: i, y: box.top - wrapBox.top, left, right };
+            }
+            return { index: rows.length, y: last.bottom - wrapBox.top, left, right };
+          };
+
+          handle.addEventListener("dragstart", (e) => {
+            if (hoverPos == null) { e.preventDefault(); return; }
+            dragging = true;
+            handle.classList.add("dragging");
+            // A drag image isn't useful here (the grip is tiny); use a transparent 1px.
+            const img = new Image();
+            img.src = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+            e.dataTransfer?.setDragImage(img, 0, 0);
+            if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+          });
+
+          const onDragOver = (e: DragEvent) => {
+            if (!dragging) return;
+            e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+            const drop = computeDrop(e.clientY);
+            if (!drop) { indicator.style.display = "none"; dropIndex = null; return; }
+            dropIndex = drop.index;
+            indicator.style.top = `${drop.y - 1}px`;
+            indicator.style.left = `${drop.left}px`;
+            indicator.style.right = `${drop.right}px`;
+            indicator.style.display = "block";
+          };
+          wrap.addEventListener("dragover", onDragOver);
+
+          const finishDrag = () => {
+            dragging = false;
+            dropIndex = null;
+            handle.classList.remove("dragging");
+            indicator.style.display = "none";
+          };
+
+          const onDrop = (e: DragEvent) => {
+            if (!dragging) return;
+            e.preventDefault();
+            if (hoverPos != null && dropIndex != null) {
+              moveLineTo(view, hoverPos, dropIndex);
+            }
+            finishDrag();
+            handle.style.display = "none";
+            hoverPos = null;
+          };
+          wrap.addEventListener("drop", onDrop);
+          handle.addEventListener("dragend", finishDrag);
+
+          // Click the grip (no drag) to select the whole block — handy before formatting/deleting it.
+          handle.addEventListener("click", () => {
+            if (hoverPos == null) return;
+            const node = view.state.doc.nodeAt(hoverPos);
+            if (!node) return;
+            const tr = view.state.tr.setSelection(
+              TextSelection.create(view.state.doc, hoverPos + 1, hoverPos + node.nodeSize - 1)
+            );
+            view.dispatch(tr);
+            view.focus();
+          });
+
+          return {
+            destroy() {
+              view.dom.removeEventListener("mousemove", onMove);
+              view.dom.removeEventListener("mouseleave", onLeave);
+              wrap.removeEventListener("dragover", onDragOver);
+              wrap.removeEventListener("drop", onDrop);
+              handle.remove();
+              indicator.remove();
+            },
+          };
+        },
+      }),
+    ];
   },
 });
 
@@ -800,6 +1103,14 @@ function isoFromOffset(days: number): string {
   return `${y}-${m}-${day}`;
 }
 
+/** Local-midnight `Date` `days` from today — for the "Send to" presets (which need a real Date). */
+function dayFromOffset(days: number): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
 /** Day-offset from today to the coming Saturday (0 if today is already Saturday). */
 function isoOffsetToWeekend(): number {
   const d = new Date();
@@ -833,6 +1144,49 @@ function taskParaRange(editor: any): { start: number; end: number; text: string 
   const start = itemPos + 1 + 1; // +1 into taskItem, +1 into the paragraph
   const size = para?.content.size ?? 0;
   return { start, end: start + size, text: para?.textContent ?? "" };
+}
+
+/** Matches a serialized task line (`- [ ] …` / `- [x] …`), at any indent — never a plain bullet. */
+const TASK_LINE_RE = /^\s*-\s*\[[ xX]\]/;
+
+/**
+ * The 0-based index, in the document's serialized markdown body, of the line for the task under the
+ * caret — what the host's `moveTaskBlock` expects. We can't map ProseMirror positions to markdown
+ * line numbers directly (the serializer normalizes blank lines), so we use an ORDINAL bridge: the
+ * caret's `taskItem` is the Nth task item in document order, and — because only task items serialize
+ * with a `[ ]`/`[x]` checkbox, in that same order — the Nth checkbox line in the markdown is its
+ * line. Returns null off-task or if the counts somehow disagree.
+ */
+function taskLineIndexInMarkdown(editor: any): number | null {
+  const { $from } = editor.state.selection;
+  // The taskItem node enclosing the caret, and its document position.
+  let taskDepth = -1;
+  for (let d = $from.depth; d > 0; d--) {
+    if ($from.node(d).type.name === "taskItem") { taskDepth = d; break; }
+  }
+  if (taskDepth < 0) return null;
+  const targetPos = $from.before(taskDepth);
+
+  // Ordinal of this taskItem among all taskItems, in document order.
+  let ordinal = -1;
+  let seen = 0;
+  editor.state.doc.descendants((node: any, pos: number) => {
+    if (node.type.name !== "taskItem") return true;
+    if (pos === targetPos) ordinal = seen;
+    seen++;
+    return true; // keep descending — nested task items count too, in their own order
+  });
+  if (ordinal < 0) return null;
+
+  // Walk the serialized markdown to the (ordinal)-th task line.
+  const lines = docToMarkdown(editor.getJSON() as any).split("\n");
+  let count = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!TASK_LINE_RE.test(lines[i])) continue;
+    if (count === ordinal) return i;
+    count++;
+  }
+  return null;
 }
 
 /**
@@ -976,7 +1330,31 @@ function looksLikeMarkdown(text: string): boolean {
  * `done-desc` order by a task item's checkbox state (only meaningful for taskItem siblings — the
  * menu only offers these when the selection is over task-list items).
  */
-type SortMode = "asc" | "desc" | "date" | "length" | "done" | "done-desc";
+type SortMode = "asc" | "desc" | "date" | "length" | "done" | "done-desc" | "priority" | "priority-desc";
+
+// An item's OWN first line of text, excluding any nested sub-list. `node.textContent` concatenates
+// every descendant — so a parent task would inherit a child's `priority:: high`. We instead read the
+// text up to the first nested list child, which is exactly the row the user sees as "this line".
+function ownLineText(node: any): string {
+  if (!node?.forEach) return node?.textContent ?? "";
+  let out = "";
+  node.forEach((child: any) => {
+    const n = child.type?.name;
+    if (n === "bulletList" || n === "orderedList" || n === "taskList") return; // skip the sub-list
+    out += child.textContent;
+  });
+  return out;
+}
+
+// Priority rank from a task's OWN `priority:: high|medium|low` field: 3/2/1 for the levels, 0 when
+// the line carries no (or an unrecognised) priority. Reads only the item's own line (not its nested
+// children), so a subtask's priority never bleeds into its parent. Matches the indexer's `priority::`.
+function nodePriority(node: any): number {
+  const m = ownLineText(node).match(/\bpriority::\s*(high|medium|low)\b/i);
+  if (!m) return 0;
+  const level = m[1].toLowerCase();
+  return level === "high" ? 3 : level === "medium" ? 2 : 1;
+}
 
 // First date-like token in a line: ISO (2024-01-31), slashed (01/31/2024 or 31/01/2024), or a
 // `📅 YYYY-MM-DD` task due-marker. Returns a sortable timestamp, or null when the line has no date.
@@ -1016,6 +1394,12 @@ function lineComparator(mode: SortMode) {
       // Unchecked (0) before checked (1) for `done`; reversed for `done-desc`.
       const ca = taskChecked(a.node) ? 1 : 0, cb = taskChecked(b.node) ? 1 : 0;
       d = mode === "done-desc" ? cb - ca : ca - cb;
+    } else if (mode === "priority" || mode === "priority-desc") {
+      // High → low for `priority` (rank 3 first); reversed for `priority-desc`. Lines with no
+      // priority (rank 0) sink to the bottom of a high-first sort, rise to the top of low-first.
+      // Rank reads each item's OWN line (via the node), so a subtask's priority never lifts a parent.
+      const pa = nodePriority(a.node), pb = nodePriority(b.node);
+      d = mode === "priority-desc" ? pa - pb : pb - pa;
     } else if (mode === "date") {
       const da = lineDate(a.text), db = lineDate(b.text);
       if (da == null && db == null) d = 0;
@@ -1032,29 +1416,101 @@ function lineComparator(mode: SortMode) {
   };
 }
 
+const LIST_NAMES = new Set(["bulletList", "orderedList", "taskList"]);
+
 /**
- * The set of sibling "lines" the current selection spans, or null when sorting wouldn't apply. This
- * is the SAME scope `sortSelectedLines` acts on, so the menu's enabled/visible state always matches
- * what sorting would actually do: the deepest shared ancestor (a list or the doc), and the inclusive
- * index range of its children the selection touches. `siblings` is the selected children themselves
- * (for inspecting them, e.g. counting tasks).
+ * Resolve WHAT the current selection should reorder. The result is the single source of truth both
+ * the menu gating (`selectedSiblings`) and the mutation (`sortSelectedLines`) consume, so the menu
+ * never offers a sort the action can't perform.
+ *
+ * Three shapes, in priority order:
+ *  - `single`: the selection sits within ONE container (a list, or the doc) — reorder the children
+ *    the selection spans. This is the ordinary case.
+ *  - `descend`: the selection's shared ancestor is the doc but it brushes exactly ONE list (e.g. the
+ *    caret started in a heading above it) — drop INTO that list and reorder all its items.
+ *  - `multi`: the selection spans SEVERAL adjacent same-type lists. A markdown task list broken by
+ *    blank lines (or interleaved blocks) parses into multiple sibling `taskList` nodes; the user sees
+ *    one list and expects one sort. We reorder every item across those lists as one sequence and
+ *    write them back keeping each list node's original item COUNT, so the visual grouping survives.
+ *    Without this, the doc-level children are opaque list blocks and sorting fuses their text.
  */
-function selectedSiblings(state: any): { depth: number; siblings: any[] } | null {
+type SortScope =
+  | { kind: "single"; parent: any; fromIdx: number; toIdx: number; contentStart: number }
+  | { kind: "multi"; lists: { node: any; start: number }[] };
+
+function sortScope(state: any): SortScope | null {
   const { $from, $to } = state.selection;
   for (let d = Math.min($from.depth, $to.depth); d >= 0; d--) {
     const parent = $from.node(d);
-    if (parent !== $to.node(d)) continue;
-    const name = parent.type.name;
-    const isList = name === "bulletList" || name === "orderedList" || name === "taskList";
-    if (!isList && d !== 0) continue;
+    if (parent !== $to.node(d)) continue; // not a shared ancestor at this depth
+    const isList = LIST_NAMES.has(parent.type.name);
+    const isDoc = d === 0;
+    if (!isList && !isDoc) continue;
+
     const fromIdx = $from.index(d);
-    const toIdx = $to.index(d);
+    // `$to.index(d)` is the index AFTER the last touched child when the selection ends at the parent's
+    // content boundary; clamp so the inclusive [fromIdx..toIdx] range never indexes past the last child.
+    const toIdx = Math.min($to.index(d), parent.childCount - 1);
+    // Position just inside `parent`, where its child 0 begins. For the doc that's 0; otherwise it's
+    // one past the parent's own opening token.
+    const parentContentStart = d === 0 ? 0 : $from.before(d) + 1;
+
+    // At the doc level the selection often spans whole list blocks, not their items. Find every list
+    // among the touched top-level blocks and decide between the `descend` (one list) and `multi`
+    // (several adjacent same-type lists) shapes.
+    if (isDoc) {
+      const lo = Math.min(fromIdx, toIdx);
+      const hi = Math.min(Math.max(fromIdx, toIdx), parent.childCount - 1);
+      // Walk the touched blocks, tracking each list's doc position.
+      let pos = parentContentStart;
+      for (let i = 0; i < lo; i++) pos += parent.child(i).nodeSize;
+      const lists: { node: any; start: number }[] = [];
+      let nonListBlocks = 0;
+      for (let i = lo; i <= hi; i++) {
+        const child = parent.child(i);
+        if (LIST_NAMES.has(child.type.name)) lists.push({ node: child, start: pos + 1 }); // +1: into the list
+        else if (child.textContent.trim()) nonListBlocks++; // ignore blank spacer paragraphs
+        pos += child.nodeSize;
+      }
+      const totalItems = lists.reduce((n, l) => n + l.node.childCount, 0);
+
+      // One list brushed → sort its items in place.
+      if (lists.length === 1 && lists[0].node.childCount >= 2) {
+        const list = lists[0].node;
+        return { kind: "single", parent: list, fromIdx: 0, toIdx: list.childCount - 1, contentStart: lists[0].start };
+      }
+      // Several adjacent lists of the SAME type → sort their items as one sequence. (Mixed list types
+      // can't merge cleanly — fall through and sort the blocks, which at least stays well-formed.)
+      if (lists.length >= 2 && totalItems >= 2) {
+        const type0 = lists[0].node.type.name;
+        if (lists.every((l) => l.node.type.name === type0)) {
+          return { kind: "multi", lists };
+        }
+      }
+      if (nonListBlocks + lists.length < 2) return null;
+    }
+
     if (toIdx <= fromIdx) return null; // selection within a single sibling — nothing to sort
-    const siblings: any[] = [];
-    for (let i = fromIdx; i <= toIdx; i++) siblings.push(parent.child(i));
-    return { depth: d, siblings };
+    return { kind: "single", parent, fromIdx, toIdx, contentStart: parentContentStart };
   }
   return null;
+}
+
+/**
+ * The sibling "lines" the current selection spans (for inspecting them, e.g. counting tasks), or
+ * null when sorting wouldn't apply. Thin wrapper over `sortScope` so gating and mutation never drift.
+ * For the `multi` shape it returns the union of all items across the spanned lists.
+ */
+function selectedSiblings(state: any): { siblings: any[] } | null {
+  const scope = sortScope(state);
+  if (!scope) return null;
+  const siblings: any[] = [];
+  if (scope.kind === "multi") {
+    for (const l of scope.lists) l.node.forEach((it: any) => siblings.push(it));
+  } else {
+    for (let i = scope.fromIdx; i <= scope.toIdx; i++) siblings.push(scope.parent.child(i));
+  }
+  return { siblings };
 }
 
 /**
@@ -1110,56 +1566,83 @@ function selectionTouchesTask(state: any): boolean {
  *    its own children and items at different indent levels never interleave.
  * Returns false (a no-op) when fewer than two siblings are selected or they're already in order.
  */
+// Stable sort of a set of "line" nodes by `mode`. Each entry pairs the node with its original index
+// `i` (the comparator's tie-breaker keeps equal lines in place). Returns the nodes in sorted order,
+// or null when the order is unchanged (so callers can no-op).
+function sortNodes(nodes: any[], mode: SortMode): any[] | null {
+  const entries = nodes.map((node, i) => ({ node, text: node.textContent, i }));
+  const sorted = [...entries].sort(lineComparator(mode));
+  if (sorted.every((s, idx) => s.i === entries[idx].i)) return null; // already ordered
+  return sorted.map((s) => s.node);
+}
+
 function sortSelectedLines(editor: any, mode: SortMode): boolean {
   const { state } = editor;
-  const { $from, $to } = state.selection;
+  const scope = sortScope(state);
+  if (!scope) return false;
 
-  // Find the deepest shared ancestor whose children are the "lines" to sort: a list (its items) or
-  // the document (its top-level blocks). We sort that ancestor's children, but only across the index
-  // span the selection touches.
-  for (let d = Math.min($from.depth, $to.depth); d >= 0; d--) {
-    const parent = $from.node(d);
-    if (parent !== $to.node(d)) continue; // not a shared ancestor at this depth
-    const name = parent.type.name;
-    const isList = name === "bulletList" || name === "orderedList" || name === "taskList";
-    const isDoc = d === 0;
-    if (!isList && !isDoc) continue;
-
-    // The selected sibling index range at THIS depth (inclusive) — the heart of "only the selected
-    // lines": the items the caret-anchor and caret-head sit in, and everything between them.
-    const fromIdx = $from.index(d);
-    const toIdx = $to.index(d);
-    if (toIdx <= fromIdx) return false; // selection sits within a single sibling — nothing to sort
-
-    // Collect just those siblings, each with its full node (nested sub-lists ride along untouched).
-    const entries: { node: any; text: string; i: number }[] = [];
-    for (let i = fromIdx; i <= toIdx; i++) {
-      const child = parent.child(i);
-      entries.push({ node: child, text: child.textContent, i: i - fromIdx });
-    }
-    if (entries.length < 2) return false;
-    const sorted = [...entries].sort(lineComparator(mode));
-    if (sorted.every((s, idx) => s.i === entries[idx].i)) return false; // already ordered
-
-    // Document positions of the selected run: start of the first selected sibling to end of the last.
-    // $from.before(d+1) is the position just before the sibling the selection starts in.
-    const startPos = $from.before(d + 1);
-    const endPos = startPos + entries.reduce((sum, e) => sum + e.node.nodeSize, 0);
+  // MULTI: the selection spans several adjacent same-type lists (a task list broken by blank lines
+  // parses into separate `taskList` nodes). Sort every item across them as one sequence, then write
+  // the items back into the SAME list nodes, each keeping its original item count — so the visual
+  // grouping (the blank-line breaks) is preserved while the items sort globally. Replace the lists
+  // last-to-first so each replacement leaves earlier list positions valid.
+  if (scope.kind === "multi") {
+    const allItems: any[] = [];
+    for (const l of scope.lists) l.node.forEach((it: any) => allItems.push(it));
+    const sorted = sortNodes(allItems, mode);
+    if (!sorted) return false;
 
     const tr = state.tr;
-    tr.replaceWith(startPos, endPos, Fragment.fromArray(sorted.map((s) => s.node)));
-    // Keep the same lines highlighted after the sort: the run occupies the same [startPos, endPos]
-    // span (total node size is unchanged), so re-select it. We anchor just inside the first sibling
-    // and the last (startPos+1 / endPos-1) so the selection lands on text, not block boundaries —
-    // TextSelection.between snaps to the nearest valid text positions.
-    tr.setSelection(
-      TextSelection.between(tr.doc.resolve(startPos + 1), tr.doc.resolve(endPos - 1)),
-    );
+    let cursor = 0;
+    const slices = scope.lists.map((l) => {
+      const slice = sorted.slice(cursor, cursor + l.node.childCount);
+      cursor += l.node.childCount;
+      return slice;
+    });
+    for (let k = scope.lists.length - 1; k >= 0; k--) {
+      const l = scope.lists[k];
+      const from = l.start;
+      const to = from + l.node.content.size;
+      tr.replaceWith(from, to, Fragment.fromArray(slices[k]));
+    }
+    // Re-select the whole spanned run (first list's start to last list's end), which keeps the same
+    // rows highlighted. Total size is unchanged, so the original end position still holds.
+    const first = scope.lists[0];
+    const last = scope.lists[scope.lists.length - 1];
+    const runStart = first.start;
+    const runEnd = last.start + last.node.content.size;
+    tr.setSelection(TextSelection.between(tr.doc.resolve(runStart + 1), tr.doc.resolve(runEnd - 1)));
     editor.view.dispatch(tr.scrollIntoView());
     editor.view.focus();
     return true;
   }
-  return false;
+
+  // SINGLE: reorder the selected children of one container in place.
+  const { parent, fromIdx, toIdx, contentStart } = scope;
+  const slice: any[] = [];
+  for (let i = fromIdx; i <= toIdx; i++) slice.push(parent.child(i));
+  if (slice.length < 2) return false;
+  const sorted = sortNodes(slice, mode);
+  if (!sorted) return false;
+
+  // Doc position of the selected run: `contentStart` is where the parent's child 0 begins, so add the
+  // sizes of the children before `fromIdx` to reach the first selected sibling.
+  let startPos = contentStart;
+  for (let i = 0; i < fromIdx; i++) startPos += parent.child(i).nodeSize;
+  const endPos = startPos + slice.reduce((sum, n) => sum + n.nodeSize, 0);
+
+  const tr = state.tr;
+  tr.replaceWith(startPos, endPos, Fragment.fromArray(sorted));
+  // Keep the same lines highlighted after the sort: the run occupies the same [startPos, endPos]
+  // span (total node size is unchanged), so re-select it. We anchor just inside the first sibling and
+  // the last (startPos+1 / endPos-1) so the selection lands on text, not block boundaries —
+  // TextSelection.between snaps to the nearest valid text positions.
+  tr.setSelection(
+    TextSelection.between(tr.doc.resolve(startPos + 1), tr.doc.resolve(endPos - 1)),
+  );
+  editor.view.dispatch(tr.scrollIntoView());
+  editor.view.focus();
+  return true;
 }
 
 export default function Editor({
@@ -1178,6 +1661,7 @@ export default function Editor({
   onAddAttachment,
   onAttachmentRemoved,
   onTaskToggled,
+  onSendTask,
   dateFormat = "YYYY-MM-DD",
   timeFormat = "HH:mm",
   taskDateFormat = "YYYY-MM-DD",
@@ -1188,6 +1672,7 @@ export default function Editor({
   smartReplacements,
   snippets,
   snippetDelimiter = "_",
+  showToolbar = true,
 }: Props) {
   // The page-width ruler is toggled with Ctrl+R; hidden by default so it never crowds the toolbar.
   const [rulerOpen, setRulerOpen] = useState(false);
@@ -1213,6 +1698,8 @@ export default function Editor({
   onAttachmentRemovedRef.current = onAttachmentRemoved;
   const onTaskToggledRef = useRef(onTaskToggled);
   onTaskToggledRef.current = onTaskToggled;
+  const onSendTaskRef = useRef(onSendTask);
+  onSendTaskRef.current = onSendTask;
   const lastEmitted = useRef<string>(value);
   const [slash, setSlash] = useState<{ query: string; left: number; top: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -1408,6 +1895,7 @@ export default function Editor({
           dateFormat: taskDateFormat,
         }),
         MoveBlock,
+        BlockDragHandle,
         SmartReplace.configure({ getConfig: () => smartCfgRef.current }),
       ],
       content: markdownToHtml(value),
@@ -1928,6 +2416,10 @@ export default function Editor({
         ];
         if (multiTasks) {
           sortSubmenu.push(
+            { label: "Priority — high first", icon: <Flag size={16} weight="fill" />, separator: true,
+              onClick: () => sortSelectedLines(ed, "priority") },
+            { label: "Priority — low first", icon: <Flag size={16} />,
+              onClick: () => sortSelectedLines(ed, "priority-desc") },
             { label: "Done — to-do first", icon: <Circle size={16} />, separator: true,
               onClick: () => sortSelectedLines(ed, "done") },
             { label: "Done — done first", icon: <CheckCircle size={16} />,
@@ -1949,6 +2441,18 @@ export default function Editor({
         const due = (label: string, offsetDays: number): MenuItem => ({
           label, icon: <CalendarBlank size={15} />,
           onClick: () => setMarkerInEditor(ed, "📅", isoFromOffset(offsetDays)),
+        });
+        // "Send to" MOVES the task into a daily note (unlike "Due date", which just stamps 📅).
+        // We resolve the destination date, then hand the host the task's markdown line index — the
+        // line is read off the live editor at click time so it survives any edits made meanwhile.
+        const sendToDay = (date: Date) => {
+          const line = taskLineIndexInMarkdown(ed);
+          if (line == null) return;
+          onSendTaskRef.current?.(line, { period: "daily", date });
+        };
+        const send = (label: string, offsetDays: number): MenuItem => ({
+          label, icon: <CalendarBlank size={15} />,
+          onClick: () => sendToDay(dayFromOffset(offsetDays)),
         });
 
         items.push(
@@ -1981,19 +2485,28 @@ export default function Editor({
               if (rule !== null) setMarkerInEditor(ed, "🔁", rule);
             },
           },
-          {
+        );
+
+        // "Send to" relocates the task into a daily note. Only offered when the host wired a mover.
+        if (onSendTaskRef.current) {
+          items.push({
             label: "Send to", icon: <ArrowBendUpRight size={16} />,
             submenu: [
-              due("Today", 0),
-              due("Tomorrow", 1),
-              due("This weekend", isoOffsetToWeekend()),
-              due("Next week", 7),
-              due("In 2 weeks", 14),
+              send("Today", 0),
+              send("Tomorrow", 1),
+              send("This weekend", isoOffsetToWeekend()),
+              send("Next week", 7),
+              send("In 2 weeks", 14),
               { label: "Pick a date…", icon: <CalendarBlank size={15} />, separator: true,
-                onClick: async () => { const iso = await requestDate(); if (iso) setMarkerInEditor(ed, "📅", iso); } },
+                onClick: async () => {
+                  const iso = await requestDate();
+                  if (!iso) return;
+                  const [yy, mm, dd] = iso.split("-").map(Number);
+                  sendToDay(new Date(yy, mm - 1, dd));
+                } },
             ],
-          },
-        );
+          });
+        }
       }
 
       setCtxMenu({ x: e.clientX, y: e.clientY, items, formatRow });
@@ -2005,7 +2518,7 @@ export default function Editor({
 
   return (
     <div className="editor-wrap" onContextMenu={onEditorContextMenu}>
-      <Toolbar editor={editor} />
+      {showToolbar && <Toolbar editor={editor} />}
       {rulerOpen && onPageWidthChange && (
         <PageRuler width={pageWidth} onCommit={onPageWidthChange} />
       )}

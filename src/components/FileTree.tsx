@@ -49,6 +49,16 @@ interface Props {
   onContextMenu?: (node: TreeNode, x: number, y: number) => void;
   /** Click on a node's icon: open the icon picker for that node. */
   onPickIcon?: (node: TreeNode) => void;
+  /**
+   * Drag-and-drop reorganize: move `paths` into the folder `destDir` (the empty string is the vault
+   * root). The host renames each node to its new parent; the tree refreshes from the result.
+   */
+  onMove?: (paths: string[], destDir: string) => void;
+  /**
+   * Current multi-selection (rel_paths). When the user drags a row that's part of the selection,
+   * the whole selection moves together; dragging an unselected row moves just that row.
+   */
+  selectedSnapshot?: Set<string>;
   /** rel_path of the row currently being renamed inline, or null. */
   renamingPath?: string | null;
   /** Commit an inline rename with the edited (display) name. */
@@ -76,6 +86,36 @@ export interface TreeCommands {
   collapse: (relPath?: string) => void;
 }
 
+/**
+ * Drag-and-drop context threaded down to every row. `destDir` is a folder's rel_path, or "" for the
+ * vault root. `dropTarget` is the folder currently highlighted as the drop destination (or null).
+ */
+interface DragCtx {
+  start: (relPath: string) => void;
+  end: () => void;
+  over: (destDir: string) => void;
+  leave: (destDir: string) => void;
+  drop: (destDir: string) => void;
+  dropTarget: string | null;
+}
+
+/**
+ * Whether moving `dragged` (rel_paths) into folder `destDir` ("" = root) is a legal, non-trivial
+ * move: no node may land in its own current parent, and a folder can't move into itself or a
+ * descendant. At least one node must actually change parent for the drop to be meaningful.
+ */
+function canDropInto(dragged: string[], destDir: string): boolean {
+  if (!dragged.length) return false;
+  let moves = false;
+  for (const from of dragged) {
+    const parent = from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : "";
+    // A folder can't be dropped into itself or its own subtree.
+    if (destDir === from || destDir.startsWith(from + "/")) return false;
+    if (parent !== destDir) moves = true;
+  }
+  return moves;
+}
+
 /** The default Phosphor icon for a node when the user hasn't chosen one. */
 function defaultIcon(node: TreeNode): PhosphorIcon {
   if (node.is_dir) return node.is_database ? Database : Folder;
@@ -96,11 +136,47 @@ function defaultIcon(node: TreeNode): PhosphorIcon {
  * The vault file tree. Folder open/closed state is owned here (a Set of collapsed paths) so the
  * header's expand-all / collapse-all controls can drive every folder at once — Obsidian-style.
  */
-export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel, revealRef, cmdRef }: Props) {
+export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, onMove, selectedSnapshot, renamingPath, onRenameCommit, onRenameCancel, revealRef, cmdRef }: Props) {
   // We track which folders are *collapsed*; everything else is open by default at depth 0,
   // and a bumped signal lets the toolbar collapse/expand the whole tree at once.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const rootRef = useRef<HTMLDivElement>(null);
+
+  // rel_path of the folder currently hovered as a drop target ("" = the vault root), or null. Drives
+  // the drop-target highlight. The set of rel_paths being dragged lives in a ref so the handlers in
+  // every row can read it without re-rendering the whole tree on dragstart.
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const draggingRef = useRef<string[]>([]);
+
+  // Resolve which rows a drag carries: the whole selection if the dragged row is part of it,
+  // otherwise just that row.
+  const dragSetFor = (relPath: string): string[] =>
+    selectedSnapshot?.has(relPath) ? Array.from(selectedSnapshot) : [relPath];
+
+  const drag: DragCtx | undefined = onMove
+    ? {
+        start: (relPath) => {
+          draggingRef.current = dragSetFor(relPath);
+        },
+        end: () => {
+          draggingRef.current = [];
+          setDropTarget(null);
+        },
+        over: (destDir) => {
+          if (canDropInto(draggingRef.current, destDir)) setDropTarget(destDir);
+        },
+        leave: (destDir) => {
+          setDropTarget((cur) => (cur === destDir ? null : cur));
+        },
+        drop: (destDir) => {
+          const dragged = draggingRef.current;
+          draggingRef.current = [];
+          setDropTarget(null);
+          if (canDropInto(dragged, destDir)) onMove(dragged, destDir);
+        },
+        dropTarget,
+      }
+    : undefined;
 
   const allDirPaths = useMemo(() => {
     const paths: string[] = [];
@@ -227,12 +303,38 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
           <CaretRight size={12} weight="bold" /> Collapse
         </button>
       </div>
-      <div className="tree-body" ref={rootRef}>
+      <div
+        className={`tree-body${drag?.dropTarget === "" ? " drop-root" : ""}`}
+        ref={rootRef}
+        // Dropping onto blank space in the tree (not on a folder row) moves items to the vault root.
+        onDragOver={
+          drag
+            ? (e) => {
+                if (e.target === e.currentTarget && canDropInto(draggingRef.current, "")) {
+                  e.preventDefault();
+                  drag.over("");
+                }
+              }
+            : undefined
+        }
+        onDragLeave={drag ? (e) => { if (e.target === e.currentTarget) drag.leave(""); } : undefined}
+        onDrop={
+          drag
+            ? (e) => {
+                if (e.target === e.currentTarget) {
+                  e.preventDefault();
+                  drag.drop("");
+                }
+              }
+            : undefined
+        }
+      >
         {node.children.map((c) => (
           <TreeRow
             key={c.rel_path}
             node={c}
             depth={0}
+            drag={drag}
             activePath={activePath}
             selected={selected}
             onSelect={handleSelect}
@@ -270,12 +372,13 @@ interface RowProps {
   onOpenFolder?: (node: TreeNode) => void;
   onContextMenu?: (node: TreeNode, x: number, y: number) => void;
   onPickIcon?: (node: TreeNode) => void;
+  drag?: DragCtx;
   renamingPath?: string | null;
   onRenameCommit?: (node: TreeNode, newName: string) => void;
   onRenameCancel?: () => void;
 }
 
-function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
+function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, drag, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
   const renaming = renamingPath === node.rel_path;
   const isSelected = selected.has(node.rel_path);
   // Normalize the click into selection modifiers. metaKey covers Cmd on macOS.
@@ -307,12 +410,48 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
     </span>
   );
 
+  // Drag-source props shared by file and folder rows: every row can be picked up and dropped onto a
+  // folder (or the root) to move it. Renaming a row suppresses dragging so text selection works.
+  const dragSrc =
+    drag && !renaming
+      ? {
+          draggable: true,
+          onDragStart: (e: React.DragEvent) => {
+            drag.start(node.rel_path);
+            e.dataTransfer.effectAllowed = "move";
+            // Some browsers need data set for the drag to start.
+            e.dataTransfer.setData("text/plain", node.rel_path);
+          },
+          onDragEnd: () => drag.end(),
+        }
+      : {};
+
+  // Drop-target props for folder rows: highlight while a valid drag hovers, and move on drop.
+  const dropProps = (destDir: string) =>
+    drag
+      ? {
+          onDragOver: (e: React.DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = "move";
+            drag.over(destDir);
+          },
+          onDragLeave: () => drag.leave(destDir),
+          onDrop: (e: React.DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            drag.drop(destDir);
+          },
+        }
+      : {};
+
   if (!node.is_dir) {
     const isMd = node.ext === "";
     const label = isMd ? node.name.replace(/\.md$/i, "") : node.name.replace(new RegExp(`\\.${node.ext}$`, "i"), "");
     return (
       <div
         data-rel={node.rel_path}
+        {...dragSrc}
         className={`tree-file${activePath === node.rel_path ? " active" : ""}${isSelected ? " selected" : ""}`}
         onClick={(e) => {
           const m = mods(e);
@@ -352,7 +491,9 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
     <div>
       <div
         data-rel={node.rel_path}
-        className={`tree-dir${isSelected ? " selected" : ""}`}
+        {...dragSrc}
+        {...dropProps(node.rel_path)}
+        className={`tree-dir${isSelected ? " selected" : ""}${drag?.dropTarget === node.rel_path ? " drop-target" : ""}`}
         onClick={(e) => {
           const m = mods(e);
           // Ctrl/shift select the folder. A plain click opens/closes it — and also opens its view:
@@ -405,6 +546,7 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
             onOpenFolder={onOpenFolder}
             onContextMenu={onContextMenu}
             onPickIcon={onPickIcon}
+            drag={drag}
             renamingPath={renamingPath}
             onRenameCommit={onRenameCommit}
             onRenameCancel={onRenameCancel}

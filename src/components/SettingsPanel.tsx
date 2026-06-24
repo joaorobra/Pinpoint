@@ -419,6 +419,16 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
             {tab === "editor" && (
               <>
               <Group title="Editing" desc="Behavior of the markdown editor.">
+                <Row label="Formatting toolbar" hint="Show the floating toolbar (headings, bold, lists…) above the page.">
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.show_format_toolbar}
+                      onChange={(e) => set("show_format_toolbar", e.target.checked)}
+                    />
+                    <span className="switch-track" />
+                  </label>
+                </Row>
                 <Row label="Line numbers" hint="Show line numbers in the gutter.">
                   <label className="switch">
                     <input

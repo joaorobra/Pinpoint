@@ -418,6 +418,8 @@ export interface Settings {
    */
   periodic_templates: Record<string, string>;
   show_line_numbers: boolean;
+  /** Show the floating formatting toolbar (H1–H3, B/I/S, lists…) at the top of the editor. */
+  show_format_toolbar: boolean;
   /** Strike through the text of completed (checked) to-do items in the editor. */
   strike_done_tasks: boolean;
   /** Pattern (see dateformat.ts tokens) for inserting plain dates in the editor. */
@@ -643,6 +645,7 @@ export const DEFAULT_SETTINGS: Settings = {
   templates_folder: "Templates",
   periodic_templates: {},
   show_line_numbers: false,
+  show_format_toolbar: true,
   strike_done_tasks: true,
   date_format: "YYYY-MM-DD",
   time_format: "HH:mm",

@@ -604,18 +604,50 @@ code, .dsl-preview, .dsl-input {
   font-weight: 500;
 }
 .cal-agenda-empty:hover { background: var(--bg-hover); color: var(--text); }
+.cal-agenda-sections { display: flex; flex-direction: column; gap: var(--sp-2); }
+.cal-agenda-section { display: flex; flex-direction: column; gap: 1px; }
+.cal-agenda-section-label {
+  font-size: 0.68em; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 6px;
+}
 .cal-agenda-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+/* Nested (subtask) agenda rows: a faint guide line marks the indent so the hierarchy reads clearly. */
+.cal-agenda-task.nested { border-left: 1px solid var(--border); }
+/* Row = checkbox + content column. The column stacks the text and a meta row beneath it. */
 .cal-agenda-task {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: flex-start; gap: 6px;
   padding: 4px 6px; border-radius: var(--r-sm);
   font-size: 0.82em; color: var(--text); cursor: pointer;
 }
 .cal-agenda-task:hover { background: var(--bg-hover); }
-.cal-agenda-task > svg { flex: none; color: var(--text-dim); }
+.cal-agenda-task > svg { flex: none; color: var(--text-dim); margin-top: 3px; }
 .cal-agenda-task.done { color: var(--text-dim); }
 .cal-agenda-task.done > svg { color: var(--accent); }
 .cal-agenda-task.done .cal-agenda-text { text-decoration: line-through; }
-.cal-agenda-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Body: text + #tags flow inline together (tags sit right after the text and wrap with it). */
+.cal-agenda-body { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.cal-agenda-text { display: inline; }
+/* Inline markdown inside an agenda task: wikilinks/links read as accent, code keeps a subtle chip. */
+.cal-agenda-text [data-page-link],
+.cal-agenda-text a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.cal-agenda-text [data-page-link]:hover,
+.cal-agenda-text a:hover { text-decoration: underline; }
+.cal-agenda-text code { font-size: 0.92em; padding: 0 3px; border-radius: 3px; background: var(--bg-3); }
+.cal-agenda-task.done .cal-agenda-text [data-page-link],
+.cal-agenda-task.done .cal-agenda-text a { color: var(--text-dim); }
+/* #tags inline after the text — small dim chips. */
+.cal-agenda-tag {
+  display: inline-block; margin-left: 5px; white-space: nowrap;
+  font-size: 0.85em; font-weight: 500; color: var(--text-dim);
+  background: var(--bg-3); border-radius: 99px; padding: 0 6px; line-height: 1.5;
+}
+.cal-agenda-task.done .cal-agenda-tag { opacity: 0.6; }
+/* Priority flag — pinned to the far right edge of the row, tinted by level. */
+.cal-agenda-flag { flex: none; margin-left: auto; margin-top: 2px; }
+.cal-agenda-flag.prio-high { color: var(--prio-high); }
+.cal-agenda-flag.prio-medium { color: var(--prio-medium); }
+.cal-agenda-flag.prio-low { color: var(--prio-low); }
+.cal-agenda-task.done .cal-agenda-flag { opacity: 0.5; }
 
 /* Periodic notes (week → year), shown below the month calendar. */
 .periods {
@@ -754,6 +786,12 @@ code, .dsl-preview, .dsl-input {
 .tree-file.selected, .tree-dir.selected { background: var(--accent-ring); color: var(--text); }
 .tree-file.selected:hover, .tree-dir.selected:hover { background: var(--accent-ring); }
 .tree-file.active.selected { background: var(--accent-soft); color: var(--accent); }
+/* Drag-and-drop reorganize: highlight the folder (or whole tree, for a root drop) under the cursor. */
+.tree-dir.drop-target {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tree-body.drop-root { box-shadow: inset 0 0 0 2px var(--accent-soft); border-radius: var(--r-sm); }
 .tree-icon { opacity: 0.9; flex-shrink: 0; display: inline-flex; align-items: center; }
 /* The icon doubles as a button that opens the icon picker. */
 .tree-icon-btn { border-radius: var(--r-sm); padding: 1px; margin: -1px; }
@@ -1049,30 +1087,67 @@ code, .dsl-preview, .dsl-input {
 
 /* ---------- Editor ---------- */
 .editor-wrap { display: flex; flex-direction: column; height: 100%; position: relative; }
+/* Centered floating formatting pill: sits above the page column, follows scroll (sticky), and
+   stays the width of its contents (margin auto centers it). Soft elevation + hairline border over a
+   translucent, blurred surface — all from tokens, so themes recolor it automatically. */
 .toolbar {
-  display: flex; gap: 2px; flex-wrap: wrap; align-items: center;
-  padding: var(--sp-2) var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 2;
-  background: color-mix(in srgb, var(--bg-override, var(--bg)) 82%, transparent);
+  display: flex; gap: 2px; flex-wrap: nowrap; align-items: center; width: fit-content; max-width: 100%;
+  margin: var(--sp-3) auto var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  position: sticky; top: var(--sp-3); z-index: 2;
+  background: color-mix(in srgb, var(--bg-override, var(--surface)) 86%, transparent);
   backdrop-filter: saturate(180%) blur(12px);
+  box-shadow: var(--shadow-md);
 }
 .tb-btn {
-  min-width: 32px; height: 30px; padding: 0 7px;
-  font-size: 0.85em; font-weight: 600;
+  min-width: 30px; height: 28px; padding: 0 7px;
+  font-size: 0.85em; font-weight: 600; border-radius: var(--r-sm);
   background: transparent; border-color: transparent; color: var(--text-dim);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .tb-btn:hover { background: var(--bg-hover); color: var(--text); }
 .tb-btn.active { background: var(--accent-soft); color: var(--accent); }
-.tb-sep { width: 1px; align-self: stretch; background: var(--border); margin: 4px 6px; }
+.tb-sep { width: 1px; align-self: stretch; background: var(--border); margin: var(--sp-1) var(--sp-1); }
 
 .editor-content {
   padding: var(--sp-8) 56px 30vh;
   font-family: var(--font-editor);
   max-width: var(--page-width, 820px); margin: 0 auto; width: 100%;
+  /* Positioning context for the block drag handle + drop indicator (absolutely positioned children
+     measured against THIS box). Without it they'd anchor to .editor-wrap (full width) and drift right. */
+  position: relative;
 }
 .editor-content :focus { outline: none; }
 .ProseMirror { min-height: 50vh; outline: none; }
+
+/* ---- Notion-style block drag handle ----
+   A `⋮⋮` grip beside the hovered top-level block. Dragging it reorders that whole block (the JS
+   plugin in Editor.tsx drives its position + the drop logic); the horizontal drop indicator shows
+   where it will land. `left`/`top` are set inline by the plugin — measured off the hovered block's
+   own box — so the grip tracks the line exactly under any page width, centering, or indent. */
+.block-drag-handle {
+  position: absolute; display: none;
+  align-items: center; justify-content: center;
+  width: 22px; height: 24px; border-radius: var(--r-sm);
+  color: var(--text-dim); opacity: 0; cursor: grab;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+  z-index: 4; user-select: none;
+}
+.block-drag-handle:hover { opacity: 1; background: var(--bg-3); color: var(--text); }
+/* Reveal the grip when the pointer is anywhere over the editor column. */
+.editor-content:hover .block-drag-handle { opacity: 0.55; }
+.editor-content:hover .block-drag-handle:hover { opacity: 1; }
+.block-drag-handle.dragging { cursor: grabbing; opacity: 1; }
+.block-drag-handle svg { fill: currentColor; pointer-events: none; }
+
+/* `left`/`right` are set inline by the plugin to span the dragged line's sibling column. */
+.block-drop-indicator {
+  position: absolute; height: 2px;
+  background: var(--accent); border-radius: 2px; pointer-events: none;
+  z-index: 4; box-shadow: 0 0 0 1px var(--accent-ring);
+}
 
 /* ---- Page-width ruler (Ctrl+R) ----
    A thin horizontal track whose centered bar spans the current page width. Drag either end handle
@@ -1118,7 +1193,7 @@ code, .dsl-preview, .dsl-input {
 .editor-image img {
   max-width: 100%;
   height: auto;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid var(--border);
   display: block;
 }
@@ -1671,13 +1746,19 @@ code, .dsl-preview, .dsl-input {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 6px 12px; background: var(--bg-2); border: 1px solid var(--border);
   border-radius: 99px; font-size: 0.82em; color: var(--text-dim);
+  cursor: pointer; font-family: inherit;
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
+.tasks-stat:hover { background: var(--bg-3); border-color: var(--border-strong, var(--border)); }
+.tasks-stat.active { border-color: var(--accent); background: var(--accent-soft, var(--bg-3)); }
+.tasks-stat.active .tasks-stat-label { color: var(--text); }
 .tasks-stat-icon { display: inline-flex; color: var(--text-faint); }
 .tasks-stat-value { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
 .tasks-stat.accent .tasks-stat-icon { color: var(--accent); }
 .tasks-stat.danger { border-color: var(--danger-ring); }
 .tasks-stat.danger .tasks-stat-icon,
 .tasks-stat.danger .tasks-stat-value { color: var(--danger-strong); }
+.tasks-stat.danger.active { border-color: var(--danger-strong); }
 /* Completion bar pushes to the right edge of the strip. */
 .tasks-progress { display: flex; align-items: center; gap: var(--sp-2); margin-left: auto; min-width: 160px; }
 .tasks-progress-bar { flex: 1; height: 6px; background: var(--bg-3); border-radius: 99px; overflow: hidden; }
@@ -1710,8 +1791,8 @@ code, .dsl-preview, .dsl-input {
 .tasks-pop { min-width: 280px; }
 .tasks-pop-narrow { min-width: 220px; }
 .tasks-pop-label {
-  font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
-  color: var(--text-faint); margin: var(--sp-3) 0 6px;
+  font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-dim); margin: var(--sp-3) 0 6px;
 }
 .tasks-pop-label:first-of-type { margin-top: 0; }
 .tasks-pop-reset { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.74rem; font-weight: 600; padding: 0; }
@@ -1721,23 +1802,85 @@ code, .dsl-preview, .dsl-input {
 /* Status segmented control — equal-width buttons, single active. */
 .tasks-status-seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
 .tasks-seg-btn {
-  padding: 6px 4px; background: var(--bg-3); border: 1px solid transparent;
-  border-radius: var(--r-sm); color: var(--text-dim); cursor: pointer;
-  font: inherit; font-size: 0.8rem; transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  padding: 6px 4px; background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: var(--r-sm); color: var(--text); cursor: pointer;
+  font: inherit; font-size: 0.8rem;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
-.tasks-seg-btn:hover { background: var(--bg-hover); color: var(--text); }
-.tasks-seg-btn.active { background: var(--accent); color: var(--accent-contrast); font-weight: 600; }
+.tasks-seg-btn:hover { background: var(--bg-hover); border-color: var(--text-faint); color: var(--text); }
+.tasks-seg-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); font-weight: 600; }
 
 /* Tag filter chips — multi-select, toggle to accent when active. */
 .tasks-tag-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 168px; overflow-y: auto; }
 .tasks-chip {
-  padding: 3px 10px; background: var(--bg-3); border: 1px solid transparent;
-  border-radius: 99px; color: var(--text-dim); cursor: pointer;
+  padding: 3px 10px; background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: 99px; color: var(--text); cursor: pointer;
   font: inherit; font-size: 0.76rem; font-weight: 500;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.tasks-chip:hover { background: var(--bg-hover); border-color: var(--text-faint); color: var(--text); }
+.tasks-chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-ring); font-weight: 600; }
+
+/* Single-row chip group (priority + any free-form chip set). */
+.tasks-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Wrapping segmented control for variable-length single-select rows (Due / Type); buttons grow to
+   fill the row and wrap when they run out of space. Status keeps its fixed 4-up grid above. */
+.tasks-seg-wrap { display: flex; flex-wrap: wrap; gap: 4px; }
+.tasks-seg-wrap .tasks-seg-btn {
+  flex: 1 1 auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding-left: 10px; padding-right: 10px; white-space: nowrap;
+}
+
+/* Priority filter chips — carry their level's colour when active (else read like a neutral chip). */
+.tasks-prio-chip { display: inline-flex; align-items: center; gap: 5px; }
+.tasks-prio-chip svg { flex: none; }
+.tasks-prio-chip.prio-high.active {
+  background: var(--prio-high-soft); color: var(--prio-high);
+  border-color: color-mix(in srgb, var(--prio-high) 35%, transparent);
+}
+.tasks-prio-chip.prio-medium.active {
+  background: var(--prio-medium-soft); color: var(--prio-medium);
+  border-color: color-mix(in srgb, var(--prio-medium) 35%, transparent);
+}
+.tasks-prio-chip.prio-low.active {
+  background: var(--prio-low-soft); color: var(--text-dim);
+  border-color: color-mix(in srgb, var(--text-faint) 35%, transparent);
+}
+/* "None" keeps the default accent treatment inherited from .tasks-chip.active. */
+
+/* Label row that hosts an inline control (the tag Any/All match toggle). */
+.tasks-pop-label-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.tasks-match-toggle { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-3); border-radius: var(--r-sm); }
+.tasks-match-toggle button {
+  padding: 2px 9px; background: none; border: none; border-radius: calc(var(--r-sm) - 1px);
+  color: var(--text); cursor: pointer; font: inherit; font-size: 0.7rem; font-weight: 600;
+  text-transform: none; letter-spacing: 0; transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.tasks-match-toggle button:hover { color: var(--text); }
+.tasks-match-toggle button.active { background: var(--accent); color: var(--accent-contrast); }
+
+/* The filter popover hosts several sections — cap its height so it never runs off-screen. Scoped to
+   the filter popover; the narrow Group/Sort popovers size to their inline choice list (below). */
+.tasks-pop:not(.tasks-pop-narrow) { max-height: min(72vh, 600px); overflow-y: auto; overscroll-behavior: contain; }
+
+/* Inline single-choice list inside the Group / Sort / Period popovers — the options show immediately
+   (no nested collapsed dropdown), mirroring the Select option row so the two read identically. */
+.tasks-choice-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+.tasks-choice-item {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  padding: 6px 8px; border: none; border-radius: var(--r-sm); background: none;
+  color: var(--text); font: inherit; font-size: 0.92em; text-align: left; cursor: pointer;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.tasks-chip:hover { background: var(--bg-hover); color: var(--text); }
-.tasks-chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-ring); font-weight: 600; }
+.tasks-choice-item:hover { background: var(--bg-hover); }
+.tasks-choice-item:focus-visible { outline: none; background: var(--bg-hover); box-shadow: 0 0 0 2px var(--accent-ring) inset; }
+.tasks-choice-item.selected { color: var(--accent); font-weight: 600; }
+.tasks-choice-item.selected:hover, .tasks-choice-item.selected:focus-visible { background: var(--accent-soft); }
+.tasks-choice-icon { flex: none; display: inline-flex; align-items: center; color: var(--text-dim); }
+.tasks-choice-item.selected .tasks-choice-icon { color: var(--accent); }
+.tasks-choice-label { flex: 1; min-width: 0; white-space: nowrap; }
+.tasks-choice-check { flex: none; color: var(--accent); }
 
 /* Tasks empty / no-results state. */
 .tasks-empty {
@@ -2472,6 +2615,9 @@ input[type="range"]::-moz-range-thumb {
 .select-option.selected { color: var(--accent); font-weight: 600; }
 .select-option.active.selected { background: var(--accent-soft); }
 .select-check { flex-shrink: 0; color: var(--accent); }
+/* Optional leading icon on an option / the trigger value — subtle by default, accent when selected. */
+.select-option-icon, .select-value-icon { flex: none; display: inline-flex; align-items: center; color: var(--text-dim); }
+.select-option.selected .select-option-icon { color: var(--accent); }
 
 /* ---------- Circular Color Picker ---------- */
 .cp { position: relative; display: inline-block; }
@@ -4289,14 +4435,17 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   }
   .page-ruler { display: none; }
 
-  /* Editor toolbar: one horizontally-scrollable row (wrapping wastes vertical space on a phone),
-     with comfortably tall buttons. */
+  /* Editor toolbar pill on a phone: stays centered but may scroll horizontally if it can't fit,
+     with comfortably tall touch targets. The pill caps at the column width so it never bleeds edge
+     to edge. */
   .toolbar {
-    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
-    padding: var(--sp-1) max(var(--sp-2), var(--safe-l));
+    overflow-x: auto; scrollbar-width: none;
+    margin: var(--sp-2) auto;
+    max-width: calc(100% - 2 * var(--sp-4));
+    padding: var(--sp-1) var(--sp-2);
   }
   .toolbar::-webkit-scrollbar { height: 0; }
-  .tb-btn { height: 38px; min-width: 38px; flex: 0 0 auto; }
+  .tb-btn { height: 36px; min-width: 36px; flex: 0 0 auto; }
 
   /* ---- Overlays become bottom sheets ---- */
 

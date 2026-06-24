@@ -5,12 +5,14 @@
 // to move, Enter/Space to commit, Escape to close, type-ahead by first letter. Closes on outside
 // click or blur. Renders the popover inline (absolutely positioned) under the trigger.
 
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CaretDown, Check } from "@phosphor-icons/react";
 
 export interface SelectOption {
   value: string;
   label: string;
+  /** Optional leading icon (a Phosphor element) shown before the label in the menu and trigger. */
+  icon?: ReactNode;
 }
 
 export interface SelectGroup {
@@ -141,6 +143,7 @@ export default function Select({
           commit(idx);
         }}
       >
+        {opt.icon && <span className="select-option-icon">{opt.icon}</span>}
         <span className="select-option-label">{opt.label}</span>
         {isSel && <Check size={14} weight="bold" className="select-check" />}
       </div>
@@ -158,6 +161,7 @@ export default function Select({
         onClick={() => setOpen((o) => !o)}
         onKeyDown={onKeyDown}
       >
+        {selected?.icon && <span className="select-value-icon">{selected.icon}</span>}
         <span className={`select-value${selected ? "" : " placeholder"}`}>
           {selected ? selected.label : placeholder}
         </span>
