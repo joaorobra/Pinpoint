@@ -8,7 +8,10 @@ import {
   isWebFsSupported,
   listRecentVaultsWeb,
   openRecentVaultWeb,
+  RecentVaultError,
 } from "./fsa-vault";
+
+export { RecentVaultError } from "./fsa-vault";
 
 // PINPOINT runs in two hosts that share this one frontend:
 //   - the Tauri desktop app, backed by a Rust filesystem + SQLite index (via `invoke`);
@@ -57,13 +60,22 @@ export async function listRecentVaults(): Promise<RecentVault[]> {
 
 /**
  * Resolve a recent vault's id to something `api.openVault` accepts:
- *  - desktop: the id IS the absolute path, returned as-is;
+ *  - desktop: the id IS the absolute path, returned as-is (open_vault re-validates it exists);
  *  - browser: re-grants permission on the persisted handle and returns the id.
- * Returns null if the vault can no longer be opened (handle gone).
+ *
+ * On the browser this throws a {@link RecentVaultError} (carrying a user-facing message and a
+ * `reason`) when the vault can't be opened — permission declined, folder gone, or storage blocked —
+ * so the caller can give feedback instead of silently doing nothing. The `boot` flag suppresses the
+ * permission re-prompt path's distinction at the call site (see App's silent auto-open).
  */
-export async function resolveRecentVault(id: string): Promise<string | null> {
+export async function resolveRecentVault(id: string): Promise<string> {
   if (isTauri()) return id; // the id is the path; open_vault re-validates it exists
   return openRecentVaultWeb(id, Date.now());
+}
+
+/** Convenience: is this error one of our actionable recent-vault failures? */
+export function isRecentVaultError(e: unknown): e is RecentVaultError {
+  return e instanceof RecentVaultError;
 }
 
 // Native implementation (Tauri commands).

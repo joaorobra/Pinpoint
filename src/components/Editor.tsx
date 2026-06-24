@@ -934,7 +934,13 @@ const SmartReplace = Extension.create<SmartReplaceOptions>({
           const prevChar = range.from > 0 ? state.doc.textBetween(range.from - 1, range.from) : "";
           const hit = resolveSymbol(tail, prevChar, replacements);
           if (!hit) return null; // no trigger matched — leave the text as typed
-          state.tr.insertText(hit.output, range.to - hit.back, range.to);
+          // The trigger is the last `hit.back` chars of `match[0]`, which spans the doc range
+          // [range.from, range.to] PLUS the just-typed (not-yet-inserted) char at its end. So the
+          // trigger's start in the doc is `range.from + (match[0].length - hit.back)`, and we replace
+          // up to range.to (the typed char is consumed by the rule). Computing the start from range.to
+          // instead would over-count by the un-inserted char's width and eat the preceding character.
+          const start = range.from + (tail.length - hit.back);
+          state.tr.insertText(hit.output, start, range.to);
         },
       })
     );

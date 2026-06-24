@@ -1066,3 +1066,37 @@
 [2m00:13:52[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
 [2m12:31:17[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx[22m
 [2m12:31:49[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2msrc/main.tsx[22m
+[2m14:16:35[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx[22m
+[2m14:16:56[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx[22m
+[2m14:17:03[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx[22m
+[2m14:17:23[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx[22m
+[2m14:17:33[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m14:17:37[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Editor.tsx[22m
+[2m14:17:48[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m14:18:06[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m14:18:14[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m14:18:20[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m14:18:38[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/StartScreen.tsx[22m
+[2m14:18:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/StartScreen.tsx[22m
+[2m14:18:53[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/StartScreen.tsx[22m
+[2m14:19:09[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/StartScreen.tsx[22m
+[2m14:20:08[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m14:20:14[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m14:56:16[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/styles.css[22m
+[2m14:59:47[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx, /src/components/FileTree.tsx, /src/components/ColorPicker.tsx, /src/components/DbTableView.tsx[22m
+[2m14:59:51[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/DbPageProperties.tsx, /src/components/AssetViewer.tsx, /src/components/QueryView.tsx, /src/components/RightSidebar.tsx, /src/components/TasksView.tsx, /src/components/PageProperties.tsx, /src/components/StartScreen.tsx, /src/components/TrashView.tsx, /src/components/DatabaseView.tsx, /src/components/QueryBlock.tsx, /src/components/QueryHelper.tsx, /src/components/FileTree.tsx, /src/components/ColorPicker.tsx, /src/components/DbTableView.tsx[22m
+[2m15:00:10[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:00:16[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:00:32[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:00:38[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:00:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:07[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:17[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:22[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:28[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:34[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:39[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:01:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SettingsPanel.tsx[22m
+[2m15:01:51[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SettingsPanel.tsx[22m
+[2m15:02:02[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/SettingsPanel.tsx[22m
+[2m15:02:09[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.tsx[22m

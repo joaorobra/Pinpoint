@@ -487,6 +487,17 @@ export interface Settings {
   /** The delimiter that wraps a snippet name to fire it (default `_` → `_name_`). */
   snippet_delimiter: string;
   /**
+   * What to open when this vault is (re)opened:
+   *  - `last` — restore the page that was active when the vault was last closed (default);
+   *  - `today` — open today's daily periodic note, creating it from the daily template if missing;
+   *  - `page` — always open the page named in `startup_page`.
+   * The "last page" itself isn't stored here (it changes on every navigation); it lives in
+   * app-global localStorage keyed by vault, so this preference stays stable in settings.json.
+   */
+  startup_behavior: "last" | "today" | "page";
+  /** Vault-relative path of the page opened on launch when `startup_behavior` is `page`. */
+  startup_page: string;
+  /**
    * Name of the active theme (a `.themes/<name>.json` file). Empty = the built-in default palette,
    * i.e. the stock CSS tokens with only `accent_color`/`background_color`/`text_color` applied as
    * before. When set, the theme's dark/light variant supplies the core tokens; the `theme` field
@@ -698,5 +709,7 @@ export const DEFAULT_SETTINGS: Settings = {
   smart_replacements: { ...DEFAULT_SMART_REPLACEMENTS },
   snippets: {},
   snippet_delimiter: "_",
+  startup_behavior: "last",
+  startup_page: "",
   active_theme: "",
 };

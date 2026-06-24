@@ -37,6 +37,8 @@ interface Props {
   onClose: () => void;
   /** Templates discovered in the vault, for the periodic-template bindings. */
   templates?: TemplateInfo[];
+  /** All markdown pages in the vault, for the "open a specific page on startup" picker. */
+  pages?: { name: string; rel_path: string }[];
 }
 
 const FONT_GROUPS: SelectGroup[] = [
@@ -328,7 +330,7 @@ function NoResults({ query, pane }: { query: string; pane: React.RefObject<HTMLD
   );
 }
 
-export default function SettingsPanel({ settings, onChange, onClose, templates = [] }: Props) {
+export default function SettingsPanel({ settings, onChange, onClose, templates = [], pages = [] }: Props) {
   const [tab, setTab] = useState<TabId>("appearance");
   const [search, setSearch] = useState("");
   const query = search.trim().toLowerCase();
@@ -771,6 +773,38 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
 
             {(searching || tab === "vault") && (
               <>
+                <Group
+                  title="Startup"
+                  desc="What to open when you open this vault."
+                  keywords="startup launch open last page today daily resume restore where i left off"
+                >
+                  <Row label="On open" hint="Restore your last page, jump to today's daily note, or always open one page.">
+                    <Select
+                      value={settings.startup_behavior}
+                      options={[
+                        { value: "last", label: "Open last page" },
+                        { value: "today", label: "Open today's daily note" },
+                        { value: "page", label: "Open a specific page" },
+                      ]}
+                      onChange={(v) => set("startup_behavior", v as Settings["startup_behavior"])}
+                      ariaLabel="Startup behaviour"
+                    />
+                  </Row>
+                  {settings.startup_behavior === "page" && (
+                    <Row label="Page to open">
+                      <Select
+                        value={settings.startup_page}
+                        options={[
+                          { value: "", label: pages.length ? "Choose a page…" : "No pages yet" },
+                          ...pages.map((p) => ({ value: p.rel_path, label: p.rel_path.replace(/\.md$/i, "") })),
+                        ]}
+                        onChange={(v) => set("startup_page", v)}
+                        ariaLabel="Startup page"
+                      />
+                    </Row>
+                  )}
+                </Group>
+
                 <Group
                   title="Periodic notes"
                   desc="Where daily / weekly notes are created and looked up."

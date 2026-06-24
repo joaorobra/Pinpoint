@@ -28,7 +28,7 @@ import {
   MagnifyingGlass,
   Tag,
 } from "@phosphor-icons/react";
-import { api, pickVaultFolder, resolveRecentVault, listRecentVaults } from "./api";
+import { api, pickVaultFolder, resolveRecentVault, listRecentVaults, isRecentVaultError } from "./api";
 import { getTheme, seedStarterThemes } from "./themes-store";
 import { applyTheme, resolveMode } from "./theme-apply";
 import type { Theme } from "./types";
@@ -87,6 +87,33 @@ type DocKind = "page" | "asset" | "db" | "folder";
 // stays out of the file tree like `.obsidian`). The markdown stores a vault-relative path into it
 // and the editor's image node resolves that back through the API.
 const ATTACHMENTS_DIR = ".attachments";
+
+// The "open where I left off" feature remembers the last page a vault had open, per vault. This is
+// volatile runtime state (it changes on every navigation), not a user preference, so it lives in
+// app-global localStorage keyed by the vault id — NOT in the vault's settings.json (which would
+// churn on every click and travel to other machines where the path is meaningless). The startup
+// PREFERENCE (last / today / specific page) does live in settings.json. We hash the vault id into
+// the key so an absolute path with odd characters still yields a safe, stable key.
+function lastPageKey(vaultId: string): string {
+  let h = 0;
+  for (let i = 0; i < vaultId.length; i++) h = (Math.imul(31, h) + vaultId.charCodeAt(i)) | 0;
+  return `pp.lastPage.${(h >>> 0).toString(36)}`;
+}
+function readLastPage(vaultId: string): string | null {
+  try {
+    return localStorage.getItem(lastPageKey(vaultId));
+  } catch {
+    return null;
+  }
+}
+function writeLastPage(vaultId: string, relPath: string | null): void {
+  try {
+    if (relPath) localStorage.setItem(lastPageKey(vaultId), relPath);
+    else localStorage.removeItem(lastPageKey(vaultId));
+  } catch {
+    /* storage unavailable (private mode / quota) — last-page restore just won't work */
+  }
+}
 
 // Same-second pastes get a numeric suffix so two images in one batch never collide. The seconds
 // timestamp already separates pastes across time; the counter only disambiguates within a second.
@@ -204,9 +231,20 @@ function flashTaskRow(ordinal: number, key: string, attempt = 0): void {
 export default function App() {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [vaultName, setVaultName] = useState<string>("");
+  // The id (absolute path on desktop, opaque handle key on web) of the open vault, used to key the
+  // per-vault "last open page" in localStorage. Null when on the Start screen.
+  const vaultIdRef = useRef<string | null>(null);
+  // Holds the latest `openStartupDoc` so the vault-open callbacks (declared above it) can invoke the
+  // startup behaviour without a declaration-order / TDZ dependency on the callback itself.
+  const openStartupRef = useRef<((s: Settings, id: string) => Promise<void>) | null>(null);
   // True while the boot effect tries to auto-open the most recent vault, so we don't
   // flash the Start screen before we know whether there's a vault to restore.
   const [booting, setBooting] = useState(true);
+  // The recent-vault id currently being opened from the Start screen (or "new" for the folder
+  // picker), so the Start screen can show a spinner and block a second click. null = idle.
+  const [openingVault, setOpeningVault] = useState<string | null>(null);
+  // Bumped to make the Start screen re-fetch its recent list (e.g. after a dead entry is pruned).
+  const [recentsNonce, setRecentsNonce] = useState(0);
   const [activePath, setActivePath] = useState<string | null>(null);
   // Multi-selected tree rows (rel_paths). Driven by ctrl/shift-click; a plain click collapses
   // this back to just the opened row. Used for bulk actions from the context menu.
@@ -489,14 +527,18 @@ export default function App() {
   }, [refreshTree]);
 
   // Open the vault at `path` (an absolute path on desktop, an opaque handle key on web)
-  // and load its tree + settings into the UI.
+  // and load its tree + settings into the UI. Returns the loaded settings + vault id so the caller
+  // can apply the configured startup behaviour (open last page / today / a specific page).
   const loadVault = useCallback(async (path: string) => {
     const t = await api.openVault(path);
     setTree(t);
     setVaultName(t.name);
-    setSettings(await api.getSettings());
+    vaultIdRef.current = path;
+    const loaded = await api.getSettings();
+    setSettings(loaded);
     // Seed curated starter themes the first time a vault is opened (no-op if `.themes/` exists).
     seedStarterThemes();
+    return { settings: loaded, id: path };
   }, []);
 
   // Pick a brand-new vault folder, then open it.
@@ -505,27 +547,70 @@ export default function App() {
     try {
       path = await pickVaultFolder();
     } catch (e) {
-      // User dismissed the picker (AbortError) — or the browser is unsupported.
+      // User dismissed the picker (AbortError) — say nothing, that was intentional.
       if (e instanceof DOMException && e.name === "AbortError") return;
+      // A real failure: unsupported browser, or the FSA picker threw. Tell the user why.
       console.error(e);
+      toast.show({
+        message: e instanceof Error ? e.message : "Couldn’t open that folder. Please try again.",
+        durationMs: 7000,
+      });
       return;
     }
-    if (!path) return;
-    await loadVault(path);
+    if (!path) return; // picker returned nothing (also a quiet cancel)
+    setOpeningVault("new");
+    try {
+      const { settings: loaded, id } = await loadVault(path);
+      await openStartupRef.current?.(loaded, id);
+    } catch (e) {
+      // The folder was picked but couldn't be read/indexed (permissions, gone mid-flight, …).
+      console.error(e);
+      toast.show({
+        message: e instanceof Error ? e.message : "Couldn’t open that vault. Please try again.",
+        durationMs: 7000,
+      });
+    } finally {
+      setOpeningVault(null);
+    }
   }, [loadVault]);
 
-  // Re-open a vault from the Start screen's recent list (re-grants web permission first).
+  // Re-open a vault from the Start screen's recent list. On the browser this re-grants the folder
+  // permission first; that, and the folder read, can each fail — so we surface a clear, actionable
+  // message (and a one-tap "Open folder" fallback) instead of doing nothing on click.
   const openRecent = useCallback(
     async (id: string) => {
+      if (openingVault) return; // a vault is already opening — ignore the double-click
+      setOpeningVault(id);
       try {
         const path = await resolveRecentVault(id);
-        if (!path) return; // handle gone / couldn't resolve
-        await loadVault(path);
+        const { settings: loaded, id: vid } = await loadVault(path);
+        await openStartupRef.current?.(loaded, vid);
       } catch (e) {
         console.error(e);
+        if (isRecentVaultError(e)) {
+          // A dead recent (folder moved/deleted, or no longer saved) has already been pruned in the
+          // data layer; refresh the Start screen's list so it stops offering it.
+          if (e.prune) setRecentsNonce((n) => n + 1);
+          toast.show({
+            message: e.message,
+            // Offer the manual picker as an escape hatch for declined-permission / missing cases.
+            action: { label: "Open folder", run: () => void openVault() },
+            durationMs: 8000,
+          });
+        } else {
+          // Desktop open_vault failure (e.g. folder deleted while the Start screen was open), or any
+          // other unexpected error.
+          toast.show({
+            message: e instanceof Error ? e.message : "Couldn’t open that vault. Please try again.",
+            action: { label: "Open folder", run: () => void openVault() },
+            durationMs: 8000,
+          });
+        }
+      } finally {
+        setOpeningVault(null);
       }
     },
-    [loadVault]
+    [loadVault, openVault, openingVault]
   );
 
   // Return to the Start screen to pick a different vault. The open document state is
@@ -533,6 +618,7 @@ export default function App() {
   const switchVault = useCallback(() => {
     setTree(null);
     setVaultName("");
+    vaultIdRef.current = null;
     setActivePath(null);
     setActiveAsset(null);
     setBody("");
@@ -558,7 +644,8 @@ export default function App() {
         if (cancelled || recents.length === 0) return;
         const path = await resolveRecentVault(recents[0].id);
         if (cancelled || !path) return;
-        await loadVault(path);
+        const { settings: loaded, id } = await loadVault(path);
+        if (!cancelled) await openStartupRef.current?.(loaded, id);
       } catch (e) {
         // Most-recent vault gone or needs a gesture — show the Start screen instead.
         console.error(e);
@@ -570,6 +657,13 @@ export default function App() {
       cancelled = true;
     };
   }, [loadVault]);
+
+  // Remember the page currently open, per vault, so "open last page" on the next launch can restore
+  // it. Keyed by vault id in localStorage (see lastPageKey) — volatile state, kept out of settings.
+  useEffect(() => {
+    const id = vaultIdRef.current;
+    if (id && activePath) writeLastPage(id, activePath);
+  }, [activePath]);
 
   // True while replaying a back/forward navigation, so the open* helpers don't push a new history
   // entry for a move that's just walking the existing stack.
@@ -896,6 +990,40 @@ export default function App() {
     },
     [openPage, refreshTree, settings.periodic_templates, applyTemplate]
   );
+
+  // Apply the vault's configured startup behaviour after it loads (see Settings → Vault → "On open"):
+  //  - "today": open/create today's daily note;
+  //  - "page":  open the chosen page (falls back to last-page if it's gone);
+  //  - "last":  reopen the page that was active when this vault was last closed.
+  // Takes the freshly-loaded settings + vault id explicitly so it doesn't race the `settings` state
+  // update from loadVault. A missing target page is a silent no-op (lands on the empty editor).
+  const openStartupDoc = useCallback(
+    async (loaded: Settings, vaultId: string) => {
+      const exists = async (rel: string) => {
+        try {
+          await api.readPage(rel);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      if (loaded.startup_behavior === "today") {
+        const today = new Date();
+        const rel = pathFor(loaded.periodic_folder, "daily", today);
+        await openPeriodic(rel, template("daily", today, loaded.periodic_label_format), "daily", today);
+        return;
+      }
+      if (loaded.startup_behavior === "page" && loaded.startup_page && (await exists(loaded.startup_page))) {
+        await openPage(loaded.startup_page);
+        return;
+      }
+      // "last" (or a "page" target that no longer exists): restore the remembered page if still there.
+      const last = readLastPage(vaultId);
+      if (last && (await exists(last))) await openPage(last);
+    },
+    [openPage, openPeriodic]
+  );
+  openStartupRef.current = openStartupDoc;
 
   // Editor context-menu "Send to": MOVE the task line (and its subtasks) under the caret into a
   // periodic note — the same action as the Tasks view's "Send to", not a due-date stamp. `line` is
@@ -2207,7 +2335,16 @@ export default function App() {
     return (
       <>
         <Titlebar autoHide={settings.auto_hide_titlebar} />
-        {booting ? <div className="start" /> : <StartScreen onOpenNew={openVault} onOpenRecent={openRecent} />}
+        {booting ? (
+          <div className="start" />
+        ) : (
+          <StartScreen
+            onOpenNew={openVault}
+            onOpenRecent={openRecent}
+            openingId={openingVault}
+            refreshKey={recentsNonce}
+          />
+        )}
       </>
     );
   }
@@ -2730,7 +2867,7 @@ export default function App() {
       </AnimatePresence>
 
       {showSettings && (
-        <SettingsPanel settings={settings} onChange={saveSettings} onClose={() => setShowSettings(false)} templates={templates} />
+        <SettingsPanel settings={settings} onChange={saveSettings} onClose={() => setShowSettings(false)} templates={templates} pages={pages} />
       )}
 
       {menu && (

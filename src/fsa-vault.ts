@@ -825,17 +825,51 @@ function idbAll(): Promise<RecentRecord[]> {
     .catch(() => []); // private mode / blocked IndexedDB → behave as if there are no recents
 }
 
+/**
+ * Look up one persisted recent by id. Unlike the list/put helpers this does NOT swallow IndexedDB
+ * failures: the caller (openRecentVaultWeb) needs to tell "no such record" apart from "storage is
+ * blocked" so it can show the right message. `undefined` means the record genuinely isn't there.
+ */
 function idbGet(id: string): Promise<RecentRecord | undefined> {
+  return openDb().then(
+    (db) =>
+      new Promise<RecentRecord | undefined>((resolve, reject) => {
+        const req = db.transaction(STORE, "readonly").objectStore(STORE).get(id);
+        req.onsuccess = () => resolve(req.result as RecentRecord | undefined);
+        req.onerror = () => reject(req.error);
+      })
+  );
+}
+
+/** Remove a persisted recent by id (best-effort — used to prune a vault whose handle is gone). */
+function idbDelete(id: string): Promise<void> {
   return openDb()
     .then(
       (db) =>
-        new Promise<RecentRecord | undefined>((resolve, reject) => {
-          const req = db.transaction(STORE, "readonly").objectStore(STORE).get(id);
-          req.onsuccess = () => resolve(req.result as RecentRecord | undefined);
-          req.onerror = () => reject(req.error);
+        new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(STORE, "readwrite");
+          tx.objectStore(STORE).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
         })
     )
-    .catch(() => undefined);
+    .catch(() => {
+      /* best-effort */
+    });
+}
+
+/** Thrown by openRecentVaultWeb so the UI can show vault-specific guidance and prune dead entries. */
+export class RecentVaultError extends Error {
+  constructor(
+    message: string,
+    /** "denied" → permission refused; "missing" → handle/folder gone; "blocked" → storage unavailable. */
+    readonly reason: "denied" | "missing" | "blocked",
+    /** True when the recent entry is dead and should be dropped from the list. */
+    readonly prune: boolean
+  ) {
+    super(message);
+    this.name = "RecentVaultError";
+  }
 }
 
 function idbPut(rec: RecentRecord): Promise<void> {
@@ -871,19 +905,65 @@ export async function listRecentVaultsWeb(): Promise<RecentVault[]> {
     .sort((a, b) => b.last_opened - a.last_opened);
 }
 
-/** Re-open a persisted vault by id, re-requesting read/write permission if needed. */
-export async function openRecentVaultWeb(id: string, now: number): Promise<string | null> {
-  const rec = await idbGet(id);
-  if (!rec) return null;
+/**
+ * Re-open a persisted vault by id, re-requesting read/write permission if needed. Throws a
+ * {@link RecentVaultError} (with a `reason` the UI can act on) instead of failing silently:
+ *  - "blocked"  — IndexedDB is unavailable (private window / disabled storage);
+ *  - "missing"  — no such recent, or its folder has been moved/deleted/renamed away;
+ *  - "denied"   — the user dismissed or refused the permission prompt.
+ */
+export async function openRecentVaultWeb(id: string, now: number): Promise<string> {
+  let rec: RecentRecord | undefined;
+  try {
+    rec = await idbGet(id);
+  } catch {
+    throw new RecentVaultError(
+      "Can’t reach saved vaults in this browser. Storage may be disabled or you’re in a private window — open the folder manually instead.",
+      "blocked",
+      false
+    );
+  }
+  if (!rec) {
+    throw new RecentVaultError("This vault is no longer saved. Open the folder again.", "missing", true);
+  }
+
   const handle = rec.handle;
   // A persisted handle loses its permission grant between sessions and must be re-prompted.
   // IMPORTANT: when this runs from a click (the Start screen's recent list), we must reach
-  // requestPermission() while the user gesture is still live. queryPermission() inserts an
-  // extra await that consumes the gesture, so Chromium then silently refuses to show the
-  // prompt — which is why reopening "didn't always work". requestPermission() returns
-  // "granted" immediately when access is already held, so it's safe to call unconditionally.
-  const perm = (await handle.requestPermission?.({ mode: "readwrite" })) ?? "granted";
-  if (perm !== "granted") throw new Error("Permission to access this vault was denied.");
+  // requestPermission() while the user gesture is still live. Anything that awaits BEFORE this
+  // call (a queryPermission(), or even the idbGet above on some engines) can consume the gesture,
+  // after which Chromium silently refuses to show the prompt — the classic "nothing happens" on
+  // click. requestPermission() returns "granted" immediately when access is already held, so it's
+  // safe to call unconditionally and must be the first await reached from the click.
+  let perm: PermissionState;
+  try {
+    perm = (await handle.requestPermission?.({ mode: "readwrite" })) ?? "granted";
+  } catch {
+    // Some mobile browsers expose showDirectoryPicker but not the permission API on the handle.
+    perm = "prompt";
+  }
+  if (perm !== "granted") {
+    throw new RecentVaultError(
+      "Permission to open this vault was declined. Click it again and choose “Allow” — or use “Open a vault folder”.",
+      "denied",
+      false
+    );
+  }
+
+  // Permission is granted, but the underlying folder may have been moved or deleted since we saved
+  // the handle. Probe it with a cheap directory read; if that fails the entry is dead — prune it.
+  try {
+    // Touch the first entry (or confirm it's empty); throws if the folder is gone.
+    await handle.entries().next();
+  } catch {
+    await idbDelete(id);
+    throw new RecentVaultError(
+      `“${rec.name}” can’t be found — it may have been moved, renamed or deleted. Open the folder again.`,
+      "missing",
+      true
+    );
+  }
+
   rootDir = handle;
   rootName = handle.name || rec.name || "vault";
   await idbPut({ ...rec, name: rootName, last_opened: now });
