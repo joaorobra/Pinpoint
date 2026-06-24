@@ -2,6 +2,12 @@
 
 A free, **local-first** alternative to Notion / OneNote / Obsidian for **Windows, macOS, Linux** (and a browser build path). Your notes are plain `.md` files you own — point PINPOINT at any folder, including one synced by **Google Drive / OneDrive / Dropbox**.
 
+## ⬇️ Download
+
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-blue?logo=windows&style=for-the-badge)](https://github.com/joaorobra/Pinpoint/releases/latest)
+
+Grab the latest `*-setup.exe` from the [**Releases page**](https://github.com/joaorobra/Pinpoint/releases/latest) and run it. Windows may show a SmartScreen "unknown publisher" warning for now (the build isn't code-signed yet) — click **More info → Run anyway**.
+
 ## Features
 
 - **Pages as `.md` files** — plain markdown, the source of truth on disk.
