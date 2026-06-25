@@ -1,6 +1,6 @@
 [package]
 name = "pinpoint"
-version = "0.3.0"
+version = "0.3.1"
 description = "PINPOINT — a free, local-first Notion/Obsidian alternative"
 authors = ["PINPOINT"]
 edition = "2021"
