@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { PushPin, FolderOpen, Plus, ArrowRight, Clock, CircleNotch } from "@phosphor-icons/react";
+import { FolderOpen, Plus, ArrowRight, Clock, CircleNotch } from "@phosphor-icons/react";
 import { canOpenVault, listRecentVaults } from "../api";
 import type { RecentVault } from "../types";
 
@@ -57,7 +57,7 @@ export default function StartScreen({ onOpenNew, onOpenRecent, openingId = null,
 
       <div className="start-card">
         <div className="start-logo">
-          <span className="mark"><PushPin size={26} weight="fill" /></span>
+          <span className="mark"><img src="/logo.png" alt="" width={40} height={40} /></span>
           <span className="wordmark">PINPOINT</span>
         </div>
         <p className="start-tagline">
