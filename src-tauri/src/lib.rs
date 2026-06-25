@@ -230,11 +230,13 @@ fn delete_page(rel_path: String, state: State<AppState>) -> Result<(), String> {
     let abs = session.root.join(&rel_path);
     if abs.is_dir() {
         std::fs::remove_dir_all(&abs).map_err(err)?;
+        // A folder can hold many pages with no folder-prefix link in the index, so rebuild.
+        index::rebuild(&session.conn, &session.root).map_err(err)?;
     } else {
         std::fs::remove_file(&abs).map_err(err)?;
+        // Single file: drop just its rows instead of re-indexing the whole vault.
+        index::delete_file(&session.conn, &session.root, &abs).map_err(err)?;
     }
-    // The index only tracks markdown; rebuild so a deleted folder's pages all drop out.
-    index::rebuild(&session.conn, &session.root).map_err(err)?;
     Ok(())
 }
 
@@ -243,8 +245,16 @@ fn delete_page(rel_path: String, state: State<AppState>) -> Result<(), String> {
 fn trash_page(rel_path: String, state: State<AppState>) -> Result<vault::TrashEntry, String> {
     let guard = state.inner.lock().unwrap();
     let session = guard.as_ref().ok_or("no vault open")?;
+    // Note whether the target is a single file *before* the move, so we can take the cheap
+    // incremental index path for files and only rebuild for folders (which may hold many pages).
+    let abs = session.root.join(&rel_path);
+    let was_single_file = abs.is_file();
     let entry = vault::trash_move(&session.root, &rel_path, now_ms()).map_err(err)?;
-    index::rebuild(&session.conn, &session.root).map_err(err)?;
+    if was_single_file {
+        index::delete_file(&session.conn, &session.root, &abs).map_err(err)?;
+    } else {
+        index::rebuild(&session.conn, &session.root).map_err(err)?;
+    }
     Ok(entry)
 }
 

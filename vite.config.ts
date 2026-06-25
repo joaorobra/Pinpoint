@@ -26,5 +26,17 @@ export default defineConfig({
     target: "es2021",
     minify: "esbuild",
     sourcemap: false,
+    // Split the heavy, independently-cacheable vendors into their own chunks so the browser can
+    // parse/compile them in parallel and cache them across releases instead of re-downloading one
+    // giant bundle. TipTap + ProseMirror (the editor) and framer-motion are the largest.
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          editor: ["@tiptap/react", "@tiptap/starter-kit"],
+          motion: ["framer-motion"],
+          recurrence: ["rrule"],
+        },
+      },
+    },
   },
 });

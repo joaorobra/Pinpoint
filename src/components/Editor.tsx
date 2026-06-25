@@ -2125,6 +2125,12 @@ export default function Editor({
   const highlightDueRef = useRef(highlightDueDates);
   highlightDueRef.current = highlightDueDates;
   const lastEmitted = useRef<string>(value);
+  // Coalesces the per-keystroke markdown serialization (`docToMarkdown` walks the whole doc) out of
+  // the typing hot path. Detection (slash/tag/link menus) still runs synchronously in `onUpdate` so
+  // menus stay instant; only the expensive serialize + upward `onChange` is debounced. The save in
+  // App is itself debounced 600ms, so deferring this ~150ms costs nothing and the flush-on-unmount
+  // below guarantees no edit is lost on a fast page switch.
+  const serializeTimer = useRef<number | null>(null);
   const [slash, setSlash] = useState<{ query: string; left: number; top: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   // `[[wikilink]]` autocomplete: triggered when the caret sits in an open `[[query`.
@@ -2376,13 +2382,21 @@ export default function Editor({
         },
       },
       onUpdate: ({ editor }) => {
-        const md = docToMarkdown(editor.getJSON() as any);
-        lastEmitted.current = md;
-        onChange(md);
+        // Run the cheap, latency-sensitive detection synchronously so the slash/link/tag/task
+        // menus react on the same frame as the keystroke.
         detectSlash(editor);
         detectLink(editor);
         detectTag(editor);
         detectTaskHint(editor);
+        // Defer the expensive full-document markdown serialization + upward propagation. Rapid
+        // typing collapses to a single serialize once the user pauses (~150ms).
+        if (serializeTimer.current) window.clearTimeout(serializeTimer.current);
+        serializeTimer.current = window.setTimeout(() => {
+          serializeTimer.current = null;
+          const md = docToMarkdown(editor.getJSON() as any);
+          lastEmitted.current = md;
+          onChange(md);
+        }, 150);
       },
       onSelectionUpdate: ({ editor }) => {
         detectTag(editor);
@@ -2666,8 +2680,27 @@ export default function Editor({
       ?.scrollIntoView({ block: "nearest" });
   }, [slashIndex, slash]);
 
-  // When the file changes externally (reloadKey), reset content.
+  // Flush any pending debounced serialization immediately (used before a page switch / unmount and
+  // before the reloadKey content reset, so the last keystrokes are never lost).
+  const flushSerialize = useCallback(() => {
+    if (!serializeTimer.current) return;
+    window.clearTimeout(serializeTimer.current);
+    serializeTimer.current = null;
+    const ed = editorRef.current;
+    if (!ed) return;
+    const md = docToMarkdown(ed.getJSON() as any);
+    lastEmitted.current = md;
+    onChange(md);
+  }, [onChange]);
+
+  // Flush on unmount so a fast page switch (which remounts the Editor) can't drop the final edits
+  // that were still sitting in the debounce window.
+  useEffect(() => () => flushSerialize(), [flushSerialize]);
+
+  // When the file changes externally (reloadKey), reset content. Flush first so an in-flight edit to
+  // the *outgoing* doc is committed before we load the incoming one.
   useEffect(() => {
+    flushSerialize();
     if (editor && value !== lastEmitted.current) {
       editor.commands.setContent(markdownToHtml(value), false);
       lastEmitted.current = value;
