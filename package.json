@@ -1,7 +1,7 @@
 {
   "name": "pinpoint",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "PINPOINT — a free, local-first Notion/Obsidian alternative",
   "scripts": {
