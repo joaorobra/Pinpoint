@@ -20,9 +20,11 @@ import {
   Trash,
   ArrowUDownLeft,
   MagnifyingGlass,
+  Robot,
 } from "@phosphor-icons/react";
 import type { Settings } from "../types";
 import { DEFAULT_SMART_REPLACEMENTS } from "../types";
+import { MODELS, EFFORTS, MODES, PRESETS, supportsEffort } from "../llm/options";
 import Select, { type SelectGroup, type SelectOption } from "./Select";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import ColorPicker from "./ColorPicker";
@@ -89,13 +91,14 @@ const THEME_OPTIONS: SelectOption[] = [
   { value: "system", label: "System" },
 ];
 
-type TabId = "appearance" | "editor" | "dates" | "tasks" | "vault";
+type TabId = "appearance" | "editor" | "dates" | "tasks" | "vault" | "ai";
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={17} /> },
   { id: "editor", label: "Editor", icon: <PencilSimple size={17} /> },
   { id: "dates", label: "Dates & Times", icon: <CalendarBlank size={17} /> },
   { id: "tasks", label: "Tasks", icon: <CheckSquare size={17} /> },
+  { id: "ai", label: "AI Chat", icon: <Robot size={17} /> },
   { id: "vault", label: "Vault", icon: <FolderSimple size={17} /> },
 ];
 
@@ -770,6 +773,80 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                 )}
               </>
             )}
+
+            {(searching || tab === "ai") && (() => {
+              // Guard against a settings.json that predates these fields (or any non-canonical
+              // provider value): fall back to "claude" so MODELS/EFFORTS lookups can't be undefined
+              // and crash the whole app to a blank screen.
+              const aiProvider = (MODELS[settings.ai_provider as keyof typeof MODELS]
+                ? settings.ai_provider
+                : "claude") as Settings["ai_provider"];
+              return (
+              <>
+                <Group
+                  title="Defaults"
+                  keywords="ai chat llm claude gemini codex model effort reasoning mode agent provider cli"
+                  desc="Starting point for each new conversation in the AI chat dock (Ctrl/Cmd+J). You can still override any of these per-conversation from the composer."
+                >
+                  <Row label="Provider" hint="Which CLI to drive. Uses that CLI's own subscription login.">
+                    <Select
+                      value={aiProvider}
+                      options={(["claude", "gemini", "codex"] as const).map((id) => ({
+                        value: id,
+                        label: id[0].toUpperCase() + id.slice(1),
+                      }))}
+                      onChange={(v) => set("ai_provider", v as Settings["ai_provider"])}
+                      ariaLabel="Default AI provider"
+                    />
+                  </Row>
+                  <Row label="Model" hint="The model new chats start on. “Default” lets the CLI choose.">
+                    <Select
+                      value={settings.ai_model ?? ""}
+                      options={MODELS[aiProvider].map((c) => ({
+                        value: c.value,
+                        label: c.label,
+                        desc: c.desc,
+                      }))}
+                      onChange={(v) => set("ai_model", v)}
+                      ariaLabel="Default AI model"
+                    />
+                  </Row>
+                  <Row label="Reasoning effort" hint="How hard the model thinks before answering, where supported.">
+                    <Select
+                      value={settings.ai_effort ?? ""}
+                      options={
+                        supportsEffort(aiProvider)
+                          ? EFFORTS[aiProvider].map((c) => ({
+                              value: c.value,
+                              label: c.label,
+                              desc: c.desc,
+                            }))
+                          : [{ value: "", label: "Not supported for this provider" }]
+                      }
+                      onChange={(v) => set("ai_effort", v)}
+                      ariaLabel="Default reasoning effort"
+                    />
+                  </Row>
+                  <Row label="Mode" hint="Chat talks only; Note acts on referenced pages; Agent can read/edit across the vault.">
+                    <Select
+                      value={settings.ai_mode ?? "chat"}
+                      options={MODES.map((m) => ({ value: m.value, label: m.label, desc: m.hint }))}
+                      onChange={(v) => set("ai_mode", v as Settings["ai_mode"])}
+                      ariaLabel="Default AI mode"
+                    />
+                  </Row>
+                  <Row label="Role preset" hint="A short instruction prepended to every message (e.g. “Be concise”).">
+                    <Select
+                      value={settings.ai_preset ?? ""}
+                      options={PRESETS.map((p) => ({ value: p.value, label: p.label }))}
+                      onChange={(v) => set("ai_preset", v)}
+                      ariaLabel="Default role preset"
+                    />
+                  </Row>
+                </Group>
+              </>
+              );
+            })()}
 
             {(searching || tab === "vault") && (
               <>

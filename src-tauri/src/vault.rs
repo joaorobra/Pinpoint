@@ -67,6 +67,44 @@ pub fn serialize_doc(frontmatter: &serde_json::Value, body: &str) -> Result<Stri
     Ok(format!("---\n{}---\n\n{}", yaml, body))
 }
 
+/// Frontmatter key holding a page's stable identity (a random hex id). It survives renames/moves so
+/// `[[wikilinks]]` can be repaired on rename and the index can key pages by something immutable.
+pub const ID_KEY: &str = "id";
+
+/// Generate a fresh page id: 16 random bytes rendered as 32 lowercase hex chars (a v4-style UUID
+/// without the dashes — compact, frontmatter-friendly, collision-proof in practice). Reuses the OS
+/// CSPRNG wrapper from `crypto` so we don't add a `uuid` dependency.
+pub fn new_page_id() -> String {
+    let mut bytes = [0u8; 16];
+    // A failed OS RNG is essentially unreachable; fall back to a fixed-but-still-unique-per-process
+    // pattern rather than panicking inside a write path. (crypto::random_bytes wraps getrandom.)
+    let _ = crate::crypto::random_bytes(&mut bytes);
+    let mut s = String::with_capacity(32);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Ensure a frontmatter object carries an `id`, generating one if absent. Returns true if it added
+/// an id (so callers know the doc must be written back). A non-object frontmatter is upgraded to an
+/// object holding just the id.
+pub fn ensure_id(frontmatter: &mut serde_json::Value) -> bool {
+    if let Some(obj) = frontmatter.as_object_mut() {
+        let has = obj.get(ID_KEY).and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+        if has {
+            return false;
+        }
+        obj.insert(ID_KEY.to_string(), serde_json::Value::String(new_page_id()));
+        true
+    } else {
+        let mut obj = serde_json::Map::new();
+        obj.insert(ID_KEY.to_string(), serde_json::Value::String(new_page_id()));
+        *frontmatter = serde_json::Value::Object(obj);
+        true
+    }
+}
+
 /// Read + parse a single markdown file.
 pub fn read_doc(abs_path: &Path) -> Result<ParsedDoc> {
     let raw = std::fs::read_to_string(abs_path)

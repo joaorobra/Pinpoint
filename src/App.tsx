@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 import {
   Plus,
+  ChatCircle,
   ArrowsClockwise,
   GearSix,
   FolderOpen,
@@ -70,6 +71,7 @@ import QueryView from "./components/QueryView";
 import TagsView from "./components/TagsView";
 import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
+import { LlmPanel, type LlmChatTurn } from "./components/LlmPanel";
 import { DialogHost, dialogs } from "./components/Dialogs";
 import { ToastHost, toast } from "./components/Toast";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
@@ -190,22 +192,6 @@ function flashTaskRow(ordinal: number, key: string, attempt = 0): void {
   if (!el) {
     if (attempt < 40) setTimeout(() => flashTaskRow(ordinal, key, attempt + 1), 50);
     return;
-  }
-  // TEMP DIAGNOSTIC — remove after debugging the misplaced flash highlight.
-  {
-    const root = document.querySelector(`.editor-content[data-reload-key="${CSS.escape(key)}"]`);
-    const all = root?.querySelectorAll('ul[data-type="taskList"] li');
-    const r0 = el.getBoundingClientRect();
-    console.log("[flashDiag] ordinal=", ordinal,
-      "| total li=", all?.length,
-      "| matched text=", JSON.stringify((el.textContent || "").slice(0, 40)),
-      "| matched rect=", { left: Math.round(r0.left), top: Math.round(r0.top), w: Math.round(r0.width), h: Math.round(r0.height) },
-      "| uiZoom=", uiZoom(),
-      "| body.zoom=", getComputedStyle(document.body).zoom,
-      "| scrollY=", window.scrollY);
-    if (all) all.forEach((li, i) =>
-      console.log("   li[" + i + "]=", JSON.stringify((li.textContent || "").slice(0, 30)),
-        "tag-parent=", (li.parentElement?.getAttribute("data-type") || li.parentElement?.tagName)));
   }
   el.scrollIntoView({ behavior: "smooth", block: "center" });
 
@@ -340,6 +326,12 @@ export default function App() {
   // Whether the "?" keyboard-shortcuts cheat sheet is open.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const saveTimer = useRef<number | null>(null);
+  // Live mirrors of the open page's path / body / dirty flag. The "vault-changed" watcher is
+  // registered once and must read the CURRENT values without re-subscribing on every keystroke,
+  // so it reads these refs instead of closing over stale state.
+  const activePathRef = useRef<string | null>(null);
+  const bodyRef = useRef<string>("");
+  const dirtyRef = useRef<boolean>(false);
   // FileTree populates this with a reveal(relPath) fn so the breadcrumb can jump to a folder.
   const treeRevealRef = useRef<((relPath: string) => void) | null>(null);
   // FileTree populates this with expand/collapse commands so the folder context menu can drive them.
@@ -352,6 +344,7 @@ export default function App() {
   // not vault content). Clamped to a sane range; the editor column flexes to fill the rest.
   const LEFT_MIN = 200, LEFT_MAX = 560;
   const RIGHT_MIN = 200, RIGHT_MAX = 560;
+  const CHAT_MIN = 280, CHAT_MAX = 640;
   const [leftWidth, setLeftWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem("pp.leftWidth"));
     return v >= LEFT_MIN && v <= LEFT_MAX ? v : 286;
@@ -359,6 +352,10 @@ export default function App() {
   const [rightWidth, setRightWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem("pp.rightWidth"));
     return v >= RIGHT_MIN && v <= RIGHT_MAX ? v : 280;
+  });
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem("pp.chatWidth"));
+    return v >= CHAT_MIN && v <= CHAT_MAX ? v : 360;
   });
 
   // Whether each sidebar is shown on DESKTOP. Persisted in localStorage (app-global UI state). When
@@ -371,6 +368,25 @@ export default function App() {
   const [rightOpen, setRightOpen] = useState<boolean>(
     () => localStorage.getItem("pp.rightOpen") !== "0"
   );
+
+  // LLM chat dock (CLI integration) — an independent right-edge slide-over, toggled with
+  // Ctrl/Cmd+J. Separate from the outline/tasks right sidebar above so the two don't fight for
+  // the same track. Closed by default; choice persists. See src/components/LlmPanel.tsx.
+  const [llmOpen, setLlmOpen] = useState<boolean>(
+    () => localStorage.getItem("pp.llmOpen") === "1"
+  );
+  const toggleLlm = useCallback(
+    () => setLlmOpen((v) => (localStorage.setItem("pp.llmOpen", v ? "0" : "1"), !v)),
+    []
+  );
+
+  // The chat conversation lives HERE, not inside LlmPanel, so it survives the dock being hidden.
+  // The dock is conditionally rendered (for the slide animation), which would otherwise unmount
+  // LlmPanel and wipe its turns + resume session id every time the dock is toggled closed —
+  // silently starting a brand-new conversation on the next message. Hoisting both into App keeps
+  // a single long-lived conversation across open/close. `reset()` (New conversation) clears them.
+  const [llmTurns, setLlmTurns] = useState<LlmChatTurn[]>([]);
+  const llmSessionRef = useRef<string | undefined>(undefined);
 
   // ---- Responsive layout ----
   // Drives the desktop↔mobile switch: on a narrow viewport the grid collapses to a single column,
@@ -426,13 +442,15 @@ export default function App() {
   // Begin dragging a sidebar divider. `side` picks which edge; the handler tracks the pointer
   // until release, clamps the new width, and persists it.
   const startResize = useCallback(
-    (side: "left" | "right") => (e: React.PointerEvent) => {
+    (side: "left" | "right" | "chat") => (e: React.PointerEvent) => {
       e.preventDefault();
       const startX = e.clientX;
-      const startW = side === "left" ? leftWidth : rightWidth;
-      const min = side === "left" ? LEFT_MIN : RIGHT_MIN;
-      const max = side === "left" ? LEFT_MAX : RIGHT_MAX;
-      // Left edge grows with rightward drag; right edge grows with leftward drag.
+      const startW = side === "left" ? leftWidth : side === "right" ? rightWidth : chatWidth;
+      const min = side === "left" ? LEFT_MIN : side === "right" ? RIGHT_MIN : CHAT_MIN;
+      const max = side === "left" ? LEFT_MAX : side === "right" ? RIGHT_MAX : CHAT_MAX;
+      const setW = side === "left" ? setLeftWidth : side === "right" ? setRightWidth : setChatWidth;
+      const storeKey = side === "left" ? "pp.leftWidth" : side === "right" ? "pp.rightWidth" : "pp.chatWidth";
+      // Left edge grows with rightward drag; right & chat edges grow with leftward drag.
       const dir = side === "left" ? 1 : -1;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
@@ -440,7 +458,7 @@ export default function App() {
       document.querySelector(".app")?.classList.add("resizing");
       const onMove = (ev: PointerEvent) => {
         const next = Math.min(max, Math.max(min, startW + dir * (ev.clientX - startX)));
-        side === "left" ? setLeftWidth(next) : setRightWidth(next);
+        setW(next);
       };
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
@@ -449,14 +467,12 @@ export default function App() {
         document.body.style.userSelect = "";
         document.querySelector(".app")?.classList.remove("resizing");
         // Read the committed width off the element via the setter's latest value.
-        side === "left"
-          ? setLeftWidth((w) => (localStorage.setItem("pp.leftWidth", String(w)), w))
-          : setRightWidth((w) => (localStorage.setItem("pp.rightWidth", String(w)), w));
+        setW((w) => (localStorage.setItem(storeKey, String(w)), w));
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
     },
-    [leftWidth, rightWidth]
+    [leftWidth, rightWidth, chatWidth]
   );
 
   // Load (or clear) the active theme object whenever the selected theme name changes. A name with
@@ -577,13 +593,43 @@ export default function App() {
     };
   }, [tree]);
 
+  // Keep the watcher-facing refs in lockstep with the open page's state.
+  useEffect(() => { activePathRef.current = activePath; }, [activePath]);
+  useEffect(() => { bodyRef.current = body; }, [body]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+
   // ---- File watcher: the Tauri backend emits "vault-changed". The browser build has no
   //      native watcher, so we simply skip it there (the user re-indexes with ⟳). ----
+  //
+  // Besides refreshing the tree + task views, we reload the OPEN page when its file changed on
+  // disk underneath us (e.g. an external editor, a sync client, or an AI agent wrote to it). Without
+  // this the editor keeps a stale in-memory copy and the next autosave silently clobbers the external
+  // edit. We only reload a CLEAN buffer — never one with unsaved edits — and only when the on-disk
+  // body actually differs, which also makes our own saves (whose echo carries identical content) no-ops.
   useEffect(() => {
     let dispose: (() => void) | undefined;
     listen("vault-changed", () => {
       refreshTree();
       setTaskRefresh((k) => k + 1);
+
+      const rel = activePathRef.current;
+      if (!rel || dirtyRef.current) return; // nothing open, or unsaved edits we won't overwrite
+      // A debounced save may still be queued (buffer clean but write not yet flushed); skip the
+      // reload and let that write win, otherwise we'd race it.
+      if (saveTimer.current) return;
+      void api
+        .readPage(rel)
+        .then((doc) => {
+          // Re-check: the user may have started typing, or switched pages, during the async read.
+          if (activePathRef.current !== rel || dirtyRef.current) return;
+          if (doc.body === bodyRef.current) return; // unchanged (typically our own save echo)
+          setBody(doc.body);
+          setFrontmatter(doc.frontmatter as Record<string, unknown>);
+          setReloadKey(rel + ":" + Date.now()); // remount the editor on the fresh content
+        })
+        .catch(() => {
+          /* file vanished or unreadable — the tree refresh above already reflects it */
+        });
     })
       .then((f) => {
         dispose = f;
@@ -1819,7 +1865,10 @@ export default function App() {
       const doc = await api.readPage(node.rel_path);
       const base = node.rel_path.replace(/\.md$/i, "");
       const copyRel = `${base} copy.md`;
-      await api.writePage(copyRel, doc.frontmatter as Record<string, unknown>, doc.body);
+      // Drop the source's stable `id` so the copy gets its own (writePage mints a fresh one); two
+      // pages sharing an id would break rename link-repair and backlinks.
+      const { id: _omitId, ...fmCopy } = doc.frontmatter as Record<string, unknown>;
+      await api.writePage(copyRel, fmCopy, doc.body);
       await refreshTree();
       await openPage(copyRel);
     },
@@ -2468,6 +2517,10 @@ export default function App() {
       } else if (key === "k" || key === "K") {
         e.preventDefault();
         setPaletteOpen((open) => !open);
+      } else if (key === "j" || key === "J") {
+        // Toggle the LLM chat dock (CLI integration).
+        e.preventDefault();
+        toggleLlm();
       } else if (key === "n" || key === "N") {
         e.preventDefault();
         newPage();
@@ -2485,7 +2538,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tree, newPage, changeZoom, selected, activePath, deleteMany, navHistory, closeTab, setShortcutsOpen]);
+  }, [tree, newPage, changeZoom, selected, activePath, deleteMany, navHistory, closeTab, setShortcutsOpen, toggleLlm]);
 
   // Keep the sidebar Trash badge count in sync: refresh on vault open and after any trash change.
   useEffect(() => {
@@ -2579,7 +2632,7 @@ export default function App() {
           ? "1fr"
           : `${leftOpen ? `${leftWidth}px 6px` : "0px 0px"} 1fr ${
               rightOpen ? `6px ${rightWidth}px` : "0px 0px"
-            }`,
+            } ${llmOpen ? `6px ${chatWidth}px` : "0px 0px"}`,
       }}
     >
       {/* Dim, tap-to-dismiss backdrop behind an open drawer on mobile. */}
@@ -2869,6 +2922,15 @@ export default function App() {
                 <SidebarSimple size={15} weight="bold" style={{ transform: "scaleX(-1)" }} />
               </button>
             </Tooltip>
+            <Tooltip label={llmOpen ? "Hide AI chat" : "AI chat (Ctrl/Cmd+J)"} side="left">
+              <button
+                className={`right-toggle${llmOpen ? " active" : ""}`}
+                onClick={toggleLlm}
+                aria-label={llmOpen ? "Hide AI chat" : "Show AI chat"}
+              >
+                <ChatCircle size={15} weight="bold" />
+              </button>
+            </Tooltip>
           </div>
           {activePath && !activeAsset && !activeDb && tab === "editor" && (
             <PageProperties
@@ -2946,6 +3008,7 @@ export default function App() {
                 onCreateDatabase={newDatabase}
                 onOpenPage={openPageByName}
                 onOpenPath={openPage}
+                currentPath={activePath}
                 onOpenTag={(t) => {
                   setTagFocus((s) => ({ tag: t, n: (s?.n ?? 0) + 1 }));
                   setTab("tags");
@@ -3082,6 +3145,49 @@ export default function App() {
         />
       </motion.div>
       )}
+      </AnimatePresence>
+
+      {/* LLM chat dock (CLI integration) — a SECOND right sidebar living in the grid (cols 6–7), so
+          toggling it reflows the editor instead of overlaying it. Its own drag-resizer sits at col 6.
+          On mobile it falls back to a fixed overlay drawer (see styles.css). Toggle with Ctrl/Cmd+J. */}
+      {llmOpen && !vp.isMobile && (
+        <div className="resizer" onPointerDown={startResize("chat")} title="Drag to resize" style={{ gridColumn: 6 }} />
+      )}
+      <AnimatePresence initial={false}>
+        {llmOpen && (
+          <motion.div
+            key="llm-dock"
+            className="llm-dock"
+            {...slideFade({ axis: "x", distance: vp.isMobile ? 340 : 24, speed: "slow" })}
+            style={{ gridColumn: vp.isMobile ? 1 : 7, display: "flex", minHeight: 0 }}
+          >
+            <LlmPanel
+              onClose={toggleLlm}
+              turns={llmTurns}
+              setTurns={setLlmTurns}
+              sessionRef={llmSessionRef}
+              pages={pages}
+              activePath={activePath}
+              readPage={async (rel) => (await api.readPage(rel)).body}
+              defaults={{
+                provider: settings.ai_provider,
+                model: settings.ai_model,
+                effort: settings.ai_effort,
+                mode: settings.ai_mode,
+                preset: settings.ai_preset,
+              }}
+              vaultRoot={vaultIdRef.current}
+              vaultRelToAbs={(rel) => {
+                // On desktop the vault id is the absolute root path; join with the platform sep.
+                const root = vaultIdRef.current ?? "";
+                if (!root) return rel;
+                const sep = root.includes("\\") ? "\\" : "/";
+                const relOs = sep === "\\" ? rel.replace(/\//g, "\\") : rel;
+                return root.replace(/[\\/]$/, "") + sep + relOs;
+              }}
+            />
+          </motion.div>
+        )}
       </AnimatePresence>
 
       {showSettings && (

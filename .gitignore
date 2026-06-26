@@ -10,5 +10,9 @@ src-tauri/target
 # Archives / build artifacts
 src-tauri.zip
 
+# Android build output (too large for GitHub)
+*.apk
+*.aab
+
 # Dev server logs
 vite-out.log

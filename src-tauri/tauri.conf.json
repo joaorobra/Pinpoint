@@ -19,7 +19,8 @@
         "minHeight": 480,
         "resizable": true,
         "fullscreen": false,
-        "decorations": false
+        "decorations": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -43,6 +44,9 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    },
+    "android": {
+      "minSdkVersion": 24
     }
   },
   "plugins": {
@@ -50,7 +54,7 @@
       "endpoints": [
         "https://github.com/joaorobra/Pinpoint/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE2NTAwRkMwNUQ4MzREMDkKUldRSlRZTmR3QTlRcHVibkxxQTY3akd6YXFPUUFHTlRFRFdFWW0xWW84clJBeC93Y0JMcDI4cisK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZCOUVDREI2RjExQzcwMjkKUldRcGNCenh0czJlKzR3aDhvNGptY3o5Wmt5TVBlTUFla3J0dXVLNXZ4TjQxY2xBQ1V0Rk9Dd3YK"
     }
   }
 }

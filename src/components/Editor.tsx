@@ -50,6 +50,7 @@ import {
   Flag,
   CaretRight,
   ArrowBendUpRight,
+  Folder,
   type Icon,
 } from "@phosphor-icons/react";
 import ContextMenu, { type MenuItem, type MenuEntry, type MenuFormatButton } from "./ContextMenu";
@@ -113,8 +114,16 @@ interface Props {
   onCreateDatabase?: (name?: string) => Promise<string | null> | string | null | void;
   /** Open the page referenced by a `[[wikilink]]` when it's clicked. */
   onOpenPage?: (name: string) => void;
-  /** Open a page by its vault-relative path (used by inline TASK query results). */
-  onOpenPath?: (relPath: string) => void;
+  /**
+   * Open a page by its vault-relative path (used by inline TASK query results). `line` is the task's
+   * source line, letting the host scroll to and flash that row like the calendar agenda does.
+   */
+  onOpenPath?: (relPath: string, line?: number) => void;
+  /**
+   * Vault-relative path of the page being edited. Lets inline query blocks resolve the `{{current}}`
+   * sentinel (the "Current page" path option) to this page at run time.
+   */
+  currentPath?: string | null;
   /** Open a tag in the Tags view when its inline pill is clicked. */
   onOpenTag?: (tag: string) => void;
   /**
@@ -267,6 +276,98 @@ function rankPages(pages: PageRef[], query: string): PageRef[] {
     .sort((a, b) => b.s - a.s)
     .slice(0, 20)
     .map((x) => x.p);
+}
+
+/**
+ * An entry in the `[[` autocomplete menu. Exactly one of `folder`/`create` is set, or neither
+ * (an existing page to link). `path` is the full slash-path the entry stands for: a page's
+ * `rel_path` (without `.md`), a folder prefix ending in `/`, or the to-be-created page path.
+ */
+export interface LinkItem {
+  /** Display label (leaf name for pages/folders, full path for a create). */
+  name: string;
+  /** Full slash-path this entry represents. */
+  path: string;
+  /** This is a folder — picking it drills in (rewrites the query) rather than inserting a link. */
+  folder?: boolean;
+  /** No page matches this path yet — picking it creates one at `path`, then links it. */
+  create?: boolean;
+}
+
+/**
+ * Build the `[[` autocomplete entries for `query`, made folder-aware. The text before the last
+ * `/` is a folder *prefix* to scope into; the text after it is the leaf filter. So `Notes/` lists
+ * the subfolders and pages directly under `Notes/`, `Notes/ID` filters those to ones matching
+ * `ID`, and a bare `Idea` searches every page fuzzily (legacy behaviour). Subfolders are listed
+ * first so the user can keep drilling; a "create" entry is appended whenever the leaf names no
+ * existing page in that scope.
+ */
+export function buildLinkItems(pages: PageRef[], rawQuery: string): LinkItem[] {
+  const query = rawQuery.trim();
+  const slash = query.lastIndexOf("/");
+
+  // No `/` typed yet: legacy flat fuzzy search across all page names, but still surface the
+  // top-level folders so the user can discover that they can drill in.
+  if (slash === -1) {
+    const leaf = query.toLowerCase();
+    const folders = new Set<string>();
+    for (const p of pages) {
+      const seg = p.rel_path.indexOf("/");
+      if (seg === -1) continue;
+      const top = p.rel_path.slice(0, seg);
+      if (!leaf || top.toLowerCase().includes(leaf)) folders.add(top);
+    }
+    const folderItems: LinkItem[] = [...folders]
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, 8)
+      .map((f) => ({ name: f, path: `${f}/`, folder: true }));
+    const pageItems: LinkItem[] = rankPages(pages, query).map((p) => ({
+      name: p.name,
+      path: p.rel_path.replace(/\.md$/i, ""),
+    }));
+    const hasExact = pageItems.some((p) => p.name.toLowerCase() === leaf);
+    return [
+      ...folderItems,
+      ...pageItems,
+      ...(query && !hasExact ? [{ name: query, path: query, create: true }] : []),
+    ];
+  }
+
+  // Scoped: `prefix/leaf`. List direct children of `prefix/` whose own leaf matches `leaf`.
+  const prefix = query.slice(0, slash); // e.g. "Notes/Sub"
+  const leaf = query.slice(slash + 1).toLowerCase(); // e.g. "id"
+  const dir = prefix.replace(/\/+$/, "") + "/"; // normalised "Notes/Sub/"
+  const dirLc = dir.toLowerCase();
+  const folders = new Set<string>();
+  const pageItems: LinkItem[] = [];
+  for (const p of pages) {
+    if (!p.rel_path.toLowerCase().startsWith(dirLc)) continue;
+    const rest = p.rel_path.slice(dir.length); // path below the prefix
+    const cut = rest.indexOf("/");
+    if (cut === -1) {
+      // A page directly in this folder.
+      const base = rest.replace(/\.md$/i, "");
+      if (!leaf || base.toLowerCase().includes(leaf)) {
+        pageItems.push({ name: base, path: dir + base });
+      }
+    } else {
+      // A subfolder of this folder.
+      const sub = rest.slice(0, cut);
+      if (!leaf || sub.toLowerCase().includes(leaf)) folders.add(sub);
+    }
+  }
+  const folderItems: LinkItem[] = [...folders]
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 8)
+    .map((f) => ({ name: f, path: dir + f + "/", folder: true }));
+  pageItems.sort((a, b) => a.name.localeCompare(b.name));
+  const hasExact = pageItems.some((p) => p.name.toLowerCase() === leaf);
+  return [
+    ...folderItems,
+    ...pageItems.slice(0, 20),
+    // Offer to create `prefix/leaf` when a leaf is typed and names no existing page here.
+    ...(leaf && !hasExact ? [{ name: dir + query.slice(slash + 1), path: dir + query.slice(slash + 1), create: true }] : []),
+  ];
 }
 
 // Auto-closing pairs for brackets and quotes.
@@ -1615,15 +1716,21 @@ function setTaskMarker(editor: any, kind: MarkerKind, value: string | null): voi
   if (!range) return;
   const { start, end, text } = range;
 
-  // Read each marker's current value, and the earliest offset any marker begins at, so we only
-  // rewrite the trailing marker region and leave the task body (and its inline formatting) intact.
+  // Read each marker's current value and the text span it occupies. Marker text (`priority:: …`, the
+  // 📅/🔁 emoji + value) is always plain paragraph text — never inside a node like a wikilink — so its
+  // character offsets map straight to document positions (start + offset). We delete just those spans
+  // and re-append the canonical tail, which keeps the body's formatted nodes intact AND preserves any
+  // non-marker trailing text such as a `[[ref]]`. (Replacing everything from the first marker to EOL —
+  // the old behavior — would swallow a trailing ref that sits after a 📅/🔁 marker.)
   const values: Record<MarkerKind, string | null> = { priority: null, due: null, repeat: null };
-  let markersAt = text.length;
+  const spans: { from: number; to: number }[] = [];
   for (const m of MARKERS) {
     const hit = m.re.exec(text);
     if (hit) {
       values[m.kind] = hit[1].trim();
-      markersAt = Math.min(markersAt, hit.index);
+      // Eat one leading space so removal doesn't leave a double gap behind.
+      const from = hit.index > 0 && text[hit.index - 1] === " " ? hit.index - 1 : hit.index;
+      spans.push({ from: start + from, to: start + hit.index + hit[0].length });
     }
   }
   values[kind] = value && value.trim() ? value.trim() : null;
@@ -1634,15 +1741,21 @@ function setTaskMarker(editor: any, kind: MarkerKind, value: string | null): voi
     .map((m) => m.render(values[m.kind] as string))
     .join(" ");
 
-  // Keep everything before the first existing marker (right-trimmed) — its formatted nodes survive —
-  // and replace only [bodyEnd .. paraEnd] with the normalized marker tail.
-  const body = text.slice(0, markersAt).replace(/\s+$/, "");
-  const replaceFrom = start + body.length;
-  const insert = tail ? (body ? ` ${tail}` : tail) : "";
-
-  editor.chain()
-    .insertContentAt({ from: replaceFrom, to: end }, insert)
-    .run();
+  // Apply everything in one transaction, highest position first so the earlier (lower) positions we
+  // computed against the original doc stay valid: first append the tail at end-of-paragraph, then
+  // delete each existing marker span right-to-left. This leaves the body — and any trailing ref —
+  // exactly as it was, only swapping the marker text.
+  const { state } = editor;
+  const tr = state.tr;
+  // Does any text/content remain once the marker spans are removed? If not, the tail (if any) becomes
+  // the whole body and shouldn't get a leading space.
+  const removed = spans.reduce((n, s) => n + (s.to - s.from), 0);
+  const hasBody = end - start - removed > 0;
+  if (tail) tr.insertText(hasBody ? ` ${tail}` : tail, end);
+  for (const s of [...spans].sort((a, b) => b.from - a.from)) {
+    tr.delete(s.from, s.to);
+  }
+  editor.view.dispatch(tr);
 }
 
 /** Set (or clear, with `level: null`) the `priority:: <level>` field on the task under the caret. */
@@ -2060,6 +2173,7 @@ export default function Editor({
   onCreateDatabase,
   onOpenPage,
   onOpenPath,
+  currentPath,
   onOpenTag,
   onAddAttachment,
   onAttachmentRemoved,
@@ -2097,6 +2211,9 @@ export default function Editor({
   onOpenPageRef.current = onOpenPage;
   const onOpenPathRef = useRef(onOpenPath);
   onOpenPathRef.current = onOpenPath;
+  // Current page path in a ref so the once-configured QueryBlock reads it fresh on every run.
+  const currentPathRef = useRef(currentPath);
+  currentPathRef.current = currentPath;
   const onOpenTagRef = useRef(onOpenTag);
   onOpenTagRef.current = onOpenTag;
   const onAddAttachmentRef = useRef(onAddAttachment);
@@ -2164,7 +2281,9 @@ export default function Editor({
     const coords = ed.view.coordsAtPos(from);
     const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
     const rect = wrap?.getBoundingClientRect();
-    return { left: coords.left - (rect?.left ?? 0), top: coords.bottom - (rect?.top ?? 0) + 4 };
+    // OUTER-px rect-delta → LOCAL space for the popup's inline left/top; see css-zoom-coordinates.
+    const z = uiZoom();
+    return { left: (coords.left - (rect?.left ?? 0)) / z, top: (coords.bottom - (rect?.top ?? 0)) / z + 4 };
   }, []);
 
   // The editor instance, mirrored in a ref so callbacks defined before `useEditor` (requestDate,
@@ -2223,7 +2342,8 @@ export default function Editor({
       const coords = ed.view.coordsAtPos(pos);
       const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
       const rect = wrap?.getBoundingClientRect();
-      return coords.top - (rect?.top ?? 0);
+      // OUTER-px delta → LOCAL space for the right-docked popup's inline top; see css-zoom-coordinates.
+      return (coords.top - (rect?.top ?? 0)) / uiZoom();
     } catch {
       return 56; // position lookup can fail mid-transaction; fall back near the top
     }
@@ -2323,8 +2443,9 @@ export default function Editor({
         WikiLink.configure({ onOpen: (name) => onOpenPageRef.current?.(name) }),
         QueryBlock.configure({
           onEdit: (getPos, dsl) => editQueryRef.current(getPos, dsl),
-          onOpenPath: (relPath) => onOpenPathRef.current?.(relPath),
+          onOpenPath: (relPath, line) => onOpenPathRef.current?.(relPath, line),
           onTaskToggled: (relPath) => onTaskToggledRef.current?.(relPath),
+          getCurrentPath: () => currentPathRef.current ?? null,
           dateFormat: taskDateFormat,
         }),
         MoveBlock,
@@ -2419,10 +2540,14 @@ export default function Editor({
     const coords = ed.view.coordsAtPos(from);
     const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
     const rect = wrap?.getBoundingClientRect();
+    // coordsAtPos/getBoundingClientRect are OUTER (zoomed) px; the menu's inline left/top are read in
+    // its own LOCAL (unzoomed) space, so divide the rect-delta by uiZoom() (the +4 gap is a local
+    // constant, added after). No-op at 100%. See css-zoom-coordinates.
+    const z = uiZoom();
     setSlash({
       query: m[1],
-      left: coords.left - (rect?.left ?? 0),
-      top: coords.bottom - (rect?.top ?? 0) + 4,
+      left: (coords.left - (rect?.left ?? 0)) / z,
+      top: (coords.bottom - (rect?.top ?? 0)) / z + 4,
     });
     setSlashIndex(0);
   }, []);
@@ -2441,10 +2566,13 @@ export default function Editor({
     const coords = ed.view.coordsAtPos(from);
     const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
     const rect = wrap?.getBoundingClientRect();
+    // See detectSlash: divide the OUTER-px rect-delta by uiZoom() so the menu lands under the caret
+    // at any UI zoom (no-op at 100%). See css-zoom-coordinates.
+    const z = uiZoom();
     setLink({
       query: m[1],
-      left: coords.left - (rect?.left ?? 0),
-      top: coords.bottom - (rect?.top ?? 0) + 4,
+      left: (coords.left - (rect?.left ?? 0)) / z,
+      top: (coords.bottom - (rect?.top ?? 0)) / z + 4,
     });
     setLinkIndex(0);
   }, []);
@@ -2465,10 +2593,13 @@ export default function Editor({
     const coords = ed.view.coordsAtPos(from);
     const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
     const rect = wrap?.getBoundingClientRect();
+    // See detectSlash: divide the OUTER-px rect-delta by uiZoom() so the menu lands under the caret
+    // at any UI zoom (no-op at 100%). See css-zoom-coordinates.
+    const z = uiZoom();
     setTag({
       query: m[1],
-      left: coords.left - (rect?.left ?? 0),
-      top: coords.bottom - (rect?.top ?? 0) + 4,
+      left: (coords.left - (rect?.left ?? 0)) / z,
+      top: (coords.bottom - (rect?.top ?? 0)) / z + 4,
     });
     setTagIndex(0);
   }, []);
@@ -2602,35 +2733,55 @@ export default function Editor({
     [editor, slash]
   );
 
-  // Ranked page matches for the `[[` autocomplete. When the query doesn't exactly name an existing
-  // page, offer a "Create new page" item as the last entry.
-  const linkQuery = link?.query.trim() ?? "";
-  const linkMatches = link ? rankPages(pages, linkQuery) : [];
-  const hasExact = linkMatches.some((p) => p.name.toLowerCase() === linkQuery.toLowerCase());
-  const linkItems: Array<{ name: string; create?: boolean }> = link
-    ? [
-        ...linkMatches.map((p) => ({ name: p.name })),
-        ...(linkQuery && !hasExact ? [{ name: linkQuery, create: true }] : []),
-      ]
-    : [];
+  // Folder-aware entries for the `[[` autocomplete: subfolders to drill into, pages to link, and a
+  // "create" entry when the query names no existing page. See buildLinkItems.
+  const linkItems: LinkItem[] = link ? buildLinkItems(pages, link.query) : [];
 
   // Replace the open `[[query` with a finished `[[Name]]` wikilink, creating the page first when
   // the chosen item is the "Create new page" option.
   const runLink = useCallback(
-    async (item: { name: string; create?: boolean }) => {
+    async (item: LinkItem) => {
       if (!editor) return;
       const { state } = editor;
       const { from } = state.selection;
+      // Position right after the open `[[`, before the query text.
+      const queryStart = from - (link?.query.length ?? 0);
+
+      // Folder pick: don't insert a link — rewrite the query to the folder path (keeping the `[[`)
+      // so the menu re-fires scoped one level deeper. The caret lands at the end of the new path.
+      if (item.folder) {
+        editor
+          .chain()
+          .focus()
+          .insertContentAt({ from: queryStart, to: from }, item.path)
+          .run();
+        // Re-detect against the rewritten query so the popup repopulates for the new folder.
+        detectLink(editor);
+        return;
+      }
+
       const start = from - ((link?.query.length ?? 0) + 2); // back up over `[[query`
       // Auto-close may have inserted a trailing `]]` right after the caret; swallow it too so we
       // don't end up with `[[name]]]]`.
       const after = state.doc.textBetween(from, Math.min(from + 2, state.doc.content.size));
       const end = from + (after === "]]" ? 2 : after.startsWith("]") ? 1 : 0);
-      let name = item.name;
+
+      // What the wikilink stores (and serializes to `[[…]]`). Default to the page's path so it
+      // resolves unambiguously; collapse to the bare leaf when that leaf is unique across all pages,
+      // since a short `[[Name]]` reads better and still resolves.
+      let name = item.path;
       if (item.create) {
-        const created = await ctxRef.current.onCreatePage?.(name);
-        name = (created as string) || name.replace(/\.md$/i, "").split("/").pop() || name;
+        // Create at the full typed path; onCreatePage returns the display (leaf) name.
+        await ctxRef.current.onCreatePage?.(item.path);
+        // Keep the path in the link unless the new leaf is already unique.
+        name = item.path;
       }
+      const leaf = name.replace(/\.md$/i, "").split("/").pop() || name;
+      const leafCount = pages.filter(
+        (p) => (p.name || "").toLowerCase() === leaf.toLowerCase()
+      ).length;
+      if (leafCount <= 1) name = leaf;
+
       editor
         .chain()
         .focus()
@@ -2641,7 +2792,7 @@ export default function Editor({
         .run();
       setLink(null);
     },
-    [editor, link]
+    [editor, link, pages, detectLink]
   );
 
   // Ranked tag matches for the `#` autocomplete. When the query isn't already an exact tag, offer it
@@ -3045,7 +3196,7 @@ export default function Editor({
         <div className="slash-menu" style={{ left: link.left, top: link.top }}>
           {linkItems.map((it, i) => (
             <button
-              key={(it.create ? "+" : "") + it.name}
+              key={(it.folder ? "/" : it.create ? "+" : "") + it.path}
               className={`slash-item${i === linkIndex ? " active" : ""}`}
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -3053,8 +3204,14 @@ export default function Editor({
               }}
               onMouseEnter={() => setLinkIndex(i)}
             >
-              <span className="slash-label">{it.create ? `Create “${it.name}”` : it.name}</span>
-              <span className="slash-hint">{it.create ? "New page" : "Link to page"}</span>
+              <span className="slash-label">
+                {it.folder && <Folder size={14} weight="fill" style={{ marginRight: 6, opacity: 0.7, verticalAlign: "-2px" }} />}
+                {it.create ? `Create “${it.name}”` : it.name}
+              </span>
+              <span className="slash-hint">
+                {it.folder ? "Open folder" : it.create ? "New page" : "Link to page"}
+                {it.folder && <CaretRight size={12} weight="bold" style={{ marginLeft: 4, verticalAlign: "-1px" }} />}
+              </span>
             </button>
           ))}
         </div>
@@ -3089,6 +3246,7 @@ export default function Editor({
         <QueryHelper
           top={queryHelper.top}
           initialDsl={queryHelper.dsl}
+          currentPath={currentPath}
           onInsert={commitQuery}
           onClose={() => setQueryHelper(null)}
         />

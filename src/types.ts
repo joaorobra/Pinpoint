@@ -516,6 +516,22 @@ export interface Settings {
    * still chooses which variant renders.
    */
   active_theme: string;
+
+  /* ---- AI Chat (CLI integration) ---------------------------------------------------------------
+   * Defaults the chat dock (src/components/LlmPanel.tsx) starts each new conversation from. The
+   * composer can still override any of these per-conversation; these are the saved starting points.
+   * Values are CLI aliases / enum strings (see src/llm/options.ts), not marketing names. Empty
+   * string ("") means "let the CLI use its default". */
+  /** Default provider CLI ("claude" | "gemini" | "codex"). */
+  ai_provider: "claude" | "gemini" | "codex";
+  /** Default model alias (`--model`); "" = CLI default. */
+  ai_model: string;
+  /** Default reasoning effort (`--effort`); "" = CLI default. */
+  ai_effort: string;
+  /** Default mode the composer opens in ("chat" | "note" | "agent"). */
+  ai_mode: "chat" | "note" | "agent";
+  /** Default role preset prepended to the system prompt; "" = none. */
+  ai_preset: string;
 }
 
 /**
@@ -724,4 +740,9 @@ export const DEFAULT_SETTINGS: Settings = {
   startup_behavior: "last",
   startup_page: "",
   active_theme: "",
+  ai_provider: "claude",
+  ai_model: "",
+  ai_effort: "",
+  ai_mode: "chat",
+  ai_preset: "",
 };

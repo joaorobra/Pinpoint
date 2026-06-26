@@ -20,6 +20,7 @@ const GROUPS: Group[] = [
     title: "General",
     items: [
       { keys: ["mod", "K"], label: "Open command palette" },
+      { keys: ["mod", "J"], label: "Toggle AI chat panel" },
       { keys: ["?"], label: "Show keyboard shortcuts" },
     ],
   },

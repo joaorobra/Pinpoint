@@ -3,8 +3,11 @@
 //! Holds the active vault, the SQLite index, and a filesystem watcher. Exposes commands the
 //! React frontend calls via `invoke`.
 
+#[cfg(target_os = "android")]
+mod android_storage;
 mod crypto;
 mod index;
+mod llm;
 mod lock;
 mod query;
 mod recents;
@@ -12,13 +15,20 @@ mod settings;
 mod themes;
 mod vault;
 
+// The filesystem watcher is desktop-only — `notify` relies on OS facilities
+// (inotify/FSEvents/ReadDirectoryChangesW) that don't exist under Android's sandbox.
+// On mobile we re-scan on app resume instead (see the frontend's resume handler).
+#[cfg(desktop)]
 use notify::{RecursiveMode, Watcher};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager, State};
+// `Emitter` is only used by the desktop-only filesystem watcher (emits "vault-changed").
+#[cfg(desktop)]
+use tauri::Emitter;
+use tauri::{Manager, State};
 
 /// The OS app-config directory (e.g. `%APPDATA%/<bundle-id>`), where the global
 /// recent-vaults list is stored. Falls back to the current dir if unavailable.
@@ -44,11 +54,16 @@ pub struct AppState {
     /// memory). Survives vault switches deliberately — the app, not the vault session, owns unlock
     /// lifetime. Cleared on quit when the process memory is freed.
     keys: Mutex<HashMap<PathBuf, crypto::Key>>,
+    /// Per-run cancellation handles for in-flight LLM CLI subprocesses. Independent of the vault
+    /// session — an LLM run isn't tied to which vault is open.
+    llm: llm::LlmState,
 }
 
 struct VaultSession {
     root: PathBuf,
     conn: Connection,
+    /// Kept alive for the session so the watcher isn't dropped (desktop only).
+    #[cfg(desktop)]
     _watcher: notify::RecommendedWatcher,
 }
 
@@ -66,30 +81,60 @@ fn open_vault(
     if !root.is_dir() {
         return Err(format!("not a folder: {path}"));
     }
+    open_vault_at(root, state, app)
+}
 
+/// Open the vault rooted at `root`: build/rebuild the SQLite index, spawn the
+/// (desktop-only) file watcher, build the tree, record it as recently-opened, and
+/// install it as the active `VaultSession`. Shared by `open_vault` (desktop folder
+/// path) and the mobile app-owned-vault commands, which differ only in how `root`
+/// is derived — everything past that point is identical across platforms.
+fn open_vault_at(
+    root: PathBuf,
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<vault::TreeNode, String> {
     let conn = index::open(&root).map_err(err)?;
-    index::rebuild(&conn, &root).map_err(err)?;
+    // One-time, gated by a marker: back-fill a stable `id` into every page missing one so renames can
+    // repair links for any page from the start. The full-vault read+rewrite runs once per vault; after
+    // the marker exists we skip straight to indexing. New pages get their id on create/save.
+    let id_marker = root.join(".pinpoint").join("ids-assigned");
+    if !id_marker.exists() {
+        let _ = index::assign_missing_ids(&root);
+        let _ = std::fs::create_dir_all(root.join(".pinpoint"));
+        let _ = std::fs::write(&id_marker, b"1");
+    }
+    // Incremental: re-parse only files whose mtime changed since the last index (near-instant on a
+    // warm vault). The index is a rebuildable cache, so this is always safe.
+    index::rebuild_incremental(&conn, &root).map_err(err)?;
 
     // Spawn a watcher that re-indexes touched files and notifies the frontend.
-    let app_handle = app.clone();
-    let watch_root = root.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if let Ok(event) = res {
-            let touched_md = event
-                .paths
-                .iter()
-                .any(|p| p.extension().and_then(|e| e.to_str()) == Some("md"));
-            if touched_md {
-                // Re-index happens lazily; tell the frontend to refresh.
-                let _ = app_handle.emit("vault-changed", ());
-            }
-        }
-        let _ = &watch_root;
-    })
-    .map_err(err)?;
-    watcher
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(err)?;
+    // Desktop only — on mobile (Android) the OS watcher facilities are unavailable,
+    // so the frontend re-scans on app resume instead.
+    #[cfg(desktop)]
+    let watcher = {
+        let app_handle = app.clone();
+        let watch_root = root.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res {
+                    let touched_md = event
+                        .paths
+                        .iter()
+                        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("md"));
+                    if touched_md {
+                        // Re-index happens lazily; tell the frontend to refresh.
+                        let _ = app_handle.emit("vault-changed", ());
+                    }
+                }
+                let _ = &watch_root;
+            })
+            .map_err(err)?;
+        watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .map_err(err)?;
+        watcher
+    };
 
     let tree = vault::build_tree(&root).map_err(err)?;
 
@@ -99,6 +144,7 @@ fn open_vault(
     *state.inner.lock().unwrap() = Some(VaultSession {
         root,
         conn,
+        #[cfg(desktop)]
         _watcher: watcher,
     });
 
@@ -110,6 +156,162 @@ fn open_vault(
 #[tauri::command]
 fn list_recent_vaults(app: tauri::AppHandle) -> Vec<recents::RecentVault> {
     recents::list(&config_dir(&app))
+}
+
+// --- App-owned vaults (mobile) ---------------------------------------------------
+//
+// On Android there is no arbitrary filesystem and no folder picker that yields a
+// usable path, so vaults live under the device's *public* Documents directory
+// (`/storage/emulated/0/Documents/PINPOINT/<name>`). This keeps the `.md` files
+// visible to every file manager and other apps, and surviving uninstall — at the
+// cost of needing the "All files access" (MANAGE_EXTERNAL_STORAGE) runtime grant
+// (see `external_storage_*` below). Because the root is still a real on-disk
+// directory, the entire vault/index/query/lock core works unchanged — only the way a
+// root is *chosen* differs from desktop. These commands are the choice surface:
+// list existing app vaults, create one, and open one by name.
+
+/// The folder that holds app-owned vaults.
+///
+/// - Android: the public `Documents/PINPOINT` dir, so notes are visible everywhere.
+/// - Desktop (used only for dev/testing of these commands): the app local-data dir,
+///   to avoid scribbling into the developer's real Documents folder.
+fn app_vaults_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        // On Android the public external storage root is a stable, well-known path.
+        Ok(PathBuf::from("/storage/emulated/0/Documents/PINPOINT"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let base = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|e| format!("no app data dir: {e}"))?;
+        Ok(base.join("vaults"))
+    }
+}
+
+/// Reject vault names that aren't a single safe path segment (no separators, no
+/// traversal, no empties) so a name can never escape the vaults dir.
+fn validate_vault_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("vault name can't be empty".into());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("invalid vault name".into());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('\0') {
+        return Err("vault name can't contain slashes".into());
+    }
+    Ok(())
+}
+
+/// List app-owned vaults (each immediate subfolder of the vaults dir), most-recent
+/// first by directory mtime. Shaped like the recents list so the frontend can render
+/// them with the same Start-screen UI. Empty (and creates nothing) before any vault exists.
+#[tauri::command]
+fn list_app_vaults(app: tauri::AppHandle) -> Result<Vec<recents::RecentVault>, String> {
+    let dir = app_vaults_dir(&app)?;
+    let mut out: Vec<recents::RecentVault> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let last_opened = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            out.push(recents::RecentVault {
+                path: path.to_string_lossy().to_string(),
+                name,
+                last_opened,
+            });
+        }
+    }
+    out.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    Ok(out)
+}
+
+/// Create a new app-owned vault named `name` and open it. Errors if a vault with
+/// that name already exists, so the UI can prompt for a different one.
+#[tauri::command]
+fn create_app_vault(
+    name: String,
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<vault::TreeNode, String> {
+    validate_vault_name(&name)?;
+    let root = app_vaults_dir(&app)?.join(name.trim());
+    if root.exists() {
+        return Err(format!("a vault named \"{}\" already exists", name.trim()));
+    }
+    std::fs::create_dir_all(&root).map_err(|e| format!("couldn't create vault: {e}"))?;
+    open_vault_at(root, state, app)
+}
+
+/// Open the app-owned vault named `name`. Errors (rather than silently creating) if
+/// it doesn't exist, so a stale reference surfaces instead of spawning an empty vault.
+#[tauri::command]
+fn open_app_vault(
+    name: String,
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<vault::TreeNode, String> {
+    validate_vault_name(&name)?;
+    let root = app_vaults_dir(&app)?.join(name.trim());
+    if !root.is_dir() {
+        return Err(format!("vault \"{}\" not found", name.trim()));
+    }
+    open_vault_at(root, state, app)
+}
+
+// --- "All files access" permission (Android MANAGE_EXTERNAL_STORAGE) --------------
+//
+// Writing to the public Documents dir on Android 11+ requires the special
+// "All files access" grant. It can't be requested through the normal runtime-
+// permission dialog — the user must toggle it on a system Settings screen. These
+// two commands (a) report whether it's already granted and (b) open that screen.
+// Both are implemented via JNI against the running Activity; on desktop they're
+// no-ops that report "granted" so the same frontend flow is harmless there.
+
+/// Whether the app currently holds "All files access".
+/// Desktop: always true (no such concept). Android: `Environment.isExternalStorageManager()`.
+#[tauri::command]
+fn external_storage_granted() -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        android_storage::is_manager().map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(true)
+    }
+}
+
+/// Open the system "All files access" settings screen for this app so the user can
+/// grant the permission. No-op on desktop. Returns immediately; the frontend should
+/// re-check `external_storage_granted` when the app resumes.
+#[tauri::command]
+fn request_external_storage() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        android_storage::open_settings().map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -162,6 +364,9 @@ fn write_page(
     let guard = state.inner.lock().unwrap();
     let session = guard.as_ref().ok_or("no vault open")?;
     let abs = session.root.join(&rel_path);
+    // Guarantee a stable `id` in frontmatter so renames can repair links and the index can key on it.
+    let mut frontmatter = frontmatter;
+    vault::ensure_id(&mut frontmatter);
     vault::write_doc(&abs, &frontmatter, &body).map_err(err)?;
     index::index_file(&session.conn, &session.root, &abs).map_err(err)?;
     Ok(())
@@ -175,7 +380,10 @@ fn create_page(rel_path: String, body: String, state: State<AppState>) -> Result
     if abs.exists() {
         return Err("file already exists".into());
     }
-    vault::write_doc(&abs, &serde_json::json!({}), &body).map_err(err)?;
+    // Stamp a fresh `id` so the page is rename-safe from the moment it's created.
+    let mut frontmatter = serde_json::json!({});
+    vault::ensure_id(&mut frontmatter);
+    vault::write_doc(&abs, &frontmatter, &body).map_err(err)?;
     index::index_file(&session.conn, &session.root, &abs).map_err(err)?;
     Ok(())
 }
@@ -319,9 +527,38 @@ fn rename_path(
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent).ok();
     }
+    let was_md = from.extension().and_then(|e| e.to_str()) == Some("md");
     std::fs::rename(&from, &to).map_err(err)?;
-    // Rebuild the index so renamed pages keep correct paths.
-    index::rebuild(&session.conn, &session.root).map_err(err)?;
+
+    // Leaf names (minus .md) before/after — wikilinks target the leaf, so a leaf change is what can
+    // strand `[[links]]`.
+    let leaf = |rel: &str| -> String {
+        rel.rsplit('/').next().unwrap_or(rel).strip_suffix(".md").unwrap_or(rel).to_string()
+    };
+    let old_name = leaf(&from_rel);
+    let new_name = leaf(&to_rel);
+
+    if was_md {
+        // Single-page rename/move: incrementally swap the moved file's rows (old path out, new in),
+        // then repair backlinks if the visible name changed — no full rebuild.
+        index::delete_file(&session.conn, &session.root, &from).map_err(err)?;
+        index::index_file(&session.conn, &session.root, &to).map_err(err)?;
+        if old_name != new_name {
+            // Resolve the renamed page's stable id from its (now relocated) frontmatter so we rewrite
+            // only links that point at *this* page.
+            let page_id = vault::read_doc(&to)
+                .ok()
+                .and_then(|d| d.frontmatter.get(vault::ID_KEY).and_then(|v| v.as_str()).map(String::from));
+            if let Some(id) = page_id {
+                index::rename_links(&session.conn, &session.root, &id, &old_name, &new_name)
+                    .map_err(err)?;
+            }
+        }
+    } else {
+        // Folder rename/move: many pages' paths change but their leaf names (hence wikilinks) don't,
+        // so no link rewrite is needed — just bring the index's paths back in sync incrementally.
+        index::rebuild_incremental(&session.conn, &session.root).map_err(err)?;
+    }
     Ok(())
 }
 
@@ -801,8 +1038,40 @@ fn seed_themes(starters: Vec<(String, String)>, state: State<AppState>) -> Resul
     themes::seed_if_empty(&session.root, &starters).map_err(err)
 }
 
+// --- LLM CLI integration -----------------------------------------------------------
+//
+// Drive the official `claude`/`gemini`/`codex` CLIs as subprocesses. The user's subscription
+// login lives entirely inside the CLI (we never read its credentials); we just spawn the binary
+// headlessly and stream its output. See src-tauri/src/llm.rs and docs/llm-cli-integration-plan.md.
+
+/// Which CLIs are installed + logged in, for the provider-detection settings UI.
+#[tauri::command]
+fn llm_providers() -> Vec<llm::ProviderStatus> {
+    llm::detect_all()
+}
+
+/// Start an LLM run. Streams normalized events to the `llm://<run_id>` event channel and
+/// resolves when the subprocess exits. Not vault-gated — chatting doesn't require an open vault.
+#[tauri::command]
+async fn llm_run(
+    req: llm::RunRequest,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    llm::run(app, &state.llm, req).await
+}
+
+/// Cancel an in-flight run by id (kills the subprocess). No-op if it already finished.
+#[tauri::command]
+fn llm_cancel(run_id: String, state: State<AppState>) {
+    llm::cancel(&state.llm, &run_id);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // `mut` is required on desktop (the updater plugin is appended below); on mobile that
+    // block is compiled out, so silence the otherwise-spurious unused-mut lint there.
+    #[cfg_attr(mobile, allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -859,7 +1128,15 @@ pub fn run() {
             delete_theme,
             rename_theme,
             seed_themes,
-            list_recent_vaults
+            list_recent_vaults,
+            list_app_vaults,
+            create_app_vault,
+            open_app_vault,
+            external_storage_granted,
+            request_external_storage,
+            llm_providers,
+            llm_run,
+            llm_cancel
         ])
         .setup(|app| {
             // Ensure state exists; nothing else needed at startup.

@@ -196,6 +196,98 @@ function serializeDoc(frontmatter: Record<string, unknown>, body: string): strin
 }
 
 /* ---------------------------------------------------------------------------
+   Stable page id + wikilink rename-rewrite (mirrors vault.rs / index.rs).
+--------------------------------------------------------------------------- */
+
+/** Frontmatter key holding a page's stable identity. Mirrors `vault::ID_KEY`. */
+const ID_KEY = "id";
+
+/** A fresh page id: 32 lowercase hex chars (UUID v4 with dashes stripped), matching `new_page_id`. */
+function newPageId(): string {
+  // crypto.randomUUID is available in all FSA-capable browsers; strip dashes for the same shape Rust emits.
+  return crypto.randomUUID().replace(/-/g, "");
+}
+
+/** Ensure frontmatter carries an `id` (inserted first for readability). Returns true if it added one. */
+function ensureId(frontmatter: Record<string, unknown>): boolean {
+  const cur = frontmatter[ID_KEY];
+  if (typeof cur === "string" && cur.length > 0) return false;
+  // Re-key so `id` lands first in serialization order.
+  const rest = { ...frontmatter };
+  delete rest[ID_KEY];
+  const merged = { [ID_KEY]: newPageId(), ...rest };
+  for (const k of Object.keys(frontmatter)) delete frontmatter[k];
+  Object.assign(frontmatter, merged);
+  return true;
+}
+
+/**
+ * Rewrite every `[[old]]` wikilink to `[[new]]`, preserving any `|alias`/`#anchor` and leaving other
+ * links untouched. Case- and surrounding-whitespace-insensitive on the target. Mirrors Rust
+ * `rewrite_wikilinks`.
+ */
+function rewriteWikilinks(text: string, oldName: string, newName: string): string {
+  const oldNorm = oldName.trim().toLowerCase();
+  return text.replace(/\[\[([^\]]*)\]\]/g, (whole, inner: string) => {
+    const sep = inner.search(/[|#]/);
+    const target = sep >= 0 ? inner.slice(0, sep) : inner;
+    const tail = sep >= 0 ? inner.slice(sep) : "";
+    if (target.trim().toLowerCase() !== oldNorm) return whole;
+    const lead = target.match(/^\s*/)?.[0] ?? "";
+    const trail = target.match(/\s*$/)?.[0] ?? "";
+    return `[[${lead}${newName}${trail}${tail}]]`;
+  });
+}
+
+/**
+ * Repair `[[oldName]]` → `[[newName]]` across every cached page that links to the renamed page, then
+ * persist + refresh the cache for each changed file. `pageId` scopes the rewrite to links that resolve
+ * to this page (so renaming one of two same-named pages doesn't disturb the other); pages without an
+ * id fall back to a name match. Mirrors Rust `index::rename_links`.
+ */
+async function renameLinks(pageId: string | null, oldName: string, newName: string): Promise<void> {
+  if (oldName.trim().toLowerCase() === newName.trim().toLowerCase()) return;
+  const oldNorm = oldName.trim().toLowerCase();
+  for (const page of [...pageCache.values()]) {
+    // Does this page link to the renamed one? Resolve each `[[target]]` to a page id and compare.
+    const links = extractWikilinks(page.body);
+    const pointsHere = links.some((t) => {
+      if (t.trim().toLowerCase() !== oldNorm) return false;
+      const resolved = resolvePageIdByName(t);
+      return pageId ? resolved === pageId : true;
+    });
+    if (!pointsHere) continue;
+    const newBody = rewriteWikilinks(page.body, oldName, newName);
+    if (newBody === page.body) continue;
+    await writeFileText(page.rel_path, serializeDoc(page.frontmatter, newBody));
+    pageCache.set(page.rel_path, { ...page, body: newBody });
+  }
+}
+
+/** Extract `[[wikilink]]` targets (leaf names) from text. Mirrors Rust `extract_wikilinks`. */
+function extractWikilinks(text: string): string[] {
+  const out: string[] = [];
+  const re = /\[\[([^\]]+)\]\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const target = m[1].split(/[|#]/)[0]?.trim();
+    if (target) out.push(target);
+  }
+  return out;
+}
+
+/** Resolve a wikilink target name to a cached page's id, by leaf-name/title (case-insensitive). */
+function resolvePageIdByName(target: string): string | null {
+  const t = target.trim().toLowerCase();
+  for (const p of pageCache.values()) {
+    const id = typeof p.frontmatter[ID_KEY] === "string" ? (p.frontmatter[ID_KEY] as string) : "";
+    if (!id) continue;
+    if (p.name.toLowerCase() === t || p.rel_path.replace(/\.md$/i, "").toLowerCase() === t) return id;
+  }
+  return null;
+}
+
+/* ---------------------------------------------------------------------------
    Tags + tasks extraction (mirrors index.rs).
 --------------------------------------------------------------------------- */
 
@@ -501,8 +593,18 @@ function runQueryDsl(dsl: string): QueryResult {
 
   const fromMatch = flat.match(/\bFROM\s+(#[\w/.!?-]+|"[^"]*"|'[^']*')/i);
   const whereMatch = flat.match(/\bWHERE\s+(.+?)(?=\s+SORT\b|\s+LIMIT\b|$)/i);
-  const sortMatch = flat.match(/\bSORT\s+([\w.]+)(\s+(ASC|DESC))?/i);
+  // Whole SORT clause (everything up to LIMIT/end), so we can parse multiple comma-separated keys.
+  const sortMatch = flat.match(/\bSORT\s+(.+?)(?=\s+LIMIT\b|$)/i);
   const limitMatch = flat.match(/\bLIMIT\s+(\d+)/i);
+
+  // Parse `field [ASC|DESC], field [ASC|DESC], …` into ordered sort keys. Mirrors query.rs.
+  const sortKeys: { field: string; desc: boolean }[] = sortMatch
+    ? sortMatch[1]
+        .split(",")
+        .map((part) => part.trim().split(/\s+/))
+        .filter((toks) => toks[0])
+        .map((toks) => ({ field: toks[0], desc: (toks[1] ?? "").toUpperCase() === "DESC" }))
+    : [];
 
   // Columns: only meaningful for TABLE, between the kind and the first clause keyword.
   let columns: string[] = [];
@@ -574,6 +676,7 @@ function runQueryDsl(dsl: string): QueryResult {
         case "recurring": return t.rrule != null;
         case "due": return t.due ?? "";
         case "text": return t.text;
+        case "priority": return t.priority ?? "";
         case "file.path":
         case "path": return t.rel_path;
         default: return undefined;
@@ -589,11 +692,51 @@ function runQueryDsl(dsl: string): QueryResult {
         const present = have.includes(want);
         return c.op === "!=" ? !present : present;
       }
+      // `ref`: does the task line contain a `[[wikilink]]` to the given page? Strip any brackets/
+      // alias the user included and match `[[target` as a prefix (mirrors query.rs's `ref` handler).
+      if (c.field === "ref") {
+        const target = String(c.value ?? "")
+          .trim()
+          .replace(/^\[\[/, "")
+          .replace(/\]\]$/, "")
+          .split(/[|#]/)[0]
+          .trim()
+          .toLowerCase();
+        const present = t.text.toLowerCase().includes(`[[${target}`);
+        return c.op === "!=" ? !present : present;
+      }
       return compare(taskField(t, c.field), c.op, c.value);
     };
     tasks = tasks.filter((t) => matchesWhere((c) => taskCond(t, c)));
 
-    tasks.sort((a, b) => (a.due ?? "9999").localeCompare(b.due ?? "9999"));
+    // Honor explicit SORT keys in order (`SORT priority DESC, due`); otherwise default to due-date
+    // order (nulls last). Mirrors query.rs's TASK ordering so desktop and browser agree.
+    // `priority` ranks high>medium>low (no priority ranks lowest, so DESC lists high tasks first).
+    const prioRank = (p: string | null | undefined): number =>
+      p === "high" ? 3 : p === "medium" ? 2 : p === "low" ? 1 : 0;
+    if (sortKeys.length) {
+      const key = (t: TaskRow, field: string): string | number => {
+        switch (field) {
+          case "priority": return prioRank(t.priority);
+          case "done": return t.done ? 1 : 0;
+          case "text": return t.text;
+          case "file.path":
+          case "path": return t.rel_path;
+          default: return t.due ?? "9999"; // due and any unknown field fall back to due-order
+        }
+      };
+      tasks.sort((a, b) => {
+        for (const { field, desc } of sortKeys) {
+          const ka = key(a, field), kb = key(b, field);
+          const cmp =
+            typeof ka === "number" ? (ka as number) - (kb as number) : String(ka).localeCompare(String(kb));
+          if (cmp !== 0) return desc ? -cmp : cmp;
+        }
+        return 0;
+      });
+    } else {
+      tasks.sort((a, b) => (a.due ?? "9999").localeCompare(b.due ?? "9999"));
+    }
     return {
       kind: "task",
       columns: ["text", "due", "done", "recurring"],
@@ -609,6 +752,8 @@ function runQueryDsl(dsl: string): QueryResult {
         recurring: t.rrule != null,
         tags: t.tags ?? "",
         done_dates: t.done_dates ?? "",
+        // Normalized `high`/`medium`/`low` (or null) so the client can render a pill.
+        priority: t.priority ?? null,
       })),
     };
   }
@@ -618,14 +763,15 @@ function runQueryDsl(dsl: string): QueryResult {
     rows = rows.filter((p) => matchesWhere((c) => compare(pageFieldValue(p, c.field), c.op, c.value)));
   }
 
-  // SORT
-  if (sortMatch) {
-    const field = sortMatch[1];
-    const desc = (sortMatch[3] ?? "").toUpperCase() === "DESC";
+  // SORT — apply each key in order until one breaks the tie.
+  if (sortKeys.length) {
     rows.sort((a, b) => {
-      const av = pageFieldValue(a, field), bv = pageFieldValue(b, field);
-      const cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true });
-      return desc ? -cmp : cmp;
+      for (const { field, desc } of sortKeys) {
+        const av = pageFieldValue(a, field), bv = pageFieldValue(b, field);
+        const cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true });
+        if (cmp !== 0) return desc ? -cmp : cmp;
+      }
+      return 0;
     });
   }
 
@@ -1159,6 +1305,8 @@ export const webApi = {
   },
 
   writePage: async (relPath: string, frontmatter: Record<string, unknown>, body: string): Promise<void> => {
+    // Guarantee a stable `id` so renames can repair links (mirrors native write_page).
+    ensureId(frontmatter);
     await writeFileText(relPath, serializeDoc(frontmatter, body));
     pageCache.set(relPath, {
       rel_path: relPath,
@@ -1178,7 +1326,17 @@ export const webApi = {
       exists = false;
     }
     if (exists) throw new Error(`File already exists: ${relPath}`);
-    await writeFileText(relPath, body);
+    // Stamp a fresh `id` so the page is rename-safe from creation (mirrors native create_page).
+    const frontmatter: Record<string, unknown> = {};
+    ensureId(frontmatter);
+    await writeFileText(relPath, serializeDoc(frontmatter, body));
+    pageCache.set(relPath, {
+      rel_path: relPath,
+      name: (relPath.split("/").pop() ?? relPath).replace(/\.md$/i, ""),
+      folder: relPath.includes("/") ? relPath.slice(0, relPath.lastIndexOf("/")) : "",
+      frontmatter,
+      body,
+    });
   },
 
   // Create a plain folder. Mirrors the Rust `create_folder`: refuse to merge into an existing one.
@@ -1325,8 +1483,26 @@ export const webApi = {
 
   // Rename / move a file or folder. The FSA API has no native rename, so we copy then delete.
   renamePath: async (fromRel: string, toRel: string): Promise<void> => {
+    const leaf = (rel: string) =>
+      (rel.split("/").pop() ?? rel).replace(/\.md$/i, "");
+    const wasMd = /\.md$/i.test(fromRel);
+    // Capture the renamed page's stable id *before* the move (from cache) so we can scope the link
+    // rewrite to exactly this page even when another page shares its leaf name.
+    const before = pageCache.get(fromRel);
+    const pageId =
+      before && typeof before.frontmatter[ID_KEY] === "string"
+        ? (before.frontmatter[ID_KEY] as string)
+        : null;
+    const oldName = leaf(fromRel);
+    const newName = leaf(toRel);
+
     await movePath(fromRel, toRel);
-    await scan();
+    await scan(); // rebuild cache at the new paths
+
+    // Only a page leaf-name change can strand `[[links]]` (folder moves keep leaf names). Repair them.
+    if (wasMd && oldName !== newName) {
+      await renameLinks(pageId, oldName, newName);
+    }
   },
 
   reindex: async (): Promise<number> => {

@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS pages (
     folder     TEXT NOT NULL,
     mtime      INTEGER NOT NULL,
     body       TEXT NOT NULL,
-    frontmatter TEXT NOT NULL  -- JSON object
+    frontmatter TEXT NOT NULL, -- JSON object
+    id         TEXT            -- stable page id from frontmatter (nullable until back-filled)
 );
 CREATE TABLE IF NOT EXISTS fields (
     rel_path TEXT NOT NULL,
@@ -30,8 +31,9 @@ CREATE TABLE IF NOT EXISTS tags (
     tag      TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS links (
-    src TEXT NOT NULL,
-    dst TEXT NOT NULL          -- target page name (wikilink) or path
+    src    TEXT NOT NULL,
+    dst    TEXT NOT NULL,      -- target page name (wikilink) or path
+    dst_id TEXT                -- resolved id of the target page, or NULL when it doesn't exist yet
 );
 CREATE TABLE IF NOT EXISTS tasks (
     rel_path   TEXT NOT NULL,
@@ -54,6 +56,15 @@ CREATE INDEX IF NOT EXISTS idx_tags_rel   ON tags(rel_path);
 CREATE INDEX IF NOT EXISTS idx_pages_folder ON pages(folder);
 CREATE INDEX IF NOT EXISTS idx_links_src  ON links(src);
 CREATE INDEX IF NOT EXISTS idx_tasks_rel  ON tasks(rel_path);
+"#;
+
+/// Indexes over columns added by migration (`id`, `dst_id`). Created *after* the ALTERs in `open`,
+/// because on an older DB those columns don't exist when `SCHEMA` runs and `CREATE INDEX … ON
+/// links(dst_id)` would fail. Kept separate (not in `SCHEMA`) so column-then-index ordering holds.
+const MIGRATION_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_pages_id    ON pages(id);
+CREATE INDEX IF NOT EXISTS idx_links_dst   ON links(dst);
+CREATE INDEX IF NOT EXISTS idx_links_dstid ON links(dst_id);
 "#;
 
 /// Open (or create) the index DB inside `.pinpoint/index.sqlite`.
@@ -90,6 +101,14 @@ pub fn open(vault_root: &Path) -> Result<Connection> {
     conn.execute("ALTER TABLE tasks ADD COLUMN priority TEXT", []).ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0", []).ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN parent_line INTEGER", []).ok();
+    // Stable page id + resolved link target id (see stable-page-ids design). Same discipline as the
+    // task ALTERs above: a vault indexed by an older build lacks these columns, so the INSERTs in
+    // `index_file` (which name every column) would fail without them. Indexes are created by SCHEMA's
+    // `IF NOT EXISTS` above once the columns exist.
+    conn.execute("ALTER TABLE pages ADD COLUMN id TEXT", []).ok();
+    conn.execute("ALTER TABLE links ADD COLUMN dst_id TEXT", []).ok();
+    // Now that the migrated columns exist, create their indexes (see MIGRATION_INDEXES).
+    conn.execute_batch(MIGRATION_INDEXES).ok();
     Ok(conn)
 }
 
@@ -232,6 +251,96 @@ fn extract_tags(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Rewrite every `[[old]]` wikilink in `text` to `[[new]]`, preserving any `|alias` and `#anchor` and
+/// leaving non-matching links untouched. Target comparison is case- and surrounding-whitespace-
+/// insensitive (matching how `extract_wikilinks` reads a target), so `[[ Old | A ]]` → `[[new | A ]]`
+/// when renaming `Old`→`new`. Returns the rewritten string (unchanged if nothing matched).
+fn rewrite_wikilinks(text: &str, old: &str, new: &str) -> String {
+    let old_norm = old.trim().to_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start + 2..].find("]]") {
+            let inner = &rest[start + 2..start + 2 + end];
+            // Split off the target from its optional `|alias` / `#anchor` tail, keeping the tail verbatim.
+            let sep = inner.find(['|', '#']);
+            let (target, tail) = match sep {
+                Some(i) => (&inner[..i], &inner[i..]),
+                None => (inner, ""),
+            };
+            if target.trim().to_lowercase() == old_norm {
+                // Preserve any leading/trailing spaces the user had around the target.
+                let lead: String = target.chars().take_while(|c| c.is_whitespace()).collect();
+                let trail: String = target.chars().rev().take_while(|c| c.is_whitespace()).collect();
+                out.push_str("[[");
+                out.push_str(&lead);
+                out.push_str(new);
+                out.push_str(&trail);
+                out.push_str(tail);
+                out.push_str("]]");
+            } else {
+                out.push_str("[[");
+                out.push_str(inner);
+                out.push_str("]]");
+            }
+            rest = &rest[start + 2 + end + 2..];
+        } else {
+            // Unterminated `[[` — emit the rest as-is and stop.
+            out.push_str(&rest[start..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Repair `[[old_name]]` → `[[new_name]]` across every page that links to the renamed page, then
+/// re-index just those pages. `page_id` is the renamed page's stable id; we only rewrite links whose
+/// resolved target is that id (so renaming one of two same-named pages doesn't touch the other's
+/// backlinks). Falls back to a name match for links whose `dst_id` wasn't resolved yet. Returns the
+/// number of pages rewritten.
+pub fn rename_links(
+    conn: &Connection,
+    vault_root: &Path,
+    page_id: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<usize> {
+    if old_name.trim().eq_ignore_ascii_case(new_name.trim()) {
+        return Ok(0); // no visible name change (e.g. a move that kept the leaf)
+    }
+    // Source pages that link to this page: by resolved id, plus a name fallback for unresolved links.
+    let srcs: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT src FROM links
+              WHERE dst_id = ?1
+                 OR (dst_id IS NULL AND lower(dst) = lower(?2))",
+        )?;
+        let rows = stmt.query_map(params![page_id, old_name], |r| r.get::<_, String>(0))?;
+        rows.flatten().collect()
+    };
+
+    let mut rewritten = 0usize;
+    for src in srcs {
+        let abs = vault_root.join(&src);
+        let Ok(doc) = vault::read_doc(&abs) else { continue };
+        let new_body = rewrite_wikilinks(&doc.body, old_name, new_name);
+        if new_body == doc.body {
+            continue; // nothing actually matched in this file
+        }
+        if let Err(e) = vault::write_doc(&abs, &doc.frontmatter, &new_body) {
+            eprintln!("rename_links write error {}: {e}", abs.display());
+            continue;
+        }
+        index_file(conn, vault_root, &abs)?;
+        rewritten += 1;
+    }
+    // Links now point at the new name; refresh any dst_id that became resolvable.
+    resolve_pending_links(conn)?;
+    Ok(rewritten)
 }
 
 /// Extract `[[wikilinks]]` targets from text.
@@ -453,6 +562,61 @@ fn find_field(text: &str, markers: &[&str]) -> Option<String> {
     None
 }
 
+/// Resolve a `[[wikilink]]` target name to the stable id of the page it points at, by matching the
+/// target against page leaf-names (the rel_path stem, case-insensitive) and titles. Returns None for
+/// a dangling link or a target page that has no id yet — a later reindex fills it in once the target
+/// exists/migrates. When several pages share a leaf name we just take the first; the rename-rewrite
+/// path disambiguates by id, so an occasional ambiguous match here only affects backlink display.
+fn resolve_target_id(conn: &Connection, target: &str) -> Option<String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let like = t.to_lowercase();
+    // Fast path: exact match on title or full rel_path (with/without .md), all lower-cased. These are
+    // the common link forms and resolve with a single indexed-ish query.
+    let by_sql = conn
+        .query_row(
+            "SELECT id FROM pages
+              WHERE id IS NOT NULL
+                AND ( lower(title) = ?1
+                      OR lower(rel_path) = ?1
+                      OR lower(rel_path) = ?1 || '.md' )
+              LIMIT 1",
+            params![like],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    // Most wikilinks are a bare leaf name (`[[My Page]]`), which the SQL above won't match against a
+    // nested rel_path; fall back to a Rust leaf-name scan for those.
+    by_sql.or_else(|| resolve_target_id_by_leaf(conn, &like))
+}
+
+/// Fallback leaf-name match done in Rust: scan candidate pages and compare the basename. Kept simple
+/// and only hit when the SQL title/path match misses, so it isn't on the hot path for resolved links.
+fn resolve_target_id_by_leaf(conn: &Connection, like: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare("SELECT id, rel_path FROM pages WHERE id IS NOT NULL")
+        .ok()?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .ok()?;
+    for row in rows.flatten() {
+        let (id, rel_path) = row;
+        let leaf = rel_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&rel_path)
+            .strip_suffix(".md")
+            .unwrap_or(&rel_path)
+            .to_lowercase();
+        if leaf == like {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Re-index a single file. Removes old rows for it, then inserts fresh ones.
 pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Result<()> {
     let rel = abs_path
@@ -492,11 +656,19 @@ pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Resu
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default()
         });
+    // Stable page id from frontmatter (may be absent on a not-yet-migrated vault — back-filled by
+    // the write path / `assign_missing_ids`). NULL is fine here; links resolve against it later.
+    let id = doc
+        .frontmatter
+        .get(vault::ID_KEY)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     conn.execute(
-        "INSERT INTO pages (rel_path, title, folder, mtime, body, frontmatter)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![rel, title, folder, mtime, doc.body, doc.frontmatter.to_string()],
+        "INSERT INTO pages (rel_path, title, folder, mtime, body, frontmatter, id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![rel, title, folder, mtime, doc.body, doc.frontmatter.to_string(), id],
     )?;
 
     // Frontmatter fields.
@@ -529,7 +701,11 @@ pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Resu
             conn.execute("INSERT INTO tags (rel_path, tag) VALUES (?1, ?2)", params![rel, tag])?;
         }
         for dst in extract_wikilinks(line) {
-            conn.execute("INSERT INTO links (src, dst) VALUES (?1, ?2)", params![rel, dst])?;
+            let dst_id = resolve_target_id(conn, &dst);
+            conn.execute(
+                "INSERT INTO links (src, dst, dst_id) VALUES (?1, ?2, ?3)",
+                params![rel, dst, dst_id],
+            )?;
         }
         if let Some((indent, done, text, due, rrule, done_dates, priority)) = parse_task_line(line) {
             while task_stack.last().is_some_and(|&(ai, _)| ai >= indent) {
@@ -550,7 +726,41 @@ pub fn index_file(conn: &Connection, vault_root: &Path, abs_path: &Path) -> Resu
     Ok(())
 }
 
-/// Wipe and rebuild the whole index from the vault.
+/// One-time migration: stamp a stable `id` into the frontmatter of every page that lacks one, so the
+/// rename-rewrite path can rely on every page being identifiable. Rewrites only the files that were
+/// missing an id (preserving body + other frontmatter), and returns how many it touched.
+///
+/// Idempotent: a page that already has an id is read but not rewritten. The caller gates this behind a
+/// `.pinpoint/` marker so the full-vault read only happens once per vault rather than every startup.
+pub fn assign_missing_ids(vault_root: &Path) -> Result<usize> {
+    let files = vault::iter_markdown(vault_root);
+    let mut stamped = 0usize;
+    for abs in &files {
+        let Ok(mut doc) = vault::read_doc(abs) else { continue };
+        if vault::ensure_id(&mut doc.frontmatter) {
+            if let Err(e) = vault::write_doc(abs, &doc.frontmatter, &doc.body) {
+                eprintln!("assign_missing_ids write error {}: {e}", abs.display());
+                continue;
+            }
+            stamped += 1;
+        }
+    }
+    Ok(stamped)
+}
+
+/// Disk mtime of a file as whole seconds since the epoch (matches what `index_file` stores), or 0 if
+/// it can't be read. Kept identical to the capture in `index_file` so equal values mean "unchanged".
+fn disk_mtime(abs_path: &Path) -> i64 {
+    std::fs::metadata(abs_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Wipe and rebuild the whole index from the vault (force). Re-parses every file. Used for the
+/// explicit "Reindex" command and as the fallback when the incremental path can't be trusted.
 ///
 /// All the per-file work runs inside a single transaction: without it every one of the thousands of
 /// INSERTs in `index_file` would be its own implicit transaction (an fsync each, even under WAL),
@@ -567,8 +777,91 @@ pub fn rebuild(conn: &Connection, vault_root: &Path) -> Result<usize> {
             eprintln!("index error {}: {e}", f.display());
         }
     }
+    resolve_pending_links(&tx)?;
     tx.commit()?;
     Ok(count)
+}
+
+/// Incremental rebuild: re-parse only files whose on-disk mtime differs from what's indexed, insert
+/// new files, and prune rows for files deleted on disk. The index is a rebuildable cache, so this is
+/// always safe — a wrong mtime at worst skips a changed file until its next save, and a forced
+/// `rebuild` heals everything. Returns the number of files that were actually re-parsed.
+///
+/// This is the startup path: on a warm vault almost nothing is re-parsed, turning "parse N files"
+/// into "stat N files + parse the few that changed".
+pub fn rebuild_incremental(conn: &Connection, vault_root: &Path) -> Result<usize> {
+    use std::collections::HashMap;
+
+    let files = vault::iter_markdown(vault_root);
+    // rel_path -> mtime currently in the index.
+    let mut stored: HashMap<String, i64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT rel_path, mtime FROM pages")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows.flatten() {
+            stored.insert(row.0, row.1);
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reparsed = 0usize;
+    let mut changed = false;
+    for f in &files {
+        let rel = f
+            .strip_prefix(vault_root)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        seen.insert(rel.clone());
+        let unchanged = stored.get(&rel).is_some_and(|&m| m == disk_mtime(f));
+        if unchanged {
+            continue;
+        }
+        if let Err(e) = index_file(&tx, vault_root, f) {
+            eprintln!("index error {}: {e}", f.display());
+        }
+        reparsed += 1;
+        changed = true;
+    }
+    // Prune files that vanished from disk since the last index.
+    for rel in stored.keys() {
+        if !seen.contains(rel) {
+            tx.execute("DELETE FROM pages  WHERE rel_path = ?1", params![rel])?;
+            tx.execute("DELETE FROM fields WHERE rel_path = ?1", params![rel])?;
+            tx.execute("DELETE FROM tags   WHERE rel_path = ?1", params![rel])?;
+            tx.execute("DELETE FROM links  WHERE src = ?1", params![rel])?;
+            tx.execute("DELETE FROM tasks  WHERE rel_path = ?1", params![rel])?;
+            changed = true;
+        }
+    }
+    // Only re-resolve dangling link ids when something actually changed (cheap no-op otherwise).
+    if changed {
+        resolve_pending_links(&tx)?;
+    }
+    tx.commit()?;
+    Ok(reparsed)
+}
+
+/// Second pass after (incremental) rebuild: fill in `links.dst_id` for links whose target page was
+/// indexed *after* the link's source (so it had no id to resolve against at insert time). For each
+/// distinct still-unresolved target name we resolve once via `resolve_target_id` and back-fill every
+/// matching link row. Idempotent and cheap (only touches rows where dst_id IS NULL).
+fn resolve_pending_links(conn: &Connection) -> Result<()> {
+    let pending: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT dst FROM links WHERE dst_id IS NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.flatten().collect()
+    };
+    for dst in pending {
+        if let Some(id) = resolve_target_id(conn, &dst) {
+            conn.execute(
+                "UPDATE links SET dst_id = ?1 WHERE dst = ?2 AND dst_id IS NULL",
+                params![id, dst],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Drop a single file's rows from the index without touching any other file (the fast path for a
@@ -699,4 +992,59 @@ pub fn tag_connections(conn: &Connection, tag: &str) -> Result<Vec<TagConnection
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_basic() {
+        assert_eq!(rewrite_wikilinks("see [[Old]] now", "Old", "New"), "see [[New]] now");
+    }
+
+    #[test]
+    fn rewrite_preserves_alias_and_anchor() {
+        assert_eq!(rewrite_wikilinks("[[Old|Alias]]", "Old", "New"), "[[New|Alias]]");
+        assert_eq!(rewrite_wikilinks("[[Old#Heading]]", "Old", "New"), "[[New#Heading]]");
+        assert_eq!(rewrite_wikilinks("[[Old|A#H]]", "Old", "New"), "[[New|A#H]]");
+    }
+
+    #[test]
+    fn rewrite_is_case_and_space_insensitive_on_target() {
+        assert_eq!(rewrite_wikilinks("[[ old ]]", "Old", "New"), "[[ New ]]");
+        assert_eq!(rewrite_wikilinks("[[OLD]]", "Old", "New"), "[[New]]");
+    }
+
+    #[test]
+    fn rewrite_leaves_other_links_untouched() {
+        assert_eq!(
+            rewrite_wikilinks("[[Other]] and [[Old]]", "Old", "New"),
+            "[[Other]] and [[New]]"
+        );
+    }
+
+    #[test]
+    fn rewrite_handles_unterminated_brackets() {
+        assert_eq!(rewrite_wikilinks("text [[Old", "Old", "New"), "text [[Old");
+    }
+
+    #[test]
+    fn rewrite_multiple_occurrences() {
+        assert_eq!(
+            rewrite_wikilinks("[[Old]] x [[Old|a]] y [[Keep]]", "Old", "New"),
+            "[[New]] x [[New|a]] y [[Keep]]"
+        );
+    }
+
+    #[test]
+    fn ensure_id_generates_and_is_stable() {
+        let mut fm = serde_json::json!({});
+        assert!(crate::vault::ensure_id(&mut fm));
+        let first = fm.get("id").and_then(|v| v.as_str()).unwrap().to_string();
+        assert_eq!(first.len(), 32);
+        // Idempotent: a second call doesn't change an existing id.
+        assert!(!crate::vault::ensure_id(&mut fm));
+        assert_eq!(fm.get("id").and_then(|v| v.as_str()).unwrap(), first);
+    }
 }

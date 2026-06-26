@@ -6,8 +6,8 @@ interface Props {
   result: QueryResult;
   /** Pattern for rendering task due dates (TASK queries). */
   dateFormat?: string;
-  /** Open a task's source page when its text is clicked (TASK queries). */
-  onOpen?: (relPath: string) => void;
+  /** Open a task's source page when its text is clicked (TASK queries). `line` scrolls+flashes it. */
+  onOpen?: (relPath: string, line?: number) => void;
   /** Toggle a task's done state when its checkbox is clicked (TASK queries). */
   onToggle?: (task: TaskItem) => void;
   /**
@@ -34,6 +34,7 @@ function toTaskItem(r: Record<string, unknown>): TaskItem {
     rel_path: String(r["file.path"] ?? ""),
     line: Number(r.line ?? 0),
     tags,
+    priority: typeof r.priority === "string" ? r.priority : null,
     recurring,
     occurrence: recurring ? due : null,
   };
@@ -52,6 +53,8 @@ function expandTasks(rows: Record<string, unknown>[]): TaskItem[] {
     const rrule = r.rrule as string | null | undefined;
     // Expand a recurring task's upcoming occurrences. Each virtual row carries its own occurrence
     // date, so it can be checked off independently (done iff that date is in the completed list).
+    // We insert them (date-ordered) directly after their base row rather than re-sorting the whole
+    // list, so the backend's SORT clause (e.g. SORT done, SORT text) is preserved.
     if (rrule) {
       const start = base.due ? new Date(base.due) : today;
       for (const occ of upcoming(rrule, start, today, 8)) {
@@ -66,7 +69,7 @@ function expandTasks(rows: Record<string, unknown>[]): TaskItem[] {
       }
     }
   }
-  return out.sort((a, b) => (a.due ?? "9999").localeCompare(b.due ?? "9999"));
+  return out;
 }
 
 /**

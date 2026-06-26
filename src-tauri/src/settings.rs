@@ -69,6 +69,13 @@ pub struct Settings {
     pub startup_page: String,
     /// Name of the active theme (a `.themes/<name>.json` file). "" = built-in default palette.
     pub active_theme: String,
+    /// AI chat defaults each new conversation starts from (overridable per-conversation in the
+    /// composer). Mirror the TS `Settings` ai_* fields. "" = let the CLI use its own default.
+    pub ai_provider: String, // "claude" | "gemini" | "codex"
+    pub ai_model: String,    // model alias (`--model`); "" = CLI default
+    pub ai_effort: String,   // reasoning effort (`--effort`); "" = CLI default
+    pub ai_mode: String,     // "chat" | "note" | "agent"
+    pub ai_preset: String,   // role preset text prepended to the system prompt; "" = none
 }
 
 /// Built-in symbol replacements seeded into a fresh vault. Mirrors DEFAULT_SMART_REPLACEMENTS in TS.
@@ -122,6 +129,11 @@ impl Default for Settings {
             startup_behavior: "last".into(),
             startup_page: "".into(),
             active_theme: "".into(),
+            ai_provider: "claude".into(),
+            ai_model: "".into(),
+            ai_effort: "".into(),
+            ai_mode: "chat".into(),
+            ai_preset: "".into(),
         }
     }
 }

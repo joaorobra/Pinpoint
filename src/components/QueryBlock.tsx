@@ -16,13 +16,17 @@ import { useEffect, useState } from "react";
 import { ArrowsClockwise, PencilSimple, Table } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { QueryResult } from "../types";
+import { resolveCurrentPage } from "../querydsl";
 import QueryResultView from "./QueryResultView";
 
 export interface QueryBlockOptions {
   /** Open the query-helper popup to edit this block's DSL. Receives the node's screen position. */
   onEdit?: (getPos: () => number, dsl: string) => void;
-  /** Open a task's source page (by vault-relative path) when its text is clicked. */
-  onOpenPath?: (relPath: string) => void;
+  /**
+   * Open a task's source page (by vault-relative path) when its text is clicked. `line` is the
+   * task's source line, so the host can scroll to and flash that row (matching the calendar agenda).
+   */
+  onOpenPath?: (relPath: string, line?: number) => void;
   /** Pattern for rendering task due dates (see dateformat.ts). */
   dateFormat?: string;
   /**
@@ -31,6 +35,11 @@ export interface QueryBlockOptions {
    * file being edited (otherwise its rendered checkboxes stay stale until a manual reload).
    */
   onTaskToggled?: (relPath: string) => void;
+  /**
+   * Vault-relative path of the page hosting this editor, read fresh each run so `{{current}}` in a
+   * query resolves to wherever the block currently lives. Returns null when unknown.
+   */
+  getCurrentPath?: () => string | null;
 }
 
 declare module "@tiptap/core" {
@@ -57,7 +66,9 @@ function QueryBlockView({ node, editor, getPos, extension }: NodeViewProps) {
     setLoading(true);
     setError(null);
     try {
-      setResult(await api.runQuery(dsl));
+      // Resolve `{{current}}` to the host page's path at run time (see resolveCurrentPage).
+      const resolved = resolveCurrentPage(dsl, extension.options.getCurrentPath?.() ?? null);
+      setResult(await api.runQuery(resolved));
     } catch (e) {
       setError(String(e));
       setResult(null);
@@ -130,7 +141,13 @@ export const QueryBlock = Node.create<QueryBlockOptions>({
   draggable: true,
 
   addOptions() {
-    return { onEdit: undefined, onOpenPath: undefined, dateFormat: "YYYY-MM-DD", onTaskToggled: undefined };
+    return {
+      onEdit: undefined,
+      onOpenPath: undefined,
+      dateFormat: "YYYY-MM-DD",
+      onTaskToggled: undefined,
+      getCurrentPath: undefined,
+    };
   },
 
   addAttributes() {

@@ -2284,7 +2284,7 @@ code, .dsl-preview, .dsl-input {
 .query-helper {
   position: absolute; z-index: 60;
   right: var(--sp-4); /* pinned to the right edge of the editor, clear of the text */
-  width: 420px; max-width: calc(100% - 2 * var(--sp-4));
+  width: 520px; max-width: calc(100% - 2 * var(--sp-4));
   max-height: 70vh; overflow-y: auto;
   background: var(--bg-2); border: 1px solid var(--border);
   border-radius: var(--r-md); padding: var(--sp-4);
@@ -2297,6 +2297,11 @@ code, .dsl-preview, .dsl-input {
 }
 .query-helper-title { font-size: 0.9em; font-weight: 600; }
 .query-helper .builder { margin-bottom: var(--sp-3); padding: var(--sp-3); }
+/* Filter rows in the helper get the full width (no deep label-aligned indent) so the field/value
+   selects show full page and field names instead of truncating to "fil…" / "To…". */
+.query-helper .filter-row { padding-left: 0; }
+.query-helper .filter-row .select-op { flex: 0 0 84px; }
+.query-helper .filter-row > button { flex: none; }
 .query-helper .dsl-preview {
   flex: 1; min-width: 0; font-size: 0.78em; color: var(--text-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2753,7 +2758,13 @@ input[type="range"]::-moz-range-thumb {
   backdrop-filter: blur(8px);
   animation: pop 140ms var(--ease) both;
 }
-.select-menu.up { top: auto; bottom: calc(100% + 4px); }
+/* Non-portal (in-flow) flip-up: anchor to the trigger's top. The portal variant handles flip-up
+   entirely via inline `top` + `transform: translateY(-100%)` (see Select.tsx), so it MUST NOT get
+   `top: auto` here — that would wipe the inline top and collapse the menu to a thin sliver. */
+.select-menu.up:not(.portal) { top: auto; bottom: calc(100% + 4px); }
+/* Portaled menu: rendered at document.body with `position: fixed` and inline coords (see Select.tsx),
+   so it escapes any clipping/scroll ancestor. Sits above all inline popups (query-helper z-60). */
+.select-menu.portal { z-index: 1000; }
 .select-group + .select-group { margin-top: var(--sp-1); }
 .select-group-label {
   padding: var(--sp-1) var(--sp-2) 2px; font-size: 0.72em; font-weight: 700;
@@ -2765,6 +2776,15 @@ input[type="range"]::-moz-range-thumb {
   font-size: 0.92em; color: var(--text); white-space: nowrap;
 }
 .select-option-label { flex: 1; min-width: 0; white-space: nowrap; }
+/* Two-line option (label + subtitle) — used by the AI chat model/effort pickers. */
+.select-option-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.select-option-text .select-option-label { flex: none; }
+.select-option-desc {
+  font-size: 0.82em; font-weight: 400; line-height: 1.35;
+  color: var(--text-dim); white-space: normal;
+}
+.select-option:has(.select-option-text) { align-items: flex-start; padding-top: 7px; padding-bottom: 7px; }
+.select-option.selected .select-option-desc { color: var(--text-dim); font-weight: 400; }
 .select-option.active { background: var(--bg-hover); }
 .select-option.selected { color: var(--accent); font-weight: 600; }
 .select-option.active.selected { background: var(--accent-soft); }
@@ -4586,9 +4606,11 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
   /* The grid is forced to one column inline by App; nothing else needs to claim tracks. */
   .app { grid-template-columns: 1fr !important; }
 
-  /* Left file-tree drawer and right outline/calendar drawer both slide over the editor. */
+  /* Left file-tree drawer, right outline/calendar drawer, and AI chat dock all slide over the
+     editor on a phone (too narrow to reflow into multiple columns). */
   .sidebar,
-  .right-sidebar-wrap {
+  .right-sidebar-wrap,
+  .llm-dock {
     position: fixed; top: 0; bottom: 0; z-index: 50;
     width: var(--drawer-w);
     padding-top: var(--safe-t); padding-bottom: var(--safe-b);
@@ -4598,7 +4620,8 @@ body.db-resizing .db-col-resize::after { opacity: 1; }
     padding-left: var(--safe-l);
     box-shadow: var(--shadow-lg);
   }
-  .right-sidebar-wrap {
+  .right-sidebar-wrap,
+  .llm-dock {
     right: 0;
     padding-right: var(--safe-r);
     box-shadow: var(--shadow-lg);
@@ -5022,4 +5045,597 @@ body[data-vp="mobile"] .toast-host { bottom: calc(var(--navbar-h) + 2 * var(--sp
   .capture-option:active, .capture-submit:active,
   .tb-btn:active,
   .sheet-grip-zone:active .sheet-grip { transform: none; }
+}
+
+/* ===== LLM chat panel (CLI integration) ===========================================
+   A SECOND right sidebar that streams a CLI-driven model. Lives in the app grid (cols 6–7)
+   so opening it reflows the editor like the outline/calendar sidebar — it does NOT overlay.
+   Uses the shared design tokens so it tracks the active theme. See src/components/LlmPanel.tsx. */
+/* In-grid dock wrapper — fills the Framer Motion slide wrapper that owns the grid column. */
+.llm-dock {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.llm-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: var(--bg-2);
+  border-left: 1px solid var(--border);
+  min-width: 280px;
+}
+
+.llm-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.llm-head-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+.llm-head-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.llm-panel-head-actions {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+.llm-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.llm-icon-btn svg { width: 18px; height: 18px; }
+.llm-icon-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.llm-icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+.llm-transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Empty state: brand mark, greeting, and one-tap starter prompts. */
+.llm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--sp-2);
+  margin: auto 0;
+  padding: var(--sp-6) var(--sp-3);
+}
+.llm-empty-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  margin-bottom: var(--sp-1);
+}
+.llm-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.llm-empty-sub {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-width: 30ch;
+}
+.llm-empty-sub code,
+.llm-empty code {
+  font-family: var(--font-editor, monospace);
+  font-size: 0.9em;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.llm-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  width: 100%;
+  margin-top: var(--sp-3);
+}
+.llm-suggestion {
+  width: 100%;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  transition: background 140ms cubic-bezier(0.32, 0.72, 0, 1),
+    border-color 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-suggestion:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.llm-turn { display: flex; flex-direction: column; }
+.llm-turn-user { align-items: flex-end; }
+.llm-turn-assistant { align-items: stretch; }
+
+/* Author tag above an assistant reply. */
+.llm-turn-author {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: var(--sp-1);
+}
+
+.llm-turn-body {
+  font-size: 13.5px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+.llm-turn-user .llm-turn-body {
+  max-width: 88%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: 14px 14px 4px 14px;
+  white-space: pre-wrap;
+  background: var(--accent-soft);
+  color: var(--text);
+  border: 1px solid var(--accent-ring);
+}
+.llm-turn-assistant .llm-turn-body {
+  color: var(--text);
+}
+
+.llm-thinking {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* Tool-call pill — a collapsed "Edited file.md" row, expandable to its raw params. Replaces the
+   leaked <function_calls> XML the model sometimes writes inline. */
+.llm-tool {
+  margin: var(--sp-1) 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.llm-tool-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  width: 100%;
+  text-align: left;
+  padding: 5px var(--sp-2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  transition: background 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-tool-head:hover { background: var(--bg-hover); }
+.llm-tool-caret {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-tool.open .llm-tool-caret { transform: rotate(90deg); }
+.llm-tool-icon { flex: none; display: inline-flex; color: var(--accent); }
+.llm-tool-verb { color: var(--text); font-weight: 500; }
+.llm-tool-target {
+  font-family: var(--font-editor, monospace);
+  font-size: 0.95em;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-tool-detail {
+  margin: 0;
+  padding: var(--sp-2);
+  border-top: 1px solid var(--border);
+  background: var(--bg-3);
+  font-family: var(--font-editor, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-tool-head, .llm-tool-caret { transition: none; }
+}
+
+/* Blinking caret shown at the tail of a still-streaming assistant turn. */
+.llm-caret {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: llm-blink 1s steps(2, start) infinite;
+}
+@keyframes llm-blink { to { visibility: hidden; } }
+
+/* Attached-reference chips under a user turn. */
+.llm-attached {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  justify-content: flex-end;
+}
+.llm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px 1px 6px;
+}
+
+/* Composer: input above a toolbar (+ · settings · status · send). */
+.llm-composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.llm-composer-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.llm-bar-spacer { flex: 1; }
+
+/* Small ghost buttons in the composer toolbar (+, settings). */
+.llm-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 140ms cubic-bezier(0.32, 0.72, 0, 1), color 140ms;
+}
+.llm-tool-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.llm-tool-btn.active { background: var(--accent-soft); color: var(--accent); }
+.llm-tool-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Inline status pill — current model · mode · effort; opens the settings popover. */
+.llm-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 var(--sp-2);
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 7px;
+  font-size: 11.5px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: background 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-status:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.llm-status:disabled { opacity: 0.5; cursor: default; }
+.llm-status-model { color: var(--text); font-weight: 600; }
+.llm-status-sep { color: var(--text-faint); }
+
+/* Popovers (actions / settings) float above the composer. */
+.llm-pop {
+  position: absolute;
+  left: var(--sp-3);
+  right: var(--sp-3);
+  bottom: calc(100% - var(--sp-1));
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.55);
+  padding: var(--sp-1);
+  z-index: 6;
+  animation: llm-pop-in 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+@keyframes llm-pop-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.llm-pop-group {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+}
+.llm-pop-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  padding: var(--sp-2);
+  cursor: pointer;
+}
+.llm-pop-item:hover:not(:disabled) { background: var(--bg-hover); }
+.llm-pop-item:disabled { opacity: 0.4; cursor: default; }
+
+.llm-pop-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+}
+.llm-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.llm-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+/* Mode nudge above the composer: shown when the draft asks to edit a file but the mode can't. */
+.llm-mode-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-3) var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--accent-tint);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  animation: llm-pop-in 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-mode-hint strong { color: var(--text); font-weight: 600; }
+.llm-mode-hint-btn {
+  margin-left: auto;
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-contrast, #fff);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.llm-mode-hint-btn:hover { filter: brightness(1.08); }
+@media (prefers-reduced-motion: reduce) { .llm-mode-hint { animation: none; } }
+
+/* `[[` autocomplete menu — floats above the composer input. */
+.llm-link-menu {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(100% - 4px);
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  z-index: 5;
+}
+.llm-link-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+.llm-link-item.sel { background: var(--accent-soft); }
+.llm-link-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-link-tag {
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.llm-input {
+  width: 100%;
+  resize: none;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: 13.5px;
+  line-height: 1.5;
+  font-family: inherit;
+  max-height: 160px;
+  transition: border-color 140ms cubic-bezier(0.32, 0.72, 0, 1),
+    box-shadow 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.llm-input:disabled { opacity: 0.5; }
+
+.llm-send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  transition: background 140ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.llm-send-btn:hover:not(:disabled) { background: var(--accent-hover); }
+.llm-send-btn:disabled { opacity: 0.4; cursor: default; }
+.llm-send-stop { background: var(--danger); }
+.llm-send-stop:hover:not(:disabled) { background: var(--danger-strong); }
+
+/* ---- Markdown inside an assistant reply ---- */
+.llm-md > :first-child { margin-top: 0; }
+.llm-md > :last-child { margin-bottom: 0; }
+.llm-md p { margin: 0 0 var(--sp-2); }
+.llm-md h1, .llm-md h2, .llm-md h3, .llm-md h4 {
+  margin: var(--sp-3) 0 var(--sp-1);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.llm-md h1 { font-size: 1.3em; }
+.llm-md h2 { font-size: 1.18em; }
+.llm-md h3 { font-size: 1.06em; }
+.llm-md h4 { font-size: 1em; }
+.llm-md ul, .llm-md ol { margin: 0 0 var(--sp-2); padding-left: 1.4em; }
+.llm-md li { margin: 2px 0; }
+.llm-md li > p { margin: 0; }
+.llm-md a { color: var(--accent); text-decoration: none; }
+.llm-md a:hover { text-decoration: underline; }
+.llm-md code {
+  font-family: var(--font-editor, monospace);
+  font-size: 0.88em;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.llm-md blockquote {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.llm-md hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-3) 0; }
+.llm-md table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 var(--sp-2);
+  font-size: 0.95em;
+}
+.llm-md th, .llm-md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.llm-md th { background: var(--bg-3); font-weight: 600; }
+.llm-md th p, .llm-md td p { margin: 0; }
+.llm-md img { max-width: 100%; border-radius: 8px; }
+
+/* Fenced code block with hover copy button. */
+.llm-md pre {
+  position: relative;
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.llm-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.llm-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms cubic-bezier(0.32, 0.72, 0, 1), color 140ms;
+}
+.llm-md pre:hover .llm-code-copy { opacity: 1; }
+.llm-code-copy:hover { color: var(--text); border-color: var(--border-strong); }
+.llm-code-copy.done { color: var(--done); opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-caret { animation: none; }
+  .llm-pop { animation: none; }
+  .llm-suggestion, .llm-tool-btn, .llm-status, .llm-send-btn,
+  .llm-input, .llm-code-copy { transition: none; }
 }
