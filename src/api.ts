@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AssetData, DbSchema, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
+import type { AssetData, DbSchema, LockStatus, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
 import { assetKindFor } from "./types";
 import {
   webApi,
@@ -154,6 +154,20 @@ const tauriApi = {
     invoke<void>("move_task_block", { fromRel, line, toRel }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (s: Settings) => invoke<void>("save_settings", { s }),
+  // Locking (encryption-at-rest). `scopeRel` is vault-relative; "" means the whole vault.
+  /** Whether a folder/vault is encryptable and currently unlocked this session. */
+  lockStatus: (scopeRel: string) => invoke<LockStatus>("lock_status", { scopeRel }),
+  /** Encrypt a folder/vault with a password (rewrites its `.md` as `.md.enc`). */
+  lockVault: (scopeRel: string, password: string, hint: string | null) =>
+    invoke<void>("lock_vault", { scopeRel, password, hint }),
+  /** Decrypt a scope for this session (wrong password rejects before touching files). */
+  unlockVault: (scopeRel: string, password: string) =>
+    invoke<void>("unlock_vault", { scopeRel, password }),
+  /** Re-encrypt an unlocked scope and forget its key (manual "lock now"). */
+  relockVault: (scopeRel: string) => invoke<void>("relock_vault", { scopeRel }),
+  /** Change a scope's password by re-wrapping its key — no files are re-encrypted. */
+  changeLockPassword: (scopeRel: string, oldPassword: string, newPassword: string) =>
+    invoke<void>("change_lock_password", { scopeRel, oldPassword, newPassword }),
   // Themes: raw JSON blobs stored under `.themes/`. The frontend owns the `Theme` shape.
   listThemes: () => invoke<string[]>("list_themes"),
   readTheme: (name: string) => invoke<string>("read_theme", { name }),

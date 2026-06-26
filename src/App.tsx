@@ -27,8 +27,11 @@ import {
   SidebarSimple,
   MagnifyingGlass,
   Tag,
+  Lock,
+  LockOpen,
+  Key,
 } from "@phosphor-icons/react";
-import { api, pickVaultFolder, resolveRecentVault, listRecentVaults, isRecentVaultError } from "./api";
+import { api, isTauri, pickVaultFolder, resolveRecentVault, listRecentVaults, isRecentVaultError } from "./api";
 import { getTheme, seedStarterThemes } from "./themes-store";
 import { applyTheme, resolveMode } from "./theme-apply";
 import type { Theme } from "./types";
@@ -36,13 +39,14 @@ import { slideFade, transition } from "./motion";
 import { useViewport } from "./hooks/useViewport";
 import { useSwipeNav } from "./hooks/useSwipeNav";
 import { haptic } from "./lib/haptics";
+import { uiZoom } from "./lib/zoom";
 import Breadcrumb from "./components/Breadcrumb";
 import MobileNavbar, { type FolderOption } from "./components/MobileNavbar";
 import PathBreadcrumb from "./components/PathBreadcrumb";
 import FolderView from "./components/FolderView";
 import Tooltip from "./components/Tooltip";
 import StartScreen from "./components/StartScreen";
-import type { NodeIcon, Settings, TreeNode } from "./types";
+import type { LockStatus, NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS, extForMime } from "./types";
 import { collectTemplates, fillTemplate, stripCursor, type FillContext, type TemplateInfo } from "./templates";
 import { pathFor, labelFor, template, type Period } from "./periodic";
@@ -187,6 +191,22 @@ function flashTaskRow(ordinal: number, key: string, attempt = 0): void {
     if (attempt < 40) setTimeout(() => flashTaskRow(ordinal, key, attempt + 1), 50);
     return;
   }
+  // TEMP DIAGNOSTIC — remove after debugging the misplaced flash highlight.
+  {
+    const root = document.querySelector(`.editor-content[data-reload-key="${CSS.escape(key)}"]`);
+    const all = root?.querySelectorAll('ul[data-type="taskList"] li');
+    const r0 = el.getBoundingClientRect();
+    console.log("[flashDiag] ordinal=", ordinal,
+      "| total li=", all?.length,
+      "| matched text=", JSON.stringify((el.textContent || "").slice(0, 40)),
+      "| matched rect=", { left: Math.round(r0.left), top: Math.round(r0.top), w: Math.round(r0.width), h: Math.round(r0.height) },
+      "| uiZoom=", uiZoom(),
+      "| body.zoom=", getComputedStyle(document.body).zoom,
+      "| scrollY=", window.scrollY);
+    if (all) all.forEach((li, i) =>
+      console.log("   li[" + i + "]=", JSON.stringify((li.textContent || "").slice(0, 30)),
+        "tag-parent=", (li.parentElement?.getAttribute("data-type") || li.parentElement?.tagName)));
+  }
   el.scrollIntoView({ behavior: "smooth", block: "center" });
 
   const overlay = document.createElement("div");
@@ -207,10 +227,16 @@ function flashTaskRow(ordinal: number, key: string, attempt = 0): void {
   const track = (now: number) => {
     const row = findTaskRow(ordinal, key) ?? el;
     const r = row.getBoundingClientRect();
-    overlay.style.left = `${r.left - 6}px`;
-    overlay.style.top = `${r.top - 3}px`;
-    overlay.style.width = `${r.width + 12}px`;
-    overlay.style.height = `${r.height + 6}px`;
+    // `getBoundingClientRect` reports OUTER (zoomed) pixels, but the overlay is a child of the zoomed
+    // `body` (position: fixed does NOT escape CSS `zoom`), so its inline left/top/width/height are read
+    // in LOCAL (unzoomed) pixels. Divide the rect by the UI zoom factor so the box lands on the row at
+    // any zoom; the ±px nudges are local-space design constants, applied AFTER the division. No-op at
+    // 100%. See the css-zoom-coordinates note.
+    const z = uiZoom();
+    overlay.style.left = `${r.left / z - 6}px`;
+    overlay.style.top = `${r.top / z - 3}px`;
+    overlay.style.width = `${r.width / z + 12}px`;
+    overlay.style.height = `${r.height / z + 6}px`;
     // Hold full strength for 1s, then fade opacity to 0 over the next 0.8s.
     const elapsed = now - start;
     overlay.style.opacity = elapsed < 1000 ? "1" : String(Math.max(0, 1 - (elapsed - 1000) / 800));
@@ -290,6 +316,10 @@ export default function App() {
   const [trashCount, setTrashCount] = useState(0);
   // Open context menu: the right-clicked tree node + where to anchor the menu.
   const [menu, setMenu] = useState<{ node: TreeNode; x: number; y: number } | null>(null);
+  // Lock (encryption) status per folder rel_path, refreshed alongside the tree. Only encrypted
+  // scopes appear here; absence means "not a locked scope" (the common case). Drives both the tree
+  // lock indicators and which lock/unlock actions the context menu offers. "" is the vault root.
+  const [lockMap, setLockMap] = useState<Record<string, LockStatus>>({});
   // The sidebar ＋ "create" menu (New page / folder / database), anchored under the ＋ button.
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   // The "save panel" create dialog: name + destination-folder picker. Open via the ＋ menu.
@@ -508,6 +538,44 @@ export default function App() {
       console.error(e);
     }
   }, []);
+
+  // Refresh the per-folder lock-status map whenever the tree changes. We query every folder (plus the
+  // vault root, "") and keep only encrypted scopes — so `lockMap` is empty on the web build and on
+  // vaults with nothing locked, and absence means "not a locked scope". Cheap: one IPC call per
+  // folder, and only encrypted scopes ever read their manifest.
+  useEffect(() => {
+    if (!tree) {
+      setLockMap({});
+      return;
+    }
+    let cancelled = false;
+    const folders: string[] = [""];
+    const visit = (n: TreeNode) => {
+      if (n.is_dir && n.rel_path) folders.push(n.rel_path);
+      n.children.forEach(visit);
+    };
+    tree.children.forEach(visit);
+    (async () => {
+      const entries = await Promise.all(
+        folders.map(async (rel) => {
+          try {
+            return [rel, await api.lockStatus(rel)] as const;
+          } catch {
+            return [rel, null] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      const map: Record<string, LockStatus> = {};
+      for (const [rel, status] of entries) {
+        if (status?.is_locked_scope) map[rel] = status;
+      }
+      setLockMap(map);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tree]);
 
   // ---- File watcher: the Tauri backend emits "vault-changed". The browser build has no
   //      native watcher, so we simply skip it there (the user re-indexes with ⟳). ----
@@ -1855,6 +1923,113 @@ export default function App() {
     [refreshTree, forgetTabs]
   );
 
+  // ---- Locking (encryption-at-rest) ----
+  // A folder/vault can be encrypted with a password. Locking rewrites its `.md` as `.md.enc`
+  // ciphertext and removes plaintext; unlocking decrypts for the session and holds the key in
+  // memory. See the Rust `lock`/`crypto` modules. Desktop-only for now (web stubs reject).
+
+  /** Encrypt a folder with a new password (with confirmation). After locking, refresh the tree. */
+  const lockNode = useCallback(
+    async (node: TreeNode) => {
+      const got = await dialogs.password({
+        title: `Lock “${node.name}”`,
+        message:
+          "Choose a password. Its contents will be encrypted on disk and unreadable without it.\n\n⚠ If you forget this password, the data cannot be recovered.",
+        fields: [
+          { key: "new", label: "Password", placeholder: "Enter a strong password" },
+          { key: "confirm", label: "Confirm password", placeholder: "Re-enter password" },
+        ],
+        requireMatch: ["new", "confirm"],
+        minLength: 4,
+        confirmLabel: "Lock",
+      });
+      if (!got) return;
+      try {
+        await api.lockVault(node.rel_path, got.new, null);
+      } catch (e) {
+        await dialogs.alert({ title: "Lock failed", message: String(e) });
+        return;
+      }
+      // Locked content drops out of the index; refresh tree and dependent views.
+      forgetTabs((p) => p === node.rel_path || p.startsWith(node.rel_path + "/"));
+      await refreshTree();
+      setTaskRefresh((k) => k + 1);
+      toast.show({ message: `Locked “${node.name}”` });
+    },
+    [refreshTree, forgetTabs]
+  );
+
+  /** Prompt for a password and unlock a scope for this session. */
+  const unlockNode = useCallback(
+    async (node: TreeNode) => {
+      let status: Awaited<ReturnType<typeof api.lockStatus>>;
+      try {
+        status = await api.lockStatus(node.rel_path);
+      } catch (e) {
+        await dialogs.alert({ title: "Unlock failed", message: String(e) });
+        return;
+      }
+      const got = await dialogs.password({
+        title: `Unlock “${node.name}”`,
+        message: status.hint ? `Hint: ${status.hint}` : undefined,
+        fields: [{ key: "password", label: "Password", placeholder: "Enter password" }],
+        confirmLabel: "Unlock",
+      });
+      if (!got) return;
+      try {
+        await api.unlockVault(node.rel_path, got.password);
+      } catch (e) {
+        // The Rust side returns "wrong password" for a bad key; surface it plainly.
+        await dialogs.alert({ title: "Couldn't unlock", message: String(e) });
+        return;
+      }
+      await refreshTree();
+      setTaskRefresh((k) => k + 1);
+      toast.show({ message: `Unlocked “${node.name}”` });
+    },
+    [refreshTree]
+  );
+
+  /** Re-encrypt an unlocked scope now and forget its key. */
+  const relockNode = useCallback(
+    async (node: TreeNode) => {
+      try {
+        await api.relockVault(node.rel_path);
+      } catch (e) {
+        await dialogs.alert({ title: "Lock failed", message: String(e) });
+        return;
+      }
+      forgetTabs((p) => p === node.rel_path || p.startsWith(node.rel_path + "/"));
+      await refreshTree();
+      setTaskRefresh((k) => k + 1);
+      toast.show({ message: `Locked “${node.name}”` });
+    },
+    [refreshTree, forgetTabs]
+  );
+
+  /** Change a locked scope's password (re-wraps the key; no files re-encrypt). */
+  const changePasswordNode = useCallback(async (node: TreeNode) => {
+    const got = await dialogs.password({
+      title: `Change password for “${node.name}”`,
+      fields: [
+        { key: "old", label: "Current password", placeholder: "Enter current password" },
+        { key: "new", label: "New password", placeholder: "Enter new password" },
+        { key: "confirm", label: "Confirm new password", placeholder: "Re-enter new password" },
+      ],
+      requireMatch: ["new", "confirm"],
+      minLength: 4,
+      confirmLabel: "Change password",
+    });
+    if (!got) return;
+    try {
+      await api.changeLockPassword(node.rel_path, got.old, got.new);
+    } catch (e) {
+      await dialogs.alert({ title: "Couldn't change password", message: String(e) });
+      return;
+    }
+    toast.show({ message: "Password changed" });
+  }, []);
+
   // Delete every currently-selected row in one confirm. Skips descendants whose ancestor is also
   // selected (deleting the folder already removes them) to avoid "not found" errors. Soft-deletes
   // to `.trash` by default; `permanent` (shift-delete) removes irreversibly.
@@ -2084,6 +2259,8 @@ export default function App() {
     (node: TreeNode): MenuItem[] => {
       const MI = 15; // menu icon size
       const items: MenuItem[] = [];
+      // Encryption is desktop-only for now; the web build has no Rust crypto backend.
+      const canLock = isTauri();
 
       // Bulk menu: the right-clicked row is part of a multi-selection of 2+ rows.
       if (selected.size > 1 && selected.has(node.rel_path)) {
@@ -2159,6 +2336,45 @@ export default function App() {
             onClick: () => treeCmdRef.current?.collapse(node.rel_path),
           });
         }
+        // Lock / unlock (encryption-at-rest). Offered only on desktop, where `lockStatus` can report
+        // a real scope (the web stub always returns not-a-scope, so `lockMap` is empty there).
+        if (canLock) {
+          const status = lockMap[node.rel_path];
+          if (!status) {
+            // Plain folder → offer to encrypt it. (A folder already inside a locked, unlocked scope
+            // can still be independently locked; that's a Phase 2 nicety — for now we allow it.)
+            items.push({
+              label: "Lock with password…",
+              icon: <Lock size={MI} />,
+              separator: true,
+              onClick: () => lockNode(node),
+            });
+          } else if (status.unlocked) {
+            items.push({
+              label: "Lock now",
+              icon: <Lock size={MI} />,
+              separator: true,
+              onClick: () => relockNode(node),
+            });
+            items.push({
+              label: "Change password…",
+              icon: <Key size={MI} />,
+              onClick: () => changePasswordNode(node),
+            });
+          } else {
+            items.push({
+              label: "Unlock…",
+              icon: <LockOpen size={MI} />,
+              separator: true,
+              onClick: () => unlockNode(node),
+            });
+            items.push({
+              label: "Change password…",
+              icon: <Key size={MI} />,
+              onClick: () => changePasswordNode(node),
+            });
+          }
+        }
         items.push(iconItem);
         items.push({ label: "Rename", icon: <PencilSimple size={MI} />, onClick: () => renameNode(node) });
         items.push({ label: "Copy path", icon: <Copy size={MI} />, onClick: () => navigator.clipboard?.writeText(node.rel_path) });
@@ -2180,7 +2396,7 @@ export default function App() {
       items.push({ label: "Delete permanently", icon: <TrashSimple size={MI} />, danger: true, onClick: () => deleteNode(node, true) });
       return items;
     },
-    [selected, deleteMany, affixMany, settings.node_icons, openPage, openAsset, renameNode, duplicateNode, deleteNode, newPageIn, convertToDatabase, templates, menu]
+    [selected, deleteMany, affixMany, settings.node_icons, openPage, openAsset, renameNode, duplicateNode, deleteNode, newPageIn, convertToDatabase, templates, menu, lockMap, lockNode, unlockNode, relockNode, changePasswordNode]
   );
 
   // ---- Global keyboard shortcuts ----
@@ -2474,6 +2690,8 @@ export default function App() {
             selected={selected}
             onSelect={onSelect}
             nodeIcons={settings.node_icons}
+            lockStatuses={lockMap}
+            onUnlockFolder={unlockNode}
             onOpen={openPage}
             onOpenAsset={openAsset}
             onOpenDatabase={openDatabase}

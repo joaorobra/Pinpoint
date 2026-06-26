@@ -52,6 +52,18 @@ export interface ParsedDoc {
 }
 
 /**
+ * Encryption-at-rest status of a folder/vault ("scope"). See the Rust `lock`/`crypto` modules.
+ * `is_locked_scope` means it has a `.pinpoint-lock.json` manifest (it's encryptable); `unlocked`
+ * means its key is held in memory this session (its `.md` are readable plaintext right now).
+ */
+export interface LockStatus {
+  is_locked_scope: boolean;
+  unlocked: boolean;
+  /** Optional non-secret label shown in the unlock prompt. */
+  hint: string | null;
+}
+
+/**
  * A recently-opened vault, shown on the Start screen's switcher.
  * `id` is what `openRecentVault` takes: the absolute folder path on the desktop
  * build, or an opaque IndexedDB key on the browser build (no real path exists there).

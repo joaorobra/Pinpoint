@@ -2503,6 +2503,9 @@ export default function Editor({
     // the last character along.
     const itemPos = $from.before(taskDepth);
     const item = $from.node(taskDepth);
+    // Measure against `.editor-wrap` — the `.task-hint` div is rendered as a SIBLING of
+    // `.editor-content` (both are direct children of `.editor-wrap`), and `.editor-wrap` is the
+    // nearest positioned ancestor (position: relative), so it's the button's offset parent.
     const wrap = ed.view.dom.closest(".editor-wrap") as HTMLElement | null;
     const rect = wrap?.getBoundingClientRect();
     const baseLeft = rect?.left ?? 0;
@@ -2522,8 +2525,30 @@ export default function Editor({
       left = (box?.right ?? 0) - baseLeft;
       top = (box?.top ?? 0) - baseTop;
     }
-    setTaskHint({ left, top });
+    // coordsAtPos/getBoundingClientRect report OUTER (zoomed) pixels, but the `+` is an inline-styled
+    // descendant of the zoomed body, so its left/top are read in LOCAL (unzoomed) pixels. Divide the
+    // outer-pixel delta by uiZoom() so the button stays glued to the caret at any UI zoom (see
+    // [[css-zoom-coordinates]]). At 100% uiZoom() === 1, so this is a no-op.
+    const z = uiZoom();
+    setTaskHint({ left: left / z, top: top / z });
   }, []);
+
+  // The `+` task hint is positioned once (on selection/content change) and cached in state. Whole-UI
+  // zoom (Ctrl +/-/0) changes `document.body.style.zoom` WITHOUT touching the selection, so without
+  // this the cached left/top — computed at the old zoom — drifts until you next type or move the
+  // caret. Watch the body's style attribute and re-run the placement when the zoom factor changes.
+  useEffect(() => {
+    let last = uiZoom();
+    const obs = new MutationObserver(() => {
+      const z = uiZoom();
+      if (z === last) return;
+      last = z;
+      const ed = editorRef.current;
+      if (ed) detectTaskHint(ed);
+    });
+    obs.observe(document.body, { attributes: true, attributeFilter: ["style"] });
+    return () => obs.disconnect();
+  }, [detectTaskHint]);
 
   // Run a task-property action (the same handlers the slash commands use) from the + menu.
   const runTaskProp = useCallback((id: "due" | "repeat") => {

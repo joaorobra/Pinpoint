@@ -33,6 +33,13 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 gray_matter = "0.2"
 base64 = "0.22"
+# Encryption-at-rest for locked vaults/folders (Phase 1, desktop). Argon2id derives a key from the
+# password; XChaCha20-Poly1305 is an authenticated cipher (tamper-evident); zeroize wipes keys from
+# memory on lock; getrandom supplies OS CSPRNG salts/nonces.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.2"
 
 [features]
 # This feature is used for production builds or when a dev server is not specified.

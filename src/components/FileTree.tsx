@@ -12,7 +12,8 @@ import {
   Database,
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react";
-import type { NodeIcon, TreeNode } from "../types";
+import { Lock, LockOpen } from "@phosphor-icons/react";
+import type { LockStatus, NodeIcon, TreeNode } from "../types";
 import { assetKindFor } from "../types";
 import { NodeIconView } from "./Icon";
 
@@ -37,6 +38,10 @@ interface Props {
   onSelect: (node: TreeNode, mods: SelectMods, range: string[]) => void;
   /** Per-node icon overrides, keyed by rel_path. */
   nodeIcons: Record<string, NodeIcon>;
+  /** Encryption status per folder rel_path; only encrypted scopes appear. Drives the lock badge. */
+  lockStatuses?: Record<string, LockStatus>;
+  /** Clicking a locked (not-unlocked) folder asks the host to prompt for its password. */
+  onUnlockFolder?: (node: TreeNode) => void;
   /** Open a markdown page in the editor. */
   onOpen: (relPath: string) => void;
   /** Open a non-markdown file (PDF, image, …) in the asset viewer. */
@@ -136,7 +141,7 @@ function defaultIcon(node: TreeNode): PhosphorIcon {
  * The vault file tree. Folder open/closed state is owned here (a Set of collapsed paths) so the
  * header's expand-all / collapse-all controls can drive every folder at once — Obsidian-style.
  */
-export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, onMove, selectedSnapshot, renamingPath, onRenameCommit, onRenameCancel, revealRef, cmdRef }: Props) {
+export default function FileTree({ node, activePath, selected, onSelect, nodeIcons, lockStatuses, onUnlockFolder, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, onMove, selectedSnapshot, renamingPath, onRenameCommit, onRenameCancel, revealRef, cmdRef }: Props) {
   // We track which folders are *collapsed*; everything else is open by default at depth 0,
   // and a bumped signal lets the toolbar collapse/expand the whole tree at once.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -339,6 +344,8 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
             selected={selected}
             onSelect={handleSelect}
             nodeIcons={nodeIcons}
+            lockStatuses={lockStatuses}
+            onUnlockFolder={onUnlockFolder}
             collapsed={collapsed}
             onToggle={toggle}
             onOpen={onOpen}
@@ -364,6 +371,8 @@ interface RowProps {
   selected: Set<string>;
   onSelect: (node: TreeNode, mods: SelectMods) => void;
   nodeIcons: Record<string, NodeIcon>;
+  lockStatuses?: Record<string, LockStatus>;
+  onUnlockFolder?: (node: TreeNode) => void;
   collapsed: Set<string>;
   onToggle: (relPath: string) => void;
   onOpen: (relPath: string) => void;
@@ -378,7 +387,7 @@ interface RowProps {
   onRenameCancel?: () => void;
 }
 
-function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, drag, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
+function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, lockStatuses, onUnlockFolder, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, drag, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
   const renaming = renamingPath === node.rel_path;
   const isSelected = selected.has(node.rel_path);
   // Normalize the click into selection modifiers. metaKey covers Cmd on macOS.
@@ -487,23 +496,34 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
   }
 
   const open = !collapsed.has(node.rel_path);
+  // Lock state for this folder, if it's an encrypted scope. `locked` = exists but key not held.
+  const lock = lockStatuses?.[node.rel_path];
+  const lockedShut = !!lock && !lock.unlocked;
   return (
     <div>
       <div
         data-rel={node.rel_path}
         {...dragSrc}
         {...dropProps(node.rel_path)}
-        className={`tree-dir${isSelected ? " selected" : ""}${drag?.dropTarget === node.rel_path ? " drop-target" : ""}`}
+        className={`tree-dir${isSelected ? " selected" : ""}${drag?.dropTarget === node.rel_path ? " drop-target" : ""}${lockedShut ? " locked" : ""}`}
         onClick={(e) => {
           const m = mods(e);
-          // Ctrl/shift select the folder. A plain click opens/closes it — and also opens its view:
-          // the table for a database folder, or the gallery page for a plain folder (Notion-style).
-          if (m.toggle || m.range) onSelect(node, m);
-          else {
-            onToggle(node.rel_path);
-            if (node.is_database) onOpenDatabase?.(node);
-            else onOpenFolder?.(node);
+          // Ctrl/shift select the folder regardless of lock state.
+          if (m.toggle || m.range) {
+            onSelect(node, m);
+            return;
           }
+          // A locked, not-yet-unlocked folder has no readable contents — a plain click prompts to
+          // unlock rather than expanding an empty/ciphertext folder.
+          if (lockedShut && onUnlockFolder) {
+            onUnlockFolder(node);
+            return;
+          }
+          // A plain click opens/closes it — and also opens its view: the table for a database
+          // folder, or the gallery page for a plain folder (Notion-style).
+          onToggle(node.rel_path);
+          if (node.is_database) onOpenDatabase?.(node);
+          else onOpenFolder?.(node);
         }}
         onContextMenu={ctx}
       >
@@ -527,6 +547,15 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
         ) : (
           <span className="tree-label">{node.name}</span>
         )}
+        {lock && (
+          <span
+            className="tree-lock-badge"
+            title={lock.unlocked ? "Unlocked (encrypted)" : "Locked — click to unlock"}
+            aria-label={lock.unlocked ? "Unlocked" : "Locked"}
+          >
+            {lock.unlocked ? <LockOpen size={12} weight="fill" /> : <Lock size={12} weight="fill" />}
+          </span>
+        )}
       </div>
       {open &&
         node.children.map((c) => (
@@ -538,6 +567,8 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, colla
             selected={selected}
             onSelect={onSelect}
             nodeIcons={nodeIcons}
+            lockStatuses={lockStatuses}
+            onUnlockFolder={onUnlockFolder}
             collapsed={collapsed}
             onToggle={onToggle}
             onOpen={onOpen}

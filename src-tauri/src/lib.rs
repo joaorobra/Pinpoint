@@ -3,7 +3,9 @@
 //! Holds the active vault, the SQLite index, and a filesystem watcher. Exposes commands the
 //! React frontend calls via `invoke`.
 
+mod crypto;
 mod index;
+mod lock;
 mod query;
 mod recents;
 mod settings;
@@ -12,7 +14,8 @@ mod vault;
 
 use notify::{RecursiveMode, Watcher};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
@@ -36,6 +39,11 @@ fn now_ms() -> i64 {
 #[derive(Default)]
 pub struct AppState {
     inner: Mutex<Option<VaultSession>>,
+    /// Unlocked encryption keys for the current session, keyed by absolute scope path. A scope only
+    /// appears here while unlocked; locking removes it (and the `Key`'s zeroizing drop scrubs it from
+    /// memory). Survives vault switches deliberately — the app, not the vault session, owns unlock
+    /// lifetime. Cleared on quit when the process memory is freed.
+    keys: Mutex<HashMap<PathBuf, crypto::Key>>,
 }
 
 struct VaultSession {
@@ -538,6 +546,213 @@ fn save_settings(s: settings::Settings, state: State<AppState>) -> Result<(), St
     settings::save(&session.root, &s).map_err(err)
 }
 
+// ---- Locking (encryption-at-rest) ---------------------------------------------------------------
+// A "scope" is a folder marked by `.pinpoint-lock.json` (see lock.rs). Phase 1 targets the whole
+// vault (scope == vault root) but the commands take a vault-relative `scope_rel` so folder-level
+// locking in a later phase reuses them unchanged ("" == vault root).
+//
+// Locking sweeps every `.md` under the scope into a `<name>.md.enc` ciphertext and deletes the
+// plaintext; the index rows for the scope are dropped so locked content isn't searchable while
+// locked. Unlocking reverses the sweep into memory-held plaintext and caches the key for the session.
+
+/// Resolve a vault-relative scope path to an absolute one, guarding against escaping the vault.
+fn scope_abs(root: &Path, scope_rel: &str) -> Result<PathBuf, String> {
+    let rel = scope_rel.trim_start_matches(['/', '\\']);
+    let abs = if rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    };
+    // Reject traversal outside the vault.
+    if !abs.starts_with(root) || rel.contains("..") {
+        return Err("invalid scope path".into());
+    }
+    if !abs.is_dir() {
+        return Err(format!("not a folder: {scope_rel}"));
+    }
+    Ok(abs)
+}
+
+/// Status of a scope for the UI: whether it's an encrypted scope at all, and if so whether it's
+/// currently unlocked in this session.
+#[derive(serde::Serialize)]
+struct LockStatus {
+    is_locked_scope: bool,
+    unlocked: bool,
+    hint: Option<String>,
+}
+
+/// Report whether a folder/vault is an encrypted scope and whether it's unlocked right now.
+#[tauri::command]
+fn lock_status(scope_rel: String, state: State<AppState>) -> Result<LockStatus, String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let abs = scope_abs(&session.root, &scope_rel)?;
+    let is_scope = lock::is_locked_scope(&abs);
+    let hint = if is_scope {
+        lock::read_manifest(&abs).ok().and_then(|m| m.hint)
+    } else {
+        None
+    };
+    let unlocked = state.keys.lock().unwrap().contains_key(&abs);
+    Ok(LockStatus {
+        is_locked_scope: is_scope,
+        unlocked,
+        hint,
+    })
+}
+
+/// Encrypt a folder/vault with a password: create the manifest, rewrite every `.md` under it as a
+/// `.md.enc` blob, delete the plaintext, and drop the scope's rows from the index. The key is held
+/// in memory afterwards so the just-locked scope is immediately usable this session.
+#[tauri::command]
+fn lock_vault(
+    scope_rel: String,
+    password: String,
+    hint: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("password must not be empty".into());
+    }
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let scope = scope_abs(&session.root, &scope_rel)?;
+    if lock::is_locked_scope(&scope) {
+        return Err("this folder is already locked".into());
+    }
+
+    let dek = lock::create_scope(&scope, &password, hint).map_err(err)?;
+
+    // Sweep plaintext → ciphertext. On any failure we bail; partial state is possible but the
+    // manifest + already-encrypted files remain openable with the password, so no data is lost.
+    for md in vault::iter_markdown(&scope) {
+        let rel_in_scope = md
+            .strip_prefix(&scope)
+            .unwrap_or(&md)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let plaintext = std::fs::read(&md).map_err(err)?;
+        let blob = lock::encrypt_file(&dek, &rel_in_scope, &plaintext).map_err(err)?;
+        let enc_path = md.with_file_name(lock::enc_name(
+            &md.file_name().unwrap().to_string_lossy(),
+        ));
+        std::fs::write(&enc_path, &blob).map_err(err)?;
+        std::fs::remove_file(&md).map_err(err)?;
+        index::delete_file(&session.conn, &session.root, &md).map_err(err)?;
+    }
+
+    state.keys.lock().unwrap().insert(scope, dek);
+    Ok(())
+}
+
+/// Unlock an encrypted scope with a password. Verifies the password, decrypts every `.md.enc` back
+/// to plaintext `.md` on disk for this session, re-indexes them, and caches the key. Wrong password
+/// is rejected before any file is touched.
+#[tauri::command]
+fn unlock_vault(
+    scope_rel: String,
+    password: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let scope = scope_abs(&session.root, &scope_rel)?;
+    if !lock::is_locked_scope(&scope) {
+        return Err("this folder is not locked".into());
+    }
+
+    let dek = lock::unlock_scope(&scope, &password).map_err(err)?;
+
+    // Decrypt every `.enc` blob back to its plaintext `.md`.
+    for entry in walk_enc_files(&scope) {
+        let blob = std::fs::read(&entry).map_err(err)?;
+        let enc_leaf = entry.file_name().unwrap().to_string_lossy().to_string();
+        let plain_leaf = lock::plain_name(&enc_leaf).ok_or("not an .enc file")?;
+        let plain_path = entry.with_file_name(&plain_leaf);
+        let rel_in_scope = plain_path
+            .strip_prefix(&scope)
+            .unwrap_or(&plain_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let plaintext = lock::decrypt_file(&dek, &rel_in_scope, &blob).map_err(err)?;
+        std::fs::write(&plain_path, &plaintext).map_err(err)?;
+        std::fs::remove_file(&entry).map_err(err)?;
+        index::index_file(&session.conn, &session.root, &plain_path).map_err(err)?;
+    }
+
+    state.keys.lock().unwrap().insert(scope, dek);
+    Ok(())
+}
+
+/// Re-encrypt a scope's plaintext and forget its key (the manual "lock now" action, and what the
+/// inactivity timeout calls). Requires the key to be currently held (scope must be unlocked).
+#[tauri::command]
+fn relock_vault(scope_rel: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let scope = scope_abs(&session.root, &scope_rel)?;
+    // Take the key out of the cache (drops/zeroizes it at end of scope).
+    let dek = state
+        .keys
+        .lock()
+        .unwrap()
+        .remove(&scope)
+        .ok_or("scope is not unlocked")?;
+
+    for md in vault::iter_markdown(&scope) {
+        let rel_in_scope = md
+            .strip_prefix(&scope)
+            .unwrap_or(&md)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let plaintext = std::fs::read(&md).map_err(err)?;
+        let blob = lock::encrypt_file(&dek, &rel_in_scope, &plaintext).map_err(err)?;
+        let enc_path = md.with_file_name(lock::enc_name(
+            &md.file_name().unwrap().to_string_lossy(),
+        ));
+        std::fs::write(&enc_path, &blob).map_err(err)?;
+        std::fs::remove_file(&md).map_err(err)?;
+        index::delete_file(&session.conn, &session.root, &md).map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Change a scope's password by re-wrapping its DEK — no files are re-encrypted. Requires the current
+/// password (not just an unlocked session) to prove authorization.
+#[tauri::command]
+fn change_lock_password(
+    scope_rel: String,
+    old_password: String,
+    new_password: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    if new_password.is_empty() {
+        return Err("new password must not be empty".into());
+    }
+    let guard = state.inner.lock().unwrap();
+    let session = guard.as_ref().ok_or("no vault open")?;
+    let scope = scope_abs(&session.root, &scope_rel)?;
+    lock::change_password(&scope, &old_password, &new_password).map_err(err)
+}
+
+/// Collect every `.enc` file under a scope (skips dot-folders, like the markdown walker).
+fn walk_enc_files(scope: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(scope)
+        .into_iter()
+        .filter_entry(|e| {
+            !e.file_name()
+                .to_str()
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+        })
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some(lock::ENC_EXT))
+        .collect()
+}
+
 // ---- Themes (`.themes/<name>.json`) -------------------------------------------------------------
 // Stored opaquely; the frontend owns the JSON shape (see types.ts `Theme`). The backend only does
 // storage so the two hosts (Tauri + web FSA) stay in lockstep on the same files.
@@ -633,6 +848,11 @@ pub fn run() {
             move_task_block,
             get_settings,
             save_settings,
+            lock_status,
+            lock_vault,
+            unlock_vault,
+            relock_vault,
+            change_lock_password,
             list_themes,
             read_theme,
             write_theme,

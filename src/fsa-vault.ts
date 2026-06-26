@@ -9,7 +9,7 @@
 //
 // Supported in Chromium browsers (Chrome/Edge/Opera). Firefox/Safari lack the API — see isWebFsSupported.
 
-import type { AssetData, DbSchema, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
+import type { AssetData, DbSchema, LockStatus, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
 import { DEFAULT_SETTINGS, assetKindFor } from "./types";
 
 /* ---------------------------------------------------------------------------
@@ -1519,6 +1519,27 @@ export const webApi = {
 
   getSettings: (): Promise<Settings> => readSettings(),
   saveSettings: (s: Settings): Promise<void> => writeSettings(s),
+
+  // Encryption-at-rest is desktop-only for now (the Rust crypto core). Web keeps the identical API
+  // shape but reports "not a locked scope" and rejects mutating calls with a clear message, so the
+  // UI can hide lock actions on the web build rather than crash.
+  lockStatus: async (_scopeRel: string): Promise<LockStatus> => ({
+    is_locked_scope: false,
+    unlocked: false,
+    hint: null,
+  }),
+  lockVault: async (): Promise<void> => {
+    throw new Error("Locking vaults isn't supported in the browser yet — use the desktop app.");
+  },
+  unlockVault: async (): Promise<void> => {
+    throw new Error("Locking vaults isn't supported in the browser yet — use the desktop app.");
+  },
+  relockVault: async (): Promise<void> => {
+    throw new Error("Locking vaults isn't supported in the browser yet — use the desktop app.");
+  },
+  changeLockPassword: async (): Promise<void> => {
+    throw new Error("Locking vaults isn't supported in the browser yet — use the desktop app.");
+  },
 
   listThemes: (): Promise<string[]> => listThemesWeb(),
   readTheme: (name: string): Promise<string> => readThemeWeb(name),

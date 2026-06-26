@@ -874,6 +874,16 @@ code, .dsl-preview, .dsl-input {
 }
 .tree-file.active .tree-ext { background: var(--accent-soft); color: var(--accent); }
 
+/* Lock badge on an encrypted folder. Pushed to the row's trailing edge like .tree-ext. */
+.tree-lock-badge {
+  margin-left: auto; flex-shrink: 0;
+  display: inline-flex; align-items: center;
+  color: var(--text-dim);
+}
+.tree-dir.locked .tree-lock-badge { color: var(--accent); }
+/* A locked-shut folder reads as "sealed": slightly dimmed label, accent lock. */
+.tree-dir.locked .tree-label { color: var(--text-dim); }
+
 /* ---------- Periodic bar ---------- */
 .periodic-bar {
   padding: var(--sp-3);
@@ -2446,6 +2456,13 @@ code, .dsl-preview, .dsl-input {
 /* `choose` dialog: stacked full-width action buttons above the dismiss row. */
 .dialog-choices { display: flex; flex-direction: column; gap: var(--sp-2); margin: var(--sp-3) 0; }
 .dialog-choices button { width: 100%; justify-content: center; }
+
+/* `password` dialog: one or more labelled masked fields, stacked. */
+.dialog-password-fields { display: flex; flex-direction: column; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.dialog-password-field { display: flex; flex-direction: column; gap: var(--sp-1); }
+.dialog-password-label { font-size: 0.8em; font-weight: 600; color: var(--text-dim); }
+.dialog-password-field .dialog-input { margin-bottom: 0; }
+.dialog-password-error { margin: 0; color: var(--danger, #e5484d); font-size: 0.85em; }
 
 /* ---------- Toasts ---------- */
 /* Transient confirmations with an optional inline action (e.g. Undo after trashing). Stacked
