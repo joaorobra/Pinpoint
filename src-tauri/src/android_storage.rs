@@ -17,12 +17,21 @@ use jni::objects::{JObject, JValue};
 use jni::JavaVM;
 
 /// Run `f` with an attached JNI env and the current Android Activity object.
+///
+/// `ndk_context::android_context()` **panics** ("android context was not initialized")
+/// when called before wry/Tauri populates the process-wide context — which can happen
+/// when the frontend invokes one of these commands very early in startup. Because the
+/// release profile sets `panic = "abort"`, that panic would kill the whole app instead
+/// of surfacing as a command error. We therefore fetch the context inside
+/// `catch_unwind` and turn the panic into a recoverable `Err`, so an early call just
+/// fails gracefully (the frontend treats "not granted / unknown" and retries on resume).
 fn with_activity<F, T>(f: F) -> Result<T>
 where
     F: FnOnce(&mut jni::JNIEnv, &JObject) -> Result<T>,
 {
+    let ctx = std::panic::catch_unwind(ndk_context::android_context)
+        .map_err(|_| anyhow!("android context not initialized yet"))?;
     // SAFETY: ndk_context returns the process-wide VM + Activity that wry set up.
-    let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|e| anyhow!("JavaVM::from_raw failed: {e}"))?;
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };

@@ -15,6 +15,13 @@ interface Props {
    * Tasks panel's "show all ahead"). Bounded so a daily rule can't flood the block.
    */
   expandRecurring?: boolean;
+  /**
+   * For TASK queries: restrict recurring tasks to the single occurrence due *today*. Each recurring
+   * task contributes at most one row (its today occurrence, real or virtual); a task with no
+   * occurrence today is dropped. Non-recurring tasks are unaffected. Takes precedence over
+   * `expandRecurring`. Drives the `SCOPE today` DSL clause (see querydsl.ts).
+   */
+  todayOnly?: boolean;
 }
 
 /** Map a TASK query row to a display TaskItem. */
@@ -72,16 +79,60 @@ function expandTasks(rows: Record<string, unknown>[]): TaskItem[] {
   return out;
 }
 
+/** Local-time ISO date (YYYY-MM-DD) for `d`, matching how occurrence ISO strings are derived. */
+function isoDay(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Reduce TASK rows to only the occurrence due *today*. A recurring task contributes its today
+ * occurrence (real or virtual) if its rule lands on today; otherwise it's dropped. Non-recurring
+ * tasks are kept only when their own `due` is today. One row per task at most.
+ */
+function todayOccurrences(rows: Record<string, unknown>[]): TaskItem[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayIso = isoDay(today);
+  const out: TaskItem[] = [];
+  for (const r of rows) {
+    const base = toTaskItem(r);
+    const rrule = r.rrule as string | null | undefined;
+    if (!rrule) {
+      // Plain task: include only if it's actually due today.
+      if (base.due === todayIso) out.push(base);
+      continue;
+    }
+    const doneDates =
+      typeof r.done_dates === "string" && r.done_dates ? r.done_dates.split(",").filter(Boolean) : [];
+    const start = base.due ? new Date(base.due) : today;
+    // Does this rule have an occurrence exactly on today? `upcoming` from today returns today first
+    // when it lands on the rule; we only need a single match.
+    const hit = upcoming(rrule, start, today, 1).find((o) => o.iso === todayIso);
+    if (!hit) continue;
+    out.push(
+      hit.iso === base.due
+        ? base // today is the base/current occurrence
+        : { ...base, due: hit.iso, virtual: true, occurrence: hit.iso, done: doneDates.includes(hit.iso) }
+    );
+  }
+  return out;
+}
+
 /**
  * Renders a query result. TASK results render as proper task rows (shared with the Tasks panel);
  * LIST as a bullet list; TABLE as a table. Used by the standalone Query panel and inline query
  * blocks so results look the same everywhere.
  */
-export default function QueryResultView({ result, dateFormat = "YYYY-MM-DD", onOpen, onToggle, expandRecurring }: Props) {
+export default function QueryResultView({ result, dateFormat = "YYYY-MM-DD", onOpen, onToggle, expandRecurring, todayOnly }: Props) {
   if (result.kind === "task") {
-    const tasks = expandRecurring
-      ? expandTasks(result.rows)
-      : result.rows.map(toTaskItem);
+    const tasks = todayOnly
+      ? todayOccurrences(result.rows)
+      : expandRecurring
+        ? expandTasks(result.rows)
+        : result.rows.map(toTaskItem);
     return (
       <>
         <TaskList tasks={tasks} dateFormat={dateFormat} onOpen={onOpen} onToggle={onToggle} emptyMessage="No matching tasks." />

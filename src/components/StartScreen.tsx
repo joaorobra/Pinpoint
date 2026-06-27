@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Plus, ArrowRight, Clock, CircleNotch } from "@phosphor-icons/react";
-import { canOpenVault, listRecentVaults } from "../api";
+import { FolderOpen, Plus, ArrowRight, Clock, CircleNotch, LockKey, MagnifyingGlass } from "@phosphor-icons/react";
+import {
+  canOpenVault,
+  isAndroid,
+  listRecentVaults,
+  listAppVaults,
+  externalStorageGranted,
+  requestExternalStorage,
+} from "../api";
+import FolderBrowser from "./FolderBrowser";
 import type { RecentVault } from "../types";
 
 // A relative "time ago" label for the recent list — keeps the screen calm, no absolute dates.
@@ -18,10 +26,14 @@ function timeAgo(ms: number): string {
 }
 
 interface Props {
-  /** Open a brand-new vault via the folder picker. */
+  /** Open a brand-new vault via the folder picker (desktop / web). */
   onOpenNew: () => void;
-  /** Re-open a previously-used vault by its id (path on desktop, handle key on web). */
+  /** Re-open a previously-used vault by its id (path on desktop, handle key on web, name on Android). */
   onOpenRecent: (id: string) => void;
+  /** Create + open a named app-owned vault (Android only — no folder picker exists there). */
+  onCreateMobileVault?: (name: string) => void;
+  /** Open an existing folder (by absolute path) as a vault — Android folder browser. */
+  onOpenExisting?: (path: string) => void;
   /** The id currently being opened ("new" for the folder picker), or null when idle. */
   openingId?: string | null;
   /** Bumped by the parent to force a re-fetch of the recent list (e.g. after pruning a dead one). */
@@ -30,21 +42,81 @@ interface Props {
 
 /**
  * The Start screen shown when no vault is open. Minimalist, with a subtle animated
- * gradient mesh in the background (pure CSS, Framer-style). Lists recent vaults so the
- * user can hop between them, plus a primary action to connect a new folder.
+ * gradient mesh in the background (pure CSS, Framer-style).
+ *
+ * Two modes share this screen:
+ *  - Desktop / web: a folder picker ("Open a vault folder") + recent vaults.
+ *  - Android: there is no OS folder picker, so vaults are app-owned folders under the
+ *    public Documents dir. We first ensure the "All files access" grant, then offer a
+ *    "New vault" name prompt and a list of existing app vaults.
  */
-export default function StartScreen({ onOpenNew, onOpenRecent, openingId = null, refreshKey = 0 }: Props) {
+export default function StartScreen({
+  onOpenNew,
+  onOpenRecent,
+  onCreateMobileVault,
+  onOpenExisting,
+  openingId = null,
+  refreshKey = 0,
+}: Props) {
+  const android = isAndroid();
+  // Android-only: when true, the full-screen folder browser is shown over the card.
+  const [browsing, setBrowsing] = useState(false);
   const [recents, setRecents] = useState<RecentVault[]>([]);
   const supported = canOpenVault();
   // Any vault currently opening locks the whole screen so a second click can't race the first.
   const busy = openingId !== null;
 
+  // Android-only: whether we hold the "All files access" grant needed to write to Documents.
+  // null = still checking; true/false once known. Desktop/web stay null and ignore this.
+  const [granted, setGranted] = useState<boolean | null>(android ? null : true);
+  // Android-only: the new-vault name prompt state.
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+
   useEffect(() => {
-    listRecentVaults()
-      .then(setRecents)
-      .catch(() => setRecents([]));
+    if (android) {
+      // List app-owned vaults instead of the recents store; (re-)check the storage grant.
+      listAppVaults().then(setRecents).catch(() => setRecents([]));
+      externalStorageGranted().then(setGranted).catch(() => setGranted(false));
+    } else {
+      listRecentVaults().then(setRecents).catch(() => setRecents([]));
+    }
     // refreshKey re-runs this so a pruned (dead) recent disappears from the list immediately.
-  }, [refreshKey]);
+  }, [refreshKey, android]);
+
+  // Re-check the grant when the app regains focus (the user toggles it on a system screen,
+  // then swipes back into PINPOINT — there's no callback, so we poll on resume).
+  useEffect(() => {
+    if (!android) return;
+    const recheck = () => externalStorageGranted().then(setGranted).catch(() => {});
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", recheck);
+    return () => {
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", recheck);
+    };
+  }, [android]);
+
+  function submitNewVault() {
+    const name = newName.trim();
+    if (!name) return;
+    onCreateMobileVault?.(name);
+    setNewName("");
+    setCreating(false);
+  }
+
+  // Android folder browser takes over the whole screen when active.
+  if (android && browsing) {
+    return (
+      <div className="start">
+        <FolderBrowser
+          busy={busy}
+          onClose={() => setBrowsing(false)}
+          onPick={(path) => onOpenExisting?.(path)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="start">
@@ -64,7 +136,146 @@ export default function StartScreen({ onOpenNew, onOpenRecent, openingId = null,
           A calm, local-first home for your notes. Plain markdown, yours forever.
         </p>
 
-        {supported ? (
+        {android ? (
+          // ---- Android: app-owned vaults (no folder picker) ----
+          granted === false ? (
+            <>
+              <p className="notice">
+                <LockKey size={15} weight="fill" /> PINPOINT needs “All files access” to store your
+                vaults in your phone’s Documents folder, so they survive reinstalls and are visible to
+                other apps.
+              </p>
+              <button
+                className="primary big start-open"
+                onClick={() => void requestExternalStorage()}
+              >
+                <LockKey size={18} weight="fill" /> Grant file access
+              </button>
+              <p className="muted small start-foot">
+                You’ll be taken to a system settings screen. Toggle it on, then return here.
+              </p>
+            </>
+          ) : (
+            <>
+              {creating ? (
+                <form
+                  className="start-newvault"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    submitNewVault();
+                  }}
+                >
+                  <input
+                    className="start-newvault-input"
+                    autoFocus
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    placeholder="Vault name"
+                    aria-label="New vault name"
+                    disabled={busy}
+                  />
+                  <button
+                    type="submit"
+                    className="primary big start-open"
+                    disabled={busy || !newName.trim()}
+                    aria-busy={openingId === "new"}
+                  >
+                    {openingId === "new" ? (
+                      <>
+                        <CircleNotch size={18} weight="bold" className="spin" /> Creating…
+                      </>
+                    ) : (
+                      <>
+                        <Plus size={18} weight="bold" /> Create vault
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="link start-newhint"
+                    onClick={() => {
+                      setCreating(false);
+                      setNewName("");
+                    }}
+                    disabled={busy}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <button
+                  className="primary big start-open"
+                  onClick={() => setCreating(true)}
+                  disabled={busy || granted === null}
+                  aria-busy={openingId === "new"}
+                >
+                  {openingId === "new" ? (
+                    <>
+                      <CircleNotch size={18} weight="bold" className="spin" /> Opening…
+                    </>
+                  ) : (
+                    <>
+                      <Plus size={18} weight="bold" /> New vault
+                    </>
+                  )}
+                </button>
+              )}
+
+              {!creating && (
+                <button
+                  className="link start-newhint"
+                  onClick={() => setBrowsing(true)}
+                  disabled={busy || granted === null}
+                >
+                  <MagnifyingGlass size={13} weight="bold" /> Open an existing folder
+                </button>
+              )}
+
+              {recents.length > 0 && (
+                <div className="start-recents">
+                  <div className="start-recents-label">
+                    <Clock size={13} /> Your vaults
+                  </div>
+                  <ul>
+                    {recents.map((v) => {
+                      const opening = openingId === v.id;
+                      return (
+                        <li key={v.id}>
+                          <button
+                            className="recent-row"
+                            onClick={() => onOpenRecent(v.id)}
+                            disabled={busy}
+                            aria-busy={opening}
+                          >
+                            <span className="recent-icon">
+                              {opening ? (
+                                <CircleNotch size={17} weight="bold" className="spin" />
+                              ) : (
+                                <FolderOpen size={17} weight="fill" />
+                              )}
+                            </span>
+                            <span className="recent-text">
+                              <span className="recent-name" title={v.name}>{v.name}</span>
+                              <span className="recent-meta">
+                                {opening ? "Opening…" : timeAgo(v.last_opened)}
+                              </span>
+                            </span>
+                            <ArrowRight size={15} className="recent-go" />
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              <p className="muted small start-foot">
+                Vaults live in <strong>Documents/PINPOINT</strong> on your device.
+              </p>
+            </>
+          )
+        ) : supported ? (
+          // ---- Desktop / web: folder picker ----
           <>
             <button
               className="primary big start-open"

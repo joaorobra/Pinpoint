@@ -88,6 +88,27 @@ export function resolveCurrentPage(dsl: string, currentPath: string | null | und
   return out;
 }
 
+/**
+ * Optional trailing `SCOPE today` clause on a TASK query. It is *not* understood by the engine
+ * (src-tauri/src/query.rs) — it's a view directive: when present, the result view collapses each
+ * recurring task to the single occurrence due today (real or virtual) instead of expanding the next
+ * N occurrences. `stripScope` removes it before the DSL reaches the backend; `hasTodayScope`
+ * reports whether it was set so the view can switch to today-only rendering.
+ *
+ * Example: `TASK WHERE recurring = true AND done = false SCOPE today`
+ */
+const SCOPE_TODAY_RE = /\s+SCOPE\s+today\b/i;
+
+/** True if the DSL carries a `SCOPE today` view directive. */
+export function hasTodayScope(dsl: string): boolean {
+  return SCOPE_TODAY_RE.test(dsl);
+}
+
+/** Remove the `SCOPE today` directive so only engine-understood DSL reaches the backend. */
+export function stripScope(dsl: string): string {
+  return dsl.replace(SCOPE_TODAY_RE, "").trimEnd();
+}
+
 export const EMPTY_BUILDER: BuilderState = {
   kind: "TABLE",
   cols: "file.name, status",

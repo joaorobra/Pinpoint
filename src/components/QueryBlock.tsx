@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 import { ArrowsClockwise, PencilSimple, Table } from "@phosphor-icons/react";
 import { api } from "../api";
 import type { QueryResult } from "../types";
-import { resolveCurrentPage } from "../querydsl";
+import { resolveCurrentPage, hasTodayScope, stripScope } from "../querydsl";
 import QueryResultView from "./QueryResultView";
 
 export interface QueryBlockOptions {
@@ -53,6 +53,9 @@ declare module "@tiptap/core" {
 
 function QueryBlockView({ node, editor, getPos, extension }: NodeViewProps) {
   const dsl: string = node.attrs.dsl ?? "";
+  // `SCOPE today` is a view-only directive (collapse recurring tasks to today's occurrence); strip
+  // it before the DSL reaches the engine, which doesn't understand it.
+  const todayOnly = hasTodayScope(dsl);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -66,8 +69,9 @@ function QueryBlockView({ node, editor, getPos, extension }: NodeViewProps) {
     setLoading(true);
     setError(null);
     try {
-      // Resolve `{{current}}` to the host page's path at run time (see resolveCurrentPage).
-      const resolved = resolveCurrentPage(dsl, extension.options.getCurrentPath?.() ?? null);
+      // Resolve `{{current}}` to the host page's path at run time (see resolveCurrentPage), then
+      // strip the view-only `SCOPE today` directive so the engine sees only DSL it understands.
+      const resolved = stripScope(resolveCurrentPage(dsl, extension.options.getCurrentPath?.() ?? null));
       setResult(await api.runQuery(resolved));
     } catch (e) {
       setError(String(e));
@@ -124,8 +128,10 @@ function QueryBlockView({ node, editor, getPos, extension }: NodeViewProps) {
                 })
                 .catch((e) => setError(String(e)))
             }
-            // TASK blocks expand recurring tasks into upcoming occurrences, matching the Tasks panel.
-            expandRecurring={result.kind === "task"}
+            // TASK blocks expand recurring tasks into upcoming occurrences, matching the Tasks panel
+            // — unless `SCOPE today` collapses each recurring task to just today's occurrence.
+            expandRecurring={result.kind === "task" && !todayOnly}
+            todayOnly={result.kind === "task" && todayOnly}
           />
         )}
       </div>

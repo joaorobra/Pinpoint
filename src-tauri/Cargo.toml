@@ -62,8 +62,14 @@ ndk-context = "0.1"
 # This feature is used for production builds or when a dev server is not specified.
 custom-protocol = ["tauri/custom-protocol"]
 
+# NOTE: we deliberately use the default `panic = "unwind"` here (rather than "abort").
+# On Android a Rust panic in a `#[tauri::command]` (e.g. `ndk_context::android_context()`
+# panicking when called before wry initializes the context) would, under "abort", kill
+# the entire app process — the v0.5.0 "app closes right after opening" crash. With unwind,
+# such panics are caught at the IPC boundary and surface as a rejected promise instead, and
+# our `catch_unwind` guards (see android_storage.rs) can recover. The small binary-size /
+# perf cost is worth not hard-crashing the app on any stray panic on mobile.
 [profile.release]
-panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"

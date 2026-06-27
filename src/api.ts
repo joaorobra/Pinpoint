@@ -24,6 +24,81 @@ export function isTauri(): boolean {
 }
 
 /**
+ * True on Android (a Tauri webview running on an Android device). Android has no
+ * arbitrary-folder picker — Tauri's `open({directory:true})` resolves to null there —
+ * so the whole "open a vault folder" flow is replaced by app-owned vaults living under
+ * the public Documents dir (see the `*_app_vault` Rust commands). We detect via the UA
+ * because Tauri doesn't expose a synchronous platform global on the window.
+ */
+export function isAndroid(): boolean {
+  return isTauri() && typeof navigator !== "undefined" && /android/i.test(navigator.userAgent);
+}
+
+// --- Android app-owned vaults -------------------------------------------------
+// On Android there's no folder dialog; vaults are folders the app creates and
+// manages under /storage/emulated/0/Documents/PINPOINT. These thin wrappers call
+// the Rust commands that already exist (list_app_vaults / create_app_vault /
+// open_app_vault). create/open return the freshly-opened vault tree directly —
+// the Rust side opens the vault server-side, so the caller must NOT also call
+// openVault(); it just loads the returned tree into the UI.
+
+/** List app-owned vaults on Android, newest first, shaped like the recents list. */
+export async function listAppVaults(): Promise<RecentVault[]> {
+  const raw = await invoke<{ path: string; name: string; last_opened: number }[]>("list_app_vaults");
+  // The vault's *name* is its id on mobile (open_app_vault takes a name, not a path).
+  return raw.map((r) => ({ id: r.name, name: r.name, last_opened: r.last_opened }));
+}
+
+/** Create and open a new app-owned vault; returns its tree (already opened server-side). */
+export function createAppVault(name: string): Promise<TreeNode> {
+  return invoke<TreeNode>("create_app_vault", { name });
+}
+
+/** Open an existing app-owned vault by name; returns its tree (already opened server-side). */
+export function openAppVault(name: string): Promise<TreeNode> {
+  return invoke<TreeNode>("open_app_vault", { name });
+}
+
+// --- Folder browser (open an existing folder on the device) -------------------
+// Backed by the Rust `storage_home_dir` / `list_subdirs` commands. Lets the user
+// navigate the real filesystem (Android: shared storage, granted via "All files
+// access") and open any existing folder as a vault via the normal `openVault`.
+
+/** A child directory in the folder browser: absolute path + display name. */
+export interface DirEntry {
+  path: string;
+  name: string;
+}
+
+/** The folder browser's starting directory (Android: /storage/emulated/0). */
+export function storageHomeDir(): Promise<string> {
+  return invoke<string>("storage_home_dir");
+}
+
+/** Debug-only: write a message to native stderr so it shows in `adb logcat`. */
+export function debugLog(msg: string): void {
+  void invoke("debug_log", { msg }).catch(() => {});
+}
+
+/** Immediate sub-directories of `path` (alphabetical, hidden folders excluded). */
+export function listSubdirs(path: string): Promise<DirEntry[]> {
+  return invoke<DirEntry[]>("list_subdirs", { path });
+}
+
+/**
+ * Whether the app holds Android's "All files access" grant, required to write into
+ * the public Documents dir. Always true on desktop (no such concept).
+ */
+export function externalStorageGranted(): Promise<boolean> {
+  return invoke<boolean>("external_storage_granted");
+}
+
+/** Open the system "All files access" settings screen so the user can grant it. No-op on desktop. */
+export function requestExternalStorage(): Promise<void> {
+  return invoke<void>("request_external_storage");
+}
+
+/**
  * Base64-encode raw bytes for the native `write_asset` IPC call. We chunk through `fromCharCode`
  * so a multi-megabyte image doesn't blow the call stack (spreading the whole array would), and
  * pass base64 rather than a JSON number array so the payload stays ~1.3x instead of ~4x.

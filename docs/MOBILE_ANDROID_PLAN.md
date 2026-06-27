@@ -60,6 +60,8 @@ Make vaults real without touching vault/index/query/lock internals.
 5. **Onboarding + export safety:** first-run screen explaining app-owned storage and the uninstall-wipes-data caveat; wire an "Export vault (zip)" action. (Tier 2/SAF later removes this limitation.)
 **Exit:** create a vault, make pages/databases, search, query, tasks, tags, lock/unlock — all working on-device, persisted across app restarts.
 
+> **Status (v0.5.0):** Rust commands (`list_app_vaults` / `create_app_vault` / `open_app_vault`, `external_storage_granted` / `request_external_storage`) and the frontend wiring are **done**. `api.ts` has `isAndroid()` + the app-vault wrappers; `StartScreen.tsx` shows the grant gate → "New vault" prompt → app-vault list on Android; `App.tsx` routes create/open through `loadVaultFromTree` (no folder dialog). The earlier bug ("Open a vault folder does nothing") was a missing frontend: on Android `pickVaultFolder()` called Tauri's `open({directory:true})`, which is unimplemented there and returns null. Vaults live in `/storage/emulated/0/Documents/PINPOINT` and need the MANAGE_EXTERNAL_STORAGE grant (declared in the manifest).
+
 ### Phase 2 — Touch UX pass (make it feel native)
 Priority order by effort-vs-impact (from the UI audit):
 1. **Command palette trigger (Low):** FAB or `MobileNavbar` button opens the existing Cmd+K palette. Highest leverage — palette is the keyboard-free escape hatch for every action.

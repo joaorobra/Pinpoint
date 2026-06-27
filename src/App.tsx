@@ -32,7 +32,7 @@ import {
   LockOpen,
   Key,
 } from "@phosphor-icons/react";
-import { api, isTauri, pickVaultFolder, resolveRecentVault, listRecentVaults, isRecentVaultError } from "./api";
+import { api, isTauri, isAndroid, pickVaultFolder, resolveRecentVault, listRecentVaults, isRecentVaultError, createAppVault, openAppVault, debugLog } from "./api";
 import { getTheme, seedStarterThemes } from "./themes-store";
 import { applyTheme, resolveMode } from "./theme-apply";
 import type { Theme } from "./types";
@@ -643,17 +643,78 @@ export default function App() {
   // Open the vault at `path` (an absolute path on desktop, an opaque handle key on web)
   // and load its tree + settings into the UI. Returns the loaded settings + vault id so the caller
   // can apply the configured startup behaviour (open last page / today / a specific page).
-  const loadVault = useCallback(async (path: string) => {
-    const t = await api.openVault(path);
+  // Load an already-opened vault tree into the UI (set tree/name/id, fetch settings,
+  // seed themes). Shared by the desktop path-open flow and the Android app-vault flow:
+  // on Android the vault is opened server-side by create_app_vault/open_app_vault, which
+  // return the tree directly, so we must NOT re-call open_vault — we just adopt the tree.
+  const loadVaultFromTree = useCallback(async (t: TreeNode, id: string) => {
     setTree(t);
     setVaultName(t.name);
-    vaultIdRef.current = path;
+    vaultIdRef.current = id;
     const loaded = await api.getSettings();
     setSettings(loaded);
     // Seed curated starter themes the first time a vault is opened (no-op if `.themes/` exists).
     seedStarterThemes();
-    return { settings: loaded, id: path };
+    return { settings: loaded, id };
   }, []);
+
+  const loadVault = useCallback(
+    async (path: string) => {
+      const t = await api.openVault(path);
+      return loadVaultFromTree(t, path);
+    },
+    [loadVaultFromTree]
+  );
+
+  // Android: create a new app-owned vault by name (no folder dialog exists on mobile).
+  // The Rust command creates the folder, opens it, and returns its tree.
+  const createMobileVault = useCallback(
+    async (name: string) => {
+      if (openingVault) return;
+      setOpeningVault("new");
+      try {
+        const t = await createAppVault(name);
+        const { settings: loaded, id } = await loadVaultFromTree(t, t.name);
+        await openStartupRef.current?.(loaded, id);
+      } catch (e) {
+        console.error(e);
+        toast.show({
+          message: e instanceof Error ? e.message : "Couldn’t create that vault. Please try again.",
+          durationMs: 7000,
+        });
+      } finally {
+        setOpeningVault(null);
+      }
+    },
+    [openingVault, loadVaultFromTree]
+  );
+
+  // Android: open an *existing* folder (chosen in the folder browser) as a vault.
+  // The path is a real on-disk directory, so the normal `open_vault` flow applies —
+  // `loadVault` calls `api.openVault(path)` and records it in recents like any vault.
+  const openExistingVault = useCallback(
+    async (path: string) => {
+      if (openingVault) return;
+      setOpeningVault("new");
+      try {
+        debugLog(`openExistingVault: start ${path}`);
+        const { settings: loaded, id } = await loadVault(path);
+        debugLog(`openExistingVault: loadVault ok id=${id}`);
+        await openStartupRef.current?.(loaded, id);
+        debugLog(`openExistingVault: openStartup ok`);
+      } catch (e) {
+        console.error(e);
+        debugLog(`openExistingVault FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        toast.show({
+          message: e instanceof Error ? e.message : "Couldn’t open that folder. Please try again.",
+          durationMs: 7000,
+        });
+      } finally {
+        setOpeningVault(null);
+      }
+    },
+    [openingVault, loadVault]
+  );
 
   // Pick a brand-new vault folder, then open it.
   const openVault = useCallback(async () => {
@@ -696,6 +757,14 @@ export default function App() {
       if (openingVault) return; // a vault is already opening — ignore the double-click
       setOpeningVault(id);
       try {
+        if (isAndroid()) {
+          // On Android the id is the vault *name*; open_app_vault opens it server-side
+          // and returns its tree (no path, no folder dialog).
+          const t = await openAppVault(id);
+          const { settings: loaded, id: vid } = await loadVaultFromTree(t, t.name);
+          await openStartupRef.current?.(loaded, vid);
+          return;
+        }
         const path = await resolveRecentVault(id);
         const { settings: loaded, id: vid } = await loadVault(path);
         await openStartupRef.current?.(loaded, vid);
@@ -724,7 +793,7 @@ export default function App() {
         setOpeningVault(null);
       }
     },
-    [loadVault, openVault, openingVault]
+    [loadVault, loadVaultFromTree, openVault, openingVault]
   );
 
   // Return to the Start screen to pick a different vault. The open document state is
@@ -2610,6 +2679,8 @@ export default function App() {
           <StartScreen
             onOpenNew={openVault}
             onOpenRecent={openRecent}
+            onCreateMobileVault={createMobileVault}
+            onOpenExisting={openExistingVault}
             openingId={openingVault}
             refreshKey={recentsNonce}
           />

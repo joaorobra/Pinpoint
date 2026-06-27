@@ -243,6 +243,81 @@ fn list_app_vaults(app: tauri::AppHandle) -> Result<Vec<recents::RecentVault>, S
     Ok(out)
 }
 
+// --- Folder browser (mobile "open existing folder") ------------------------------
+//
+// App-owned vaults (above) only see folders the app made under Documents/PINPOINT.
+// To open an *existing* folder anywhere on the device, the frontend drives a simple
+// directory browser backed by these two commands. This works on Android only because
+// the "All files access" (MANAGE_EXTERNAL_STORAGE) grant lets plain `std::fs` read the
+// shared-storage tree; without it these would see almost nothing. Once a folder is
+// chosen, the existing `open_vault(path)` opens it unchanged — any real directory is a
+// valid vault root, so the whole vault/index/lock core just works.
+
+/// A directory entry for the folder browser: absolute `path` + display `name`.
+#[derive(serde::Serialize)]
+struct DirEntry {
+    path: String,
+    name: String,
+}
+
+/// Debug helper: write a message to stderr so it lands in `adb logcat`
+/// (tag `RustStdoutStderr`). Used to surface frontend errors during on-device
+/// debugging where the WebView console isn't routed to logcat.
+#[tauri::command]
+fn debug_log(msg: String) {
+    eprintln!("[PINPOINT-DEBUG] {msg}");
+}
+
+/// The starting point for the folder browser.
+/// - Android: shared-storage root (`/storage/emulated/0`), where the user's own
+///   folders (Download, Documents, Obsidian vaults, synced folders) live.
+/// - Desktop: the home dir (used only for dev/testing of this flow).
+#[tauri::command]
+fn storage_home_dir(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        Ok("/storage/emulated/0".to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        app.path()
+            .home_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .map_err(|e| format!("no home dir: {e}"))
+    }
+}
+
+/// List the immediate sub-directories of `path`, alphabetically (case-insensitive),
+/// hidden folders (leading dot) excluded. Returns an error if `path` isn't a readable
+/// directory so the UI can surface "can't open this folder" rather than a blank list.
+#[tauri::command]
+fn list_subdirs(path: String) -> Result<Vec<DirEntry>, String> {
+    let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("not a folder: {path}"));
+    }
+    let mut out: Vec<DirEntry> = Vec::new();
+    let entries =
+        std::fs::read_dir(&root).map_err(|e| format!("can't read folder: {e}"))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = match p.file_name().and_then(|s| s.to_str()) {
+            Some(n) if !n.starts_with('.') => n.to_string(),
+            _ => continue, // skip hidden / non-UTF-8 dirs
+        };
+        out.push(DirEntry {
+            path: p.to_string_lossy().to_string(),
+            name,
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
 /// Create a new app-owned vault named `name` and open it. Errors if a vault with
 /// that name already exists, so the UI can prompt for a different one.
 #[tauri::command]
@@ -1132,6 +1207,9 @@ pub fn run() {
             list_app_vaults,
             create_app_vault,
             open_app_vault,
+            storage_home_dir,
+            list_subdirs,
+            debug_log,
             external_storage_granted,
             request_external_storage,
             llm_providers,

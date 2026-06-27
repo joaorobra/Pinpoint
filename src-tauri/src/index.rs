@@ -68,15 +68,52 @@ CREATE INDEX IF NOT EXISTS idx_links_dstid ON links(dst_id);
 "#;
 
 /// Open (or create) the index DB inside `.pinpoint/index.sqlite`.
+/// Open (or create) the vault's SQLite index.
+///
+/// The index is a **rebuildable cache** — it never holds source-of-truth data, only a
+/// derived view of the `.md` files. So if the existing DB can't be opened or initialized
+/// for *any* reason (a corrupt file, or — the common mobile case — a DB + WAL written by
+/// the desktop app and synced onto Android's FUSE shared storage, which doesn't support
+/// the locking/shared-memory SQLite's WAL needs), we don't fight it: we delete the index
+/// files and build a fresh one from the markdown. This makes opening a vault robust
+/// everywhere instead of failing on a stale/foreign/incompatible index.
 pub fn open(vault_root: &Path) -> Result<Connection> {
+    match open_inner(vault_root) {
+        Ok(conn) => Ok(conn),
+        Err(_first) => {
+            // Wipe the (broken/foreign) index and its journal sidecars, then rebuild.
+            let dir = vault_root.join(".pinpoint");
+            for name in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm", "index.sqlite-journal"] {
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+            open_inner(vault_root).context("open index db (after rebuild)")
+        }
+    }
+}
+
+fn open_inner(vault_root: &Path) -> Result<Connection> {
     let dir = vault_root.join(".pinpoint");
     std::fs::create_dir_all(&dir).ok();
     let conn = Connection::open(dir.join("index.sqlite")).context("open index db")?;
+
     // Performance PRAGMAs. The index is a rebuildable cache (never source of truth), so we trade a
     // little crash-durability for speed: WAL gives non-blocking concurrent reads while writing,
     // synchronous=NORMAL skips the per-commit fsync (safe under WAL — at worst the last few index
     // writes are lost and a reindex heals them), and the memory/mmap tuning cuts read syscalls.
     // 3–5× faster index writes, ~20–40% faster reads on large vaults.
+    //
+    // Android exception: WAL + mmap are unreliable on FUSE shared storage, so there we use the
+    // DELETE rollback journal and disable mmap. Slightly slower, but it actually opens.
+    #[cfg(target_os = "android")]
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA cache_size = -65536;   -- 64 MB page cache
+         PRAGMA mmap_size = 0;         -- mmap unreliable on FUSE shared storage
+         PRAGMA temp_store = MEMORY;",
+    )
+    .ok();
+    #[cfg(not(target_os = "android"))]
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
