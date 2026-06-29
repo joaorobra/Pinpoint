@@ -445,20 +445,37 @@ function handleAutoClose(
 }
 
 /**
- * Move the current top-level block up or down, swapping it with its sibling (VS Code's
+ * Move the current block up or down, swapping it with its sibling (VS Code's
  * Alt+↑ / Alt+↓ "Move Line"). Operates on whole blocks because this is a rich-text editor —
  * the document unit is a block, matching how the line-number gutter counts blocks. The caret
  * (and any selection) rides along with the moved block. Returns false when there's no sibling
  * in that direction, so the keypress falls through.
+ *
+ * When the caret sits inside a list (task / bullet / ordered), the movable unit is the
+ * individual list *item*, swapped within its parent list — not the whole list block. Otherwise
+ * we fall back to the top-level (depth-1) block.
  */
 function moveBlock(state: any, dispatch: any, dir: -1 | 1): boolean {
-  const { $from, $to } = state.selection;
-  // Find the depth-1 block that contains the selection (a direct child of the doc).
+  const { $from } = state.selection;
   if ($from.depth < 1) return false;
-  const blockStart = $from.before(1);
-  const block = $from.node(1);
-  const index = $from.index(0);
-  const parent = state.doc; // depth-0 node
+
+  // Find the shallowest "list item" ancestor so Alt+↑/↓ moves one task/line within its list,
+  // rather than relocating the entire list as a single block.
+  let depth = -1;
+  for (let d = 1; d <= $from.depth; d++) {
+    const name = $from.node(d).type.name;
+    if (name === "taskItem" || name === "listItem") {
+      depth = d;
+      break;
+    }
+  }
+  // No enclosing list item — move the top-level block instead.
+  if (depth === -1) depth = 1;
+
+  const blockStart = $from.before(depth);
+  const block = $from.node(depth);
+  const index = $from.index(depth - 1);
+  const parent = $from.node(depth - 1);
   const target = index + dir;
   if (target < 0 || target >= parent.childCount) return false;
 
