@@ -714,7 +714,7 @@ section {
 /* ---- about page ---- */
 
 .about {
-  padding-top: calc(var(--space-8) + 40px);
+  padding-top: calc(var(--space-6) + 80px);
 }
 
 .about-body {
