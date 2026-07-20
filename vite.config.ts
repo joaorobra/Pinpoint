@@ -20,8 +20,11 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"],
     },
   },
-  // Produce a relative-path build so it also works opened from file:// in browser builds.
-  base: "./",
+  // Base path:
+  //  - Tauri/desktop build: "./" so assets resolve from file:// (default).
+  //  - Combined Vercel web build: the app is served under /app/, so its asset URLs
+  //    must be absolute from /app/. The combined build sets VITE_WEB_BASE=/app/.
+  base: process.env.VITE_WEB_BASE || "./",
   build: {
     target: "es2021",
     minify: "esbuild",

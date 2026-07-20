@@ -1,0 +1,1 @@
+import{i as r}from"./index-Dl_SE1H3.js";import"./motion-DEBtMYQR.js";import"./editor-SrbKJw4L.js";import"./recurrence-CdPkWBOI.js";async function a(){await r("plugin:process|restart")}export{a as relaunch};
