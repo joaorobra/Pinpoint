@@ -711,6 +711,41 @@ section {
   font-weight: 600;
 }
 
+/* ---- about page ---- */
+
+.about {
+  padding-top: calc(var(--space-8) + 40px);
+}
+
+.about-body {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.about-body h1 {
+  margin-top: var(--space-4);
+}
+
+.about-body p {
+  color: var(--text-muted);
+  font-size: clamp(17px, 1.9vw, 20px);
+  line-height: 1.65;
+}
+
+.about-body p + p {
+  margin-top: var(--space-4);
+}
+
+.about-body .pin-h2 {
+  margin-top: var(--space-6);
+}
+
+.about-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* ---- feature rows ---- */
 
 .feature {

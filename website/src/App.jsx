@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Routes, Route, Link, useLocation } from "react-router-dom";
 import {
   motion,
   AnimatePresence,
@@ -1201,16 +1202,21 @@ function RecurrenceMock() {
    ============================================================ */
 
 function Nav({ theme, setTheme }) {
+  const onHome = useLocation().pathname === "/";
+  // Anchor links only resolve on the home page; from other routes send them
+  // back to the home page first (/#features), otherwise use a bare hash.
+  const hash = (id) => (onHome ? `#${id}` : `/#${id}`);
   return (
     <header className="nav">
-      <a href="#top" className="nav-brand">
+      <Link to="/" className="nav-brand">
         <img src="/logo.png" alt="" className="brand-logo" width={22} height={22} />
         PINPOINT
-      </a>
+      </Link>
       <nav className="nav-links" aria-label="Main">
-        <a href="#features">Features</a>
-        <a href="#more">Everything else</a>
-        <a href="#story">Why</a>
+        <a href={hash("features")}>Features</a>
+        <a href={hash("more")}>Everything else</a>
+        <a href={hash("story")}>Why</a>
+        <Link to="/about">About</Link>
         <a href={REPO} target="_blank" rel="noreferrer">
           GitHub
         </a>
@@ -1560,6 +1566,8 @@ function Download() {
 }
 
 function Footer() {
+  const onHome = useLocation().pathname === "/";
+  const hash = (id) => (onHome ? `#${id}` : `/#${id}`);
   return (
     <footer>
       <div className="container footer-row">
@@ -1573,10 +1581,11 @@ function Footer() {
           </div>
         </div>
         <nav className="footer-links" aria-label="Footer">
-          <a href="#features">Features</a>
-          <a href="#more">Everything else</a>
-          <a href="#story">Why</a>
-          <a href="#download">Download</a>
+          <a href={hash("features")}>Features</a>
+          <a href={hash("more")}>Everything else</a>
+          <a href={hash("story")}>Why</a>
+          <Link to="/about">About</Link>
+          <a href={hash("download")}>Download</a>
           <a href={REPO} target="_blank" rel="noreferrer">
             <GithubLogo
               size={15}
@@ -1591,17 +1600,81 @@ function Footer() {
   );
 }
 
+function Home({ theme }) {
+  return (
+    <>
+      <Hero theme={theme} />
+      <Features />
+      <More />
+      <Story />
+      <Download />
+    </>
+  );
+}
+
+function About() {
+  return (
+    <section id="about" className="about">
+      <div className="container">
+        <Reveal className="about-body">
+          <span className="story-kicker">About Pinpoint</span>
+          <h1>One home for your notes and your tasks.</h1>
+          <p>
+            Pinpoint is a free, local-first notes and tasks app for Windows,
+            macOS and Linux. Everything you write is saved as ordinary markdown
+            in a folder you own &mdash; no account, no server, no lock-in.
+          </p>
+          <div className="pin-h2">What it&rsquo;s for</div>
+          <p>
+            Notes, tasks, databases, live queries, recurring tasks and daily
+            notes, all side by side. It feels like Notion to use, but every page
+            is a plain <code>.md</code> file you can open in any editor, back up,
+            sync or keep for good.
+          </p>
+          <div className="pin-h2">Who makes it</div>
+          <p>
+            Pinpoint is built and maintained in the open. The source lives on{" "}
+            <a href={REPO} target="_blank" rel="noreferrer">
+              GitHub
+            </a>
+            , where you can follow along, report issues or contribute.
+          </p>
+          <div className="hero-ctas" style={{ marginTop: 28 }}>
+            <a className="btn btn-primary btn-lg" href={RELEASES}>
+              <DownloadSimple size={19} aria-hidden="true" />
+              Download for free
+            </a>
+            <Link className="btn btn-secondary btn-lg" to="/">
+              Back to home
+            </Link>
+          </div>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+/** Scroll to top on route change (but honor in-page #hash links). */
+function ScrollManager() {
+  const { pathname, hash } = useLocation();
+  useEffect(() => {
+    if (hash) return; // let the browser jump to the anchor
+    window.scrollTo(0, 0);
+  }, [pathname, hash]);
+  return null;
+}
+
 export default function App() {
   const [theme, setTheme] = useTheme();
   return (
     <MotionConfig reducedMotion="user">
+      <ScrollManager />
       <Nav theme={theme} setTheme={setTheme} />
       <main>
-        <Hero theme={theme} />
-        <Features />
-        <More />
-        <Story />
-        <Download />
+        <Routes>
+          <Route path="/" element={<Home theme={theme} />} />
+          <Route path="/about" element={<About />} />
+        </Routes>
       </main>
       <Footer />
     </MotionConfig>
