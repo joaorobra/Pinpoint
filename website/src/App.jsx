@@ -1223,7 +1223,6 @@ function Nav({ theme, setTheme }) {
         <a href={hash("features")}>Features</a>
         <a href={hash("more")}>Everything else</a>
         <a href={hash("story")}>Why</a>
-        <Link to="/about">About</Link>
         <a href={REPO} target="_blank" rel="noreferrer">
           GitHub
         </a>
@@ -1592,7 +1591,6 @@ function Footer() {
           <a href={hash("features")}>Features</a>
           <a href={hash("more")}>Everything else</a>
           <a href={hash("story")}>Why</a>
-          <Link to="/about">About</Link>
           <a href={hash("download")}>Download</a>
           <a href={REPO} target="_blank" rel="noreferrer">
             <GithubLogo
@@ -1620,48 +1618,6 @@ function Home({ theme }) {
   );
 }
 
-function About() {
-  return (
-    <section id="about" className="about">
-      <div className="container">
-        <Reveal className="about-body">
-          <span className="story-kicker">About Pinpoint</span>
-          <h1>One home for your notes and your tasks.</h1>
-          <p>
-            Pinpoint is a free, local-first notes and tasks app for Windows,
-            macOS and Linux. Everything you write is saved as ordinary markdown
-            in a folder you own &mdash; no account, no server, no lock-in.
-          </p>
-          <div className="pin-h2">What it&rsquo;s for</div>
-          <p>
-            Notes, tasks, databases, live queries, recurring tasks and daily
-            notes, all side by side. It feels like Notion to use, but every page
-            is a plain <code>.md</code> file you can open in any editor, back up,
-            sync or keep for good.
-          </p>
-          <div className="pin-h2">Who makes it</div>
-          <p>
-            Pinpoint is built and maintained in the open. The source lives on{" "}
-            <a href={REPO} target="_blank" rel="noreferrer">
-              GitHub
-            </a>
-            , where you can follow along, report issues or contribute.
-          </p>
-          <div className="hero-ctas" style={{ marginTop: 28 }}>
-            <a className="btn btn-primary btn-lg" href={RELEASES}>
-              <DownloadSimple size={19} aria-hidden="true" />
-              Download for free
-            </a>
-            <Link className="btn btn-secondary btn-lg" to="/">
-              Back to home
-            </Link>
-          </div>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
 /** Scroll to top on route change (but honor in-page #hash links). */
 function ScrollManager() {
   const { pathname, hash } = useLocation();
@@ -1681,7 +1637,6 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/" element={<Home theme={theme} />} />
-          <Route path="/about" element={<About />} />
         </Routes>
       </main>
       <Footer />
