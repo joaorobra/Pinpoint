@@ -29,6 +29,7 @@ import {
   CheckCircle,
   DownloadSimple,
   GithubLogo,
+  Browser,
 } from "@phosphor-icons/react";
 
 /* ============================================================
@@ -41,6 +42,12 @@ const STATIC =
 const EASE = [0.32, 0.72, 0, 1];
 const RELEASES = "https://github.com/joaorobra/Pinpoint/releases";
 const REPO = "https://github.com/joaorobra/Pinpoint";
+
+/** The hosted web app lives at the current site's origin + /app. */
+function appUrl() {
+  if (typeof window === "undefined") return "/app";
+  return `${window.location.origin}/app`;
+}
 
 function useTheme() {
   const [theme, setThemeState] = useState(() => {
@@ -1270,8 +1277,9 @@ function Hero({ theme }) {
                 <DownloadSimple size={19} aria-hidden="true" />
                 Download for free
               </a>
-              <a className="btn btn-secondary btn-lg" href="#features">
-                See how it helps
+              <a className="btn btn-secondary btn-lg" href={appUrl()}>
+                <Browser size={19} aria-hidden="true" />
+                Open in browser
               </a>
             </motion.div>
             <motion.p className="hero-note" variants={heroItem}>
