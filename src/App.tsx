@@ -51,6 +51,14 @@ import type { LockStatus, NodeIcon, Settings, TreeNode } from "./types";
 import { DEFAULT_SETTINGS, extForMime } from "./types";
 import { collectTemplates, fillTemplate, stripCursor, type FillContext, type TemplateInfo } from "./templates";
 import { pathFor, labelFor, template, type Period } from "./periodic";
+import {
+  conflictKey,
+  findSyncConflicts,
+  ignoreConflict,
+  loadIgnoredConflicts,
+  mergeBodies,
+  type SyncConflict,
+} from "./conflicts";
 import Editor from "./components/Editor";
 import FileTree, { type SelectMods, type TreeCommands } from "./components/FileTree";
 import ContextMenu from "./components/ContextMenu";
@@ -1981,6 +1989,163 @@ export default function App() {
     },
     [activateDoc]
   );
+
+  // ---- Sync-conflict duplicates: cloud sync (Google Drive & co.) resolves a write conflict by
+  //      keeping both versions as "<name> (1).md". Detect them after every tree load and offer a
+  //      resolution. This matters most for periodic notes: the app always re-opens the canonical
+  //      "2026-07-21.md", so edits stranded in the "(1)" copy would otherwise be silently lost. ----
+
+  // Walk the user through resolving one conflict pair (dialog → file ops → Undo toast).
+  const resolveSyncConflict = useCallback(
+    async (c: SyncConflict) => {
+      let origDoc, dupDoc;
+      try {
+        [origDoc, dupDoc] = await Promise.all([api.readPage(c.original), api.readPage(c.duplicate)]);
+      } catch {
+        return; // one side vanished since detection (resolved externally) — nothing to do
+      }
+      const name = (p: string) => p.split("/").pop() ?? p;
+      const dupName = name(c.duplicate);
+      const origName = name(c.original);
+      const what = c.periodic ? `your ${c.periodic} note “${origName}”` : `“${origName}”`;
+      const identical = origDoc.body.trim() === dupDoc.body.trim();
+      const choice = await dialogs.choose({
+        title: "Sync conflict detected",
+        message: identical
+          ? `“${dupName}” is an identical copy of ${what}, likely left behind by your sync service. Safe to delete.`
+          : `“${dupName}” looks like a sync-conflict copy of ${what}, and their contents differ.`,
+        options: identical
+          ? [
+              { label: "Delete duplicate", value: "trash-dup" },
+              { label: "Keep both", value: "keep-both" },
+            ]
+          : [
+              { label: "Merge into original", value: "merge" },
+              { label: "Keep original, trash duplicate", value: "trash-dup", danger: true },
+              { label: "Keep duplicate, replace original", value: "keep-dup", danger: true },
+              { label: "Keep both", value: "keep-both" },
+            ],
+        cancelLabel: "Later",
+      });
+      if (!choice) return; // "Later" — re-alerts next launch
+
+      try {
+        if (choice === "merge") {
+          // Append the copy's unique content to the original (identical/contained bodies collapse),
+          // then trash the copy. Undo restores both the original body and the trashed file.
+          const merged = mergeBodies(origDoc.body, dupDoc.body);
+          await api.writePage(c.original, origDoc.frontmatter as Record<string, unknown>, merged);
+          const trashed = await api.trashPage(c.duplicate);
+          forgetTabs((p) => p === c.duplicate);
+          await refreshTree();
+          if (activePathRef.current === c.original && !dirtyRef.current) void openPage(c.original);
+          toast.show({
+            message: `Merged “${dupName}” into “${origName}”`,
+            action: {
+              label: "Undo",
+              run: async () => {
+                await api
+                  .writePage(c.original, origDoc.frontmatter as Record<string, unknown>, origDoc.body)
+                  .catch(() => {});
+                await api.restoreTrash(trashed.id).catch(() => {});
+                await refreshTree();
+              },
+            },
+          });
+        } else if (choice === "trash-dup") {
+          const trashed = await api.trashPage(c.duplicate);
+          forgetTabs((p) => p === c.duplicate);
+          await refreshTree();
+          toast.show({
+            message: `Moved “${dupName}” to Trash`,
+            action: {
+              label: "Undo",
+              run: async () => {
+                await api.restoreTrash(trashed.id).catch(() => {});
+                await refreshTree();
+                setTrashRefresh((k) => k + 1);
+              },
+            },
+          });
+        } else if (choice === "keep-dup") {
+          // rename_path refuses to overwrite, so trash the original first, then move the copy into
+          // its place. The copy carries the same frontmatter `id`, so links keep resolving.
+          const trashed = await api.trashPage(c.original);
+          try {
+            await api.renamePath(c.duplicate, c.original);
+          } catch (e) {
+            await api.restoreTrash(trashed.id).catch(() => {});
+            throw e;
+          }
+          forgetTabs((p) => p === c.duplicate);
+          await refreshTree();
+          if (activePathRef.current === c.original && !dirtyRef.current) void openPage(c.original);
+          toast.show({
+            message: `“${dupName}” replaced “${origName}”`,
+            action: {
+              label: "Undo",
+              run: async () => {
+                await api.renamePath(c.original, c.duplicate).catch(() => {});
+                await api.restoreTrash(trashed.id).catch(() => {});
+                await refreshTree();
+                setTrashRefresh((k) => k + 1);
+              },
+            },
+          });
+        } else if (choice === "keep-both") {
+          // The copy shares the original's stable `id`; two pages with one id breaks backlinks and
+          // rename link-repair, so drop it and let writePage mint a fresh one (same as Duplicate).
+          const { id: _omitId, ...fmCopy } = dupDoc.frontmatter as Record<string, unknown>;
+          await api.writePage(c.duplicate, fmCopy, dupDoc.body);
+          ignoreConflict(conflictKey(vaultIdRef.current ?? "", c));
+          await refreshTree();
+        }
+      } catch (e) {
+        await dialogs.alert({ title: "Couldn’t resolve the conflict", message: String(e) });
+      }
+    },
+    [openPage, refreshTree, forgetTabs]
+  );
+
+  // Resolve a batch one dialog at a time (each re-reads its files, so pairs already resolved or
+  // externally deleted mid-batch are skipped quietly).
+  const reviewConflicts = useCallback(
+    async (conflicts: SyncConflict[]) => {
+      for (const c of conflicts) await resolveSyncConflict(c);
+    },
+    [resolveSyncConflict]
+  );
+
+  // Alerted pairs this session (keys include the vault id, so switching vaults can't collide).
+  const alertedConflicts = useRef<Set<string>>(new Set());
+
+  // Detect conflicts on every tree load — the desktop watcher refreshes the tree when the sync
+  // client drops a copy in, so alerts appear live; on web this fires on open/manual reindex.
+  useEffect(() => {
+    if (!tree) return;
+    const vaultId = vaultIdRef.current ?? "";
+    const ignored = loadIgnoredConflicts();
+    const fresh = findSyncConflicts(tree, settings.periodic_folder).filter((c) => {
+      const key = conflictKey(vaultId, c);
+      return !ignored.has(key) && !alertedConflicts.current.has(key);
+    });
+    if (fresh.length === 0) return;
+    for (const c of fresh) alertedConflicts.current.add(conflictKey(vaultId, c));
+    const periodicHit = fresh.some((c) => c.periodic);
+    const message =
+      fresh.length === 1
+        ? fresh[0].periodic
+          ? `Sync conflict: a duplicate of your ${fresh[0].periodic} note “${fresh[0].original.split("/").pop()}” appeared`
+          : `Sync conflict: “${fresh[0].duplicate.split("/").pop()}” duplicates “${fresh[0].original.split("/").pop()}”`
+        : `${fresh.length} sync-conflict copies found${periodicHit ? ", including periodic notes" : ""}`;
+    toast.show({
+      message,
+      // Periodic-note conflicts stay until acted on — edits stranded in the copy are otherwise
+      // invisible; regular pages get a long-but-transient toast.
+      durationMs: periodicHit ? 0 : 10000,
+      action: { label: "Review", run: () => void reviewConflicts(fresh) },
+    });
+  }, [tree, settings.periodic_folder, reviewConflicts]);
 
   // Delete a single node. By default it's a soft delete (move to `.trash`, restorable from the
   // Trash tab); `permanent` (shift-delete) skips the trash and removes it irreversibly.
