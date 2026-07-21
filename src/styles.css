@@ -2469,6 +2469,68 @@ code, .dsl-preview, .dsl-input {
 .dialog-password-field .dialog-input { margin-bottom: 0; }
 .dialog-password-error { margin: 0; color: var(--danger, #e5484d); font-size: 0.85em; }
 
+/* ---------- Sync-conflict resolver (side-by-side compare) ----------
+   Original-only lines tint accent, duplicate-only lines tint amber (--prio-medium — red would read
+   as "wrong", but the duplicate's content isn't); gaps keep the panes line-aligned. */
+.modal.conflict-modal {
+  width: min(960px, 94vw);
+  display: flex; flex-direction: column;
+  padding: var(--sp-5) var(--sp-6);
+}
+.conflict-cols {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--sp-2);
+  margin-bottom: var(--sp-1);
+}
+.conflict-cols.single { grid-template-columns: 1fr; }
+.conflict-col-head {
+  display: flex; align-items: center; gap: var(--sp-2); min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+}
+.conflict-badge {
+  flex-shrink: 0;
+  font-size: 0.68em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 2px 8px; border-radius: var(--r-sm);
+}
+.conflict-badge.original { background: var(--accent-soft); color: var(--accent); }
+.conflict-badge.duplicate { background: var(--prio-medium-soft); color: var(--prio-medium); }
+.conflict-file {
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.78em; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conflict-diff {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1px var(--sp-2);
+  align-content: start;
+  overflow: auto; flex: 1; min-height: 120px; max-height: 52vh;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg); padding: var(--sp-2);
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.78em; line-height: 1.5;
+}
+.conflict-diff.identical { grid-template-columns: 1fr; }
+.conflict-line {
+  padding: 0 var(--sp-2); white-space: pre-wrap; word-break: break-word;
+  min-height: 1.5em; min-width: 0;
+  border-radius: 2px;
+}
+.conflict-line.diff-left { background: var(--accent-soft); }
+.conflict-line.diff-right { background: var(--prio-medium-soft); }
+.conflict-line.gap {
+  background: repeating-linear-gradient(-45deg, var(--bg-3) 0 4px, transparent 4px 8px);
+  opacity: 0.6;
+}
+.conflict-actions {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center;
+  margin-top: var(--sp-4);
+}
+.conflict-actions .spacer { flex: 1; }
+.conflict-actions button.danger-soft:hover {
+  background: var(--danger-soft); color: var(--danger-strong); border-color: var(--danger-ring);
+}
+@media (max-width: 640px) {
+  .modal.conflict-modal { width: 96vw; padding: var(--sp-4); }
+  .conflict-actions button { flex: 1 1 auto; }
+  .conflict-actions .spacer { display: none; }
+}
+
 /* ---------- Toasts ---------- */
 /* Transient confirmations with an optional inline action (e.g. Undo after trashing). Stacked
    bottom-center above the safe-area inset so they clear mobile home indicators. */

@@ -81,6 +81,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
 import { LlmPanel, type LlmChatTurn } from "./components/LlmPanel";
 import { DialogHost, dialogs } from "./components/Dialogs";
+import { ConflictDialogHost, conflictDialog } from "./components/ConflictDialog";
 import { ToastHost, toast } from "./components/Toast";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
 import ShortcutsPopup from "./components/ShortcutsPopup";
@@ -2007,25 +2008,15 @@ export default function App() {
       const name = (p: string) => p.split("/").pop() ?? p;
       const dupName = name(c.duplicate);
       const origName = name(c.original);
-      const what = c.periodic ? `your ${c.periodic} note “${origName}”` : `“${origName}”`;
-      const identical = origDoc.body.trim() === dupDoc.body.trim();
-      const choice = await dialogs.choose({
-        title: "Sync conflict detected",
-        message: identical
-          ? `“${dupName}” is an identical copy of ${what}, likely left behind by your sync service. Safe to delete.`
-          : `“${dupName}” looks like a sync-conflict copy of ${what}, and their contents differ.`,
-        options: identical
-          ? [
-              { label: "Delete duplicate", value: "trash-dup" },
-              { label: "Keep both", value: "keep-both" },
-            ]
-          : [
-              { label: "Merge into original", value: "merge" },
-              { label: "Keep original, trash duplicate", value: "trash-dup", danger: true },
-              { label: "Keep duplicate, replace original", value: "keep-dup", danger: true },
-              { label: "Keep both", value: "keep-both" },
-            ],
-        cancelLabel: "Later",
+      // Side-by-side compare dialog: shows an aligned line diff of both versions so the user can
+      // see exactly what differs before picking a resolution.
+      const choice = await conflictDialog.show({
+        originalPath: c.original,
+        duplicatePath: c.duplicate,
+        originalBody: origDoc.body,
+        duplicateBody: dupDoc.body,
+        identical: origDoc.body.trim() === dupDoc.body.trim(),
+        periodic: c.periodic,
       });
       if (!choice) return; // "Later" — re-alerts next launch
 
@@ -3540,6 +3531,7 @@ export default function App() {
       )}
 
       <DialogHost />
+      <ConflictDialogHost />
       <ToastHost />
     </div>
     </>

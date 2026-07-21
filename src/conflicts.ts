@@ -60,6 +60,69 @@ export function mergeBodies(original: string, duplicate: string): string {
   return `${o}\n\n---\n\n${d}\n`;
 }
 
+/**
+ * One aligned row of the side-by-side compare view: the original's line, the duplicate's line, and
+ * whether they match. A null side means the line exists only on the other side (rendered as a gap).
+ */
+export type DiffRow = { left: string | null; right: string | null; same: boolean };
+
+/**
+ * Line-level LCS diff producing aligned rows for a two-pane view. Runs of removed/added lines are
+ * paired index-wise so an edited line shows up as left/right neighbours rather than two gaps.
+ * O(n·m) — fine for note-sized files; degenerate inputs fall back to plain index alignment.
+ */
+export function diffLines(a: string, b: string): DiffRow[] {
+  const al = a.split("\n");
+  const bl = b.split("\n");
+  const n = al.length;
+  const m = bl.length;
+  const rows: DiffRow[] = [];
+  if (n * m > 4_000_000) {
+    for (let i = 0; i < Math.max(n, m); i++) {
+      const left = i < n ? al[i] : null;
+      const right = i < m ? bl[i] : null;
+      rows.push({ left, right, same: left !== null && left === right });
+    }
+    return rows;
+  }
+  // LCS length table, flattened; dp[i][j] = LCS of al[i..] and bl[j..].
+  const w = m + 1;
+  const dp = new Int32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * w + j] =
+        al[i] === bl[j] ? dp[(i + 1) * w + j + 1] + 1 : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+    }
+  }
+  const dels: string[] = [];
+  const ins: string[] = [];
+  const flush = () => {
+    for (let t = 0; t < Math.max(dels.length, ins.length); t++) {
+      rows.push({ left: t < dels.length ? dels[t] : null, right: t < ins.length ? ins[t] : null, same: false });
+    }
+    dels.length = 0;
+    ins.length = 0;
+  };
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (al[i] === bl[j]) {
+      flush();
+      rows.push({ left: al[i], right: bl[j], same: true });
+      i++;
+      j++;
+    } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
+      dels.push(al[i++]);
+    } else {
+      ins.push(bl[j++]);
+    }
+  }
+  while (i < n) dels.push(al[i++]);
+  while (j < m) ins.push(bl[j++]);
+  flush();
+  return rows;
+}
+
 /** Stable identity for a conflict pair, scoped to a vault (used for de-duping alerts + ignores). */
 export function conflictKey(vaultId: string, c: SyncConflict): string {
   return `${vaultId}::${c.original}::${c.duplicate}`;
