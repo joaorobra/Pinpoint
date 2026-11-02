@@ -16,19 +16,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Add more rows here later for macOS/Linux, e.g.:
+          # Add more rows here later for macOS, e.g.:
           # - platform: macos-latest
           #   args: "--target universal-apple-darwin"
-          # - platform: ubuntu-22.04
-          #   args: ""
           - platform: windows-latest
             args: ""
+          # tauri.conf.json's bundle targets are the Windows installers, so pick Linux bundles
+          # here. The AppImage is what the in-app updater replaces in place; the .deb is for
+          # manual installs. 22.04 keeps the AppImage's glibc floor low enough for older distros.
+          - platform: ubuntu-22.04
+            args: "--bundles appimage,deb"
 
     runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Node
         uses: actions/setup-node@v4
