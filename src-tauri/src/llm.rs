@@ -43,6 +43,7 @@ impl ProviderId {
 
 /// What the frontend's provider-detection UI renders per CLI.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderStatus {
     pub id: ProviderId,
     /// Binary found on PATH.
@@ -92,8 +93,10 @@ fn default_mode() -> String {
 /// Normalized streamed event — identical across providers so the frontend never branches on
 /// which CLI produced it. Mirrors `LlmEvent` in src/llm/transport.ts. Emitted on the
 /// per-run Tauri event channel `llm://<run_id>`.
+/// Fields go out camelCase (`sessionId`, `costUsd`) to match the TS type — `rename_all` alone only
+/// renames the variant tags, and a `session_id` the frontend never reads silently breaks resume.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum LlmEvent {
     /// Session metadata at stream start. `session_id` is what the frontend stores to resume.
     Init { session_id: String, model: String },
