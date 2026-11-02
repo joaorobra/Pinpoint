@@ -126,10 +126,55 @@ impl LlmState {
     }
 }
 
-/// Locate a binary on PATH (cross-platform). Returns its absolute path if runnable.
+/// Where CLIs commonly live but a GUI-launched app's PATH often lacks. Desktop launchers don't
+/// source `.bashrc`/`.zshrc`, so version managers (nvm, fnm, volta) and per-user npm prefixes are
+/// invisible to us even though `claude` works fine in the user's terminal.
+fn extra_bin_dirs() -> Vec<std::path::PathBuf> {
+    let Some(home) = dirs_home() else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(std::path::PathBuf::from(appdata).join("npm"));
+        }
+        dirs.push(home.join(".local").join("bin"));
+        return dirs;
+    }
+    dirs.extend([
+        home.join(".local/bin"),
+        home.join(".claude/local"),
+        home.join(".npm-global/bin"),
+        home.join(".volta/bin"),
+        home.join(".bun/bin"),
+        home.join("bin"),
+        "/opt/homebrew/bin".into(),
+        "/usr/local/bin".into(),
+    ]);
+    // nvm installs each Node version separately; prefer the newest.
+    if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        let mut versions: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        versions.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    n.trim_start_matches('v')
+                        .split('.')
+                        .map(|s| s.parse::<u32>().unwrap_or(0))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        dirs.extend(versions.into_iter().rev().map(|v| v.join("bin")));
+    }
+    dirs
+}
+
+/// Locate a binary on PATH, then in [`extra_bin_dirs`] (cross-platform). Returns its absolute
+/// path if runnable.
 fn which(bin: &str) -> Option<String> {
     // `which`/`where` differ per-OS; do the PATH walk ourselves so there's no shell dependency.
-    let path = std::env::var_os("PATH")?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
     let exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
@@ -139,7 +184,7 @@ fn which(bin: &str) -> Option<String> {
     } else {
         vec![String::new()]
     };
-    for dir in std::env::split_paths(&path) {
+    for dir in std::env::split_paths(&path).chain(extra_bin_dirs()) {
         // Try the bare name and each executable extension (Windows ships `claude.cmd`).
         let candidates = std::iter::once(dir.join(bin)).chain(exts.iter().filter_map(|e| {
             if e.is_empty() {
@@ -384,6 +429,15 @@ pub async fn run(
     let argv = build_argv(&req)?;
 
     let mut cmd = Command::new(&bin);
+    // If the binary came from outside our PATH (e.g. an nvm dir), put its dir first so node-based
+    // CLIs (`#!/usr/bin/env node`) find the node that sits next to them.
+    if let Some(bin_dir) = std::path::Path::new(&bin).parent() {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(bin_dir.to_path_buf()).chain(std::env::split_paths(&inherited));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            cmd.env("PATH", joined);
+        }
+    }
     cmd.args(&argv)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
