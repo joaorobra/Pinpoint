@@ -29,6 +29,9 @@ import Select, { type SelectGroup, type SelectOption } from "./Select";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import ColorPicker from "./ColorPicker";
 import ThemeManager from "./ThemeManager";
+import { dialogs } from "./Dialogs";
+import { toast } from "./Toast";
+import { clearChats } from "../llm/history";
 import { formatDate, DATE_PRESETS, TIME_PRESETS, DONE_PRESETS } from "../dateformat";
 import { PERIODS } from "../periodic";
 import type { TemplateInfo } from "../templates";
@@ -843,6 +846,47 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
                       onChange={(v) => set("ai_preset", v)}
                       ariaLabel="Default role preset"
                     />
+                  </Row>
+                </Group>
+                <Group
+                  title="History"
+                  keywords="ai chat history save resume previous conversations anonymous private incognito delete"
+                  desc="Chats are saved in this vault (.pinpoint/chats) so you can pick one back up from the history button in the chat dock. Anonymous chats are never saved."
+                >
+                  <Row
+                    label="Save chat history"
+                    hint="Off: new chats aren’t written anywhere and disappear when you start another one."
+                  >
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={settings.ai_save_history ?? true}
+                        onChange={(e) => set("ai_save_history", e.target.checked)}
+                      />
+                      <span className="switch-track" />
+                    </label>
+                  </Row>
+                  <Row label="Saved chats" hint="Permanently delete every chat saved in this vault.">
+                    <button
+                      className="danger-ghost"
+                      onClick={async () => {
+                        const ok = await dialogs.confirm({
+                          title: "Delete all saved chats?",
+                          message: "Every chat in this vault’s .pinpoint/chats folder is removed. This can’t be undone.",
+                          confirmLabel: "Delete chats",
+                          danger: true,
+                        });
+                        if (!ok) return;
+                        try {
+                          await clearChats();
+                          toast.show({ message: "Saved chats deleted" });
+                        } catch (e) {
+                          await dialogs.alert({ title: "Couldn’t delete the chats", message: String(e) });
+                        }
+                      }}
+                    >
+                      Delete saved chats
+                    </button>
                   </Row>
                 </Group>
               </>

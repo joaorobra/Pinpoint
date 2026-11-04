@@ -81,6 +81,8 @@ import TagsView from "./components/TagsView";
 import SettingsPanel from "./components/SettingsPanel";
 import RightSidebar, { type Heading } from "./components/RightSidebar";
 import { LlmPanel, type LlmChatTurn } from "./components/LlmPanel";
+import { newChatId, saveChat } from "./llm/history";
+import type { ProviderId } from "./llm/transport";
 import { DialogHost, dialogs } from "./components/Dialogs";
 import { ConflictDialogHost, conflictDialog } from "./components/ConflictDialog";
 import { ToastHost, toast } from "./components/Toast";
@@ -399,6 +401,21 @@ export default function App() {
   // a single long-lived conversation across open/close. `reset()` (New conversation) clears them.
   const [llmTurns, setLlmTurns] = useState<LlmChatTurn[]>([]);
   const llmSessionRef = useRef<string | undefined>(undefined);
+  // Chat history: the saved chat this conversation continues (null until its first save), whether
+  // it's an anonymous (never-saved) chat, and the provider it runs on — saved with each chat.
+  const [llmChatId, setLlmChatId] = useState<string | null>(null);
+  const [llmAnonymous, setLlmAnonymous] = useState(false);
+  const llmProviderRef = useRef<ProviderId>("claude");
+  const llmChatIdRef = useRef<string | null>(null);
+  llmChatIdRef.current = llmChatId;
+  // Set when a saved chat is reopened, so loading it doesn't immediately re-save it as "updated now".
+  const llmSkipSaveRef = useRef(false);
+  const onLlmChatIdChange = useCallback((id: string | null) => {
+    // The panel only passes a non-null id when resuming a saved chat (new chats get theirs on save).
+    if (id) llmSkipSaveRef.current = true;
+    llmChatIdRef.current = id;
+    setLlmChatId(id);
+  }, []);
 
   // ---- Responsive layout ----
   // Drives the desktop↔mobile switch: on a narrow viewport the grid collapses to a single column,
@@ -827,6 +844,10 @@ export default function App() {
   // cleared so nothing from the old vault leaks into the next one.
   const switchVault = useCallback(() => {
     flushSave();
+    // Chats are saved per vault, so a conversation must not carry over into the next vault.
+    setLlmTurns([]);
+    llmSessionRef.current = undefined;
+    setLlmChatId(null);
     setTree(null);
     setVaultName("");
     vaultIdRef.current = null;
@@ -1141,6 +1162,32 @@ export default function App() {
   useEffect(() => {
     contentRef.current?.scrollTo({ top: 0 });
   }, [activePath]);
+
+  // Save the AI chat once each reply has finished streaming (not on every streamed chunk), unless
+  // history is off in Settings or this is an anonymous chat. The first save mints the chat's id.
+  useEffect(() => {
+    if (llmSkipSaveRef.current) {
+      llmSkipSaveRef.current = false;
+      return;
+    }
+    if (!tree || !settings.ai_save_history || llmAnonymous) return;
+    if (llmTurns.length === 0 || llmTurns.some((t) => t.streaming)) return;
+    const timer = window.setTimeout(() => {
+      // Read the id through a ref so minting it doesn't re-run this effect and save twice.
+      const id = llmChatIdRef.current ?? newChatId();
+      if (!llmChatIdRef.current) {
+        llmChatIdRef.current = id;
+        setLlmChatId(id);
+      }
+      saveChat({
+        id,
+        provider: llmProviderRef.current,
+        sessionId: llmSessionRef.current,
+        turns: llmTurns,
+      }).catch((e) => toast.show({ message: `Couldn’t save this chat: ${String(e)}`, durationMs: 8000 }));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [llmTurns, llmAnonymous, settings.ai_save_history, tree]);
 
   // Keep the active tab visible in the tab strip, which scrolls sideways once tabs overflow.
   const tabsRef = useRef<HTMLDivElement>(null);
@@ -3524,6 +3571,12 @@ export default function App() {
                 mode: settings.ai_mode,
                 preset: settings.ai_preset,
               }}
+              saveHistory={settings.ai_save_history}
+              anonymous={llmAnonymous}
+              onAnonymousChange={setLlmAnonymous}
+              chatId={llmChatId}
+              onChatIdChange={onLlmChatIdChange}
+              providerRef={llmProviderRef}
               vaultRoot={vaultIdRef.current}
               vaultRelToAbs={(rel) => {
                 // On desktop the vault id is the absolute root path; join with the platform sep.

@@ -76,6 +76,8 @@ pub struct Settings {
     pub ai_effort: String,   // reasoning effort (`--effort`); "" = CLI default
     pub ai_mode: String,     // "chat" | "note" | "agent"
     pub ai_preset: String,   // role preset text prepended to the system prompt; "" = none
+    /// Keep AI chats in `.pinpoint/chats/` so they can be resumed later. Off = nothing is written.
+    pub ai_save_history: bool,
 }
 
 /// Built-in symbol replacements seeded into a fresh vault. Mirrors DEFAULT_SMART_REPLACEMENTS in TS.
@@ -134,6 +136,7 @@ impl Default for Settings {
             ai_effort: "".into(),
             ai_mode: "chat".into(),
             ai_preset: "".into(),
+            ai_save_history: true,
         }
     }
 }

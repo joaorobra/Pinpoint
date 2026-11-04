@@ -532,6 +532,8 @@ export interface Settings {
   ai_mode: "chat" | "note" | "agent";
   /** Default role preset prepended to the system prompt; "" = none. */
   ai_preset: string;
+  /** Save AI chats to `.pinpoint/chats/` so they can be resumed. Off = chats are never written. */
+  ai_save_history: boolean;
 }
 
 /**
@@ -745,4 +747,5 @@ export const DEFAULT_SETTINGS: Settings = {
   ai_effort: "",
   ai_mode: "chat",
   ai_preset: "",
+  ai_save_history: true,
 };

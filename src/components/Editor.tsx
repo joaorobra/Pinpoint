@@ -964,6 +964,253 @@ const BlockDragHandle = Extension.create({
   },
 });
 
+/**
+ * Notion-style area (marquee) selection. Pressing the mouse on blank space AROUND the text — the
+ * page margins, the gap above or below the content — and dragging draws a rectangle; every "line"
+ * (top-level block, or list item) whose row it crosses vertically becomes selected as a whole.
+ *
+ * The result is a real ProseMirror text selection spanning those blocks, so copy, cut, typing and
+ * Tab/Shift+Tab indentation keep working as usual. On top of it, this plugin:
+ *  - paints the covered blocks with a block highlight (and hides the per-character highlight),
+ *  - makes Backspace/Delete remove the selected blocks entirely (not just their text),
+ *  - collapses the selection on Escape.
+ * Any other selection change or edit ends the block selection.
+ */
+type AreaSel = { from: number; to: number } | null;
+const areaSelectKey = new PluginKey<AreaSel>("areaSelect");
+
+/** Every line's position + size from the document alone (no DOM), in document order. */
+function lineRanges(doc: any): { pos: number; size: number }[] {
+  const out: { pos: number; size: number }[] = [];
+  const walk = (node: any, pos: number) => {
+    const name = node.type.name;
+    if (LIST_NAMES.has(name)) {
+      let at = pos + 1;
+      node.forEach((child: any) => {
+        walk(child, at);
+        at += child.nodeSize;
+      });
+      return;
+    }
+    out.push({ pos, size: node.nodeSize });
+    if (name === "listItem" || name === "taskItem") {
+      let at = pos + 1;
+      node.forEach((child: any) => {
+        if (LIST_NAMES.has(child.type.name)) walk(child, at);
+        at += child.nodeSize;
+      });
+    }
+  };
+  let at = 0;
+  doc.forEach((child: any) => {
+    walk(child, at);
+    at += child.nodeSize;
+  });
+  return out;
+}
+
+const AreaSelect = Extension.create({
+  name: "areaSelect",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<AreaSel>({
+        key: areaSelectKey,
+        state: {
+          init: () => null,
+          apply(tr, prev) {
+            const meta = tr.getMeta(areaSelectKey) as AreaSel | undefined;
+            if (meta !== undefined) return meta;
+            // Any edit or caret move made by something else ends the block selection.
+            if (tr.docChanged || tr.selectionSet) return null;
+            return prev;
+          },
+        },
+        props: {
+          attributes: (state): Record<string, string> =>
+            areaSelectKey.getState(state) ? { class: "has-area-selection" } : {},
+          decorations(state) {
+            const area = areaSelectKey.getState(state);
+            if (!area) return null;
+            // Highlight each outermost covered line once (a covered list item already shows its
+            // nested children inside its own highlight).
+            const decos: any[] = [];
+            let coveredTo = -1;
+            for (const l of lineRanges(state.doc)) {
+              if (l.pos < area.from || l.pos + l.size > area.to || l.pos < coveredTo) continue;
+              decos.push(Decoration.node(l.pos, l.pos + l.size, { class: "area-selected" }));
+              coveredTo = l.pos + l.size;
+            }
+            return DecorationSet.create(state.doc, decos);
+          },
+          handleKeyDown(view, event) {
+            const area = areaSelectKey.getState(view.state);
+            if (!area) return false;
+            if (event.key === "Backspace" || event.key === "Delete") {
+              const tr = view.state.tr.deleteRange(area.from, area.to);
+              tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(area.from, tr.doc.content.size))));
+              view.dispatch(tr.setMeta(areaSelectKey, null).scrollIntoView());
+              return true;
+            }
+            if (event.key === "Escape") {
+              const tr = view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(area.from + 1)));
+              view.dispatch(tr.setMeta(areaSelectKey, null));
+              return true;
+            }
+            return false;
+          },
+        },
+        view(view) {
+          // The column and scroll container are resolved per drag: when this plugin view is created,
+          // TipTap's React wrapper hasn't moved the editor into the page yet.
+          let column: HTMLElement | null = null; // .editor-content
+          let scroller: HTMLElement | null = null; // .content
+          const rect = document.createElement("div");
+          rect.className = "area-select-rect";
+          rect.style.display = "none";
+
+          const THRESHOLD = 5; // px of travel before a press becomes a marquee (a plain click stays a click)
+          const EDGE = 48; // px from the scroller's top/bottom edge where dragging auto-scrolls
+          let start: { x: number; y: number } | null = null; // column-relative, outer (zoomed) px
+          let last = { x: 0, y: 0 }; // latest pointer, client px
+          let active = false;
+          let lines: ReturnType<typeof collectLines> = [];
+          let frame = 0;
+
+          // Where a drag may begin: blank space in the editor area that isn't text, a control, or the
+          // page header (title, properties, toolbar) — those keep their own mouse behaviour.
+          const startsMarquee = (target: HTMLElement) => {
+            if (view.dom.contains(target)) return false;
+            if (!target.closest(".editor-wrap")) return false;
+            return !target.closest(
+              'button, input, textarea, select, a, label, [contenteditable="true"], [role="button"], ' +
+                ".toolbar, .editor-header-slot, .page-ruler, .slash-menu, .block-drag-handle"
+            );
+          };
+
+          // The row a line occupies on screen: a list item's OWN first block, not its nested children.
+          const rowOf = (dom: HTMLElement, typeName: string): HTMLElement => {
+            if (typeName !== "listItem" && typeName !== "taskItem") return dom;
+            return (dom.querySelector("p, h1, h2, h3, h4, h5, h6, pre, blockquote") as HTMLElement | null) ?? dom;
+          };
+
+          const update = () => {
+            frame = 0;
+            if (!start || !column || !scroller) return;
+            const box = column.getBoundingClientRect();
+            const x1 = box.left + start.x;
+            const y1 = box.top + start.y;
+            const left = Math.min(x1, last.x);
+            const top = Math.min(y1, last.y);
+            const right = Math.max(x1, last.x);
+            const bottom = Math.max(y1, last.y);
+            if (!active) {
+              if (Math.hypot(last.x - x1, last.y - y1) < THRESHOLD) return;
+              active = true;
+              lines = collectLines(view);
+              rect.style.display = "block";
+            }
+            const z = uiZoom();
+            rect.style.left = `${(left - box.left) / z}px`;
+            rect.style.top = `${(top - box.top) / z}px`;
+            rect.style.width = `${(right - left) / z}px`;
+            rect.style.height = `${(bottom - top) / z}px`;
+
+            // Select every line whose row overlaps the rectangle vertically.
+            let from = Infinity;
+            let to = -Infinity;
+            for (const l of lines) {
+              const r = rowOf(l.dom, l.typeName).getBoundingClientRect();
+              if (r.bottom < top || r.top > bottom) continue;
+              from = Math.min(from, l.pos);
+              to = Math.max(to, l.pos + l.nodeSize);
+            }
+            const { state } = view;
+            const prev = areaSelectKey.getState(state);
+            if (from === Infinity) {
+              if (prev) view.dispatch(state.tr.setMeta(areaSelectKey, null));
+            } else if (!prev || prev.from !== from || prev.to !== to) {
+              const sel = TextSelection.between(state.doc.resolve(from), state.doc.resolve(to));
+              view.dispatch(state.tr.setSelection(sel).setMeta(areaSelectKey, { from, to }));
+            }
+
+            // Auto-scroll while the pointer is held near the top/bottom edge.
+            const sb = scroller.getBoundingClientRect();
+            const delta =
+              last.y < sb.top + EDGE ? -Math.ceil((sb.top + EDGE - last.y) / 4)
+              : last.y > sb.bottom - EDGE ? Math.ceil((last.y - (sb.bottom - EDGE)) / 4)
+              : 0;
+            if (delta) {
+              scroller.scrollTop += delta;
+              frame = requestAnimationFrame(update);
+            }
+          };
+          const schedule = () => {
+            if (!frame) frame = requestAnimationFrame(update);
+          };
+
+          const onMove = (e: PointerEvent) => {
+            last = { x: e.clientX, y: e.clientY };
+            if (active) e.preventDefault();
+            schedule();
+          };
+          const finish = (e?: PointerEvent) => {
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+            scroller?.removeEventListener("scroll", onScroll);
+            if (frame) cancelAnimationFrame(frame);
+            frame = 0;
+            // Apply the final pointer position: a quick flick can release before the queued frame runs.
+            if (e && e.type === "pointerup" && start) {
+              last = { x: e.clientX, y: e.clientY };
+              update();
+              if (frame) cancelAnimationFrame(frame);
+              frame = 0;
+            }
+            rect.style.display = "none";
+            rect.remove();
+            if (active && areaSelectKey.getState(view.state)) view.focus();
+            start = null;
+            active = false;
+            lines = [];
+          };
+          const onDown = (e: PointerEvent) => {
+            if (e.button !== 0 || e.pointerType !== "mouse" || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+            const target = e.target as HTMLElement;
+            const content = view.dom.closest(".content") as HTMLElement | null;
+            const col = view.dom.parentElement;
+            if (!content || !col || !content.contains(target) || !startsMarquee(target)) return;
+            // Keep the browser from starting a native text selection (e.g. over the page title).
+            e.preventDefault();
+            column = col;
+            scroller = content;
+            column.appendChild(rect);
+            scroller.addEventListener("scroll", onScroll, { passive: true });
+            const box = column.getBoundingClientRect();
+            start = { x: e.clientX - box.left, y: e.clientY - box.top };
+            last = { x: e.clientX, y: e.clientY };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", finish);
+            window.addEventListener("pointercancel", finish);
+          };
+          // The rectangle is anchored to the column, so it follows the content while it scrolls.
+          const onScroll = () => {
+            if (active) schedule();
+          };
+
+          document.addEventListener("pointerdown", onDown);
+          return {
+            destroy() {
+              finish();
+              document.removeEventListener("pointerdown", onDown);
+            },
+          };
+        },
+      }),
+    ];
+  },
+});
+
 /** Escape a literal trigger string for use inside a RegExp. */
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -2496,6 +2743,7 @@ export default function Editor({
         }),
         MoveBlock,
         BlockDragHandle,
+        AreaSelect,
         SmartReplace.configure({ getConfig: () => smartCfgRef.current }),
       ],
       content: markdownToHtml(value),

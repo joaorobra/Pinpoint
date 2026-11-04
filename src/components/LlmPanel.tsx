@@ -23,6 +23,9 @@ import {
   At,
   Broom,
   X,
+  ClockCounterClockwise,
+  Detective,
+  Trash,
 } from "@phosphor-icons/react";
 import {
   llmTransport,
@@ -36,6 +39,7 @@ import { buildContext } from "../llm/refs";
 import { MODELS, EFFORTS, MODES, PRESETS, supportsEffort } from "../llm/options";
 import { Markdown, hasVisibleText } from "../llm/render";
 import Select from "./Select";
+import { deleteChat, listChats, loadChat, type ChatSummary } from "../llm/history";
 
 export interface LlmChatTurn {
   role: "user" | "assistant";
@@ -50,6 +54,19 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   gemini: "Gemini",
   codex: "Codex",
 };
+
+/** "5m ago"-style label for the history list. */
+function timeAgo(iso: string): string {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (!Number.isFinite(s)) return "";
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return d < 30 ? `${d}d ago` : new Date(iso).toLocaleDateString();
+}
 
 /** Starter prompts shown in the empty state — one tap to seed the composer. */
 const SUGGESTIONS = [
@@ -80,6 +97,16 @@ export interface LlmPanelProps {
   vaultRelToAbs?: (rel: string) => string;
   /** Absolute vault root, for agent mode's working directory. */
   vaultRoot?: string | null;
+  /** Settings → AI Chat → "Save chat history". Off = chats are never written to the vault. */
+  saveHistory?: boolean;
+  /** Anonymous (temporary) chat: this conversation is never saved, whatever `saveHistory` says. */
+  anonymous?: boolean;
+  onAnonymousChange?: (anonymous: boolean) => void;
+  /** Id of the saved chat this conversation continues (null = a new, not-yet-saved one). */
+  chatId?: string | null;
+  onChatIdChange?: (id: string | null) => void;
+  /** Mirrors the composer's provider for the parent, which saves it alongside the chat. */
+  providerRef?: React.MutableRefObject<ProviderId>;
   /** Saved chat defaults (Settings → AI Chat) each new conversation starts from. */
   defaults?: {
     provider: ProviderId;
@@ -101,6 +128,12 @@ export function LlmPanel({
   vaultRelToAbs,
   vaultRoot,
   defaults,
+  saveHistory = false,
+  anonymous = false,
+  onAnonymousChange,
+  chatId = null,
+  onChatIdChange,
+  providerRef,
 }: LlmPanelProps) {
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   // Seed from saved defaults; the providers probe below still upgrades to the first ready provider
@@ -121,6 +154,12 @@ export function LlmPanel({
   // `[[` autocomplete state.
   const [linkItems, setLinkItems] = useState<LinkItem[] | null>(null);
   const [linkSel, setLinkSel] = useState(0);
+
+  // Saved-chats menu in the header.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<ChatSummary[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const headRef = useRef<HTMLDivElement>(null);
 
   const runIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -364,7 +403,82 @@ export function LlmPanel({
     if (busy) return;
     sessionRef.current = undefined;
     setTurns([]);
-  }, [busy, setTurns, sessionRef]);
+    onChatIdChange?.(null);
+  }, [busy, setTurns, sessionRef, onChatIdChange]);
+
+  useEffect(() => {
+    if (providerRef) providerRef.current = provider;
+  }, [provider, providerRef]);
+
+  // Switching anonymous on or off always starts a fresh conversation, so an anonymous exchange is
+  // never written later and a saved chat never silently turns anonymous.
+  const toggleAnonymous = useCallback(() => {
+    if (busy) return;
+    sessionRef.current = undefined;
+    setTurns([]);
+    onChatIdChange?.(null);
+    onAnonymousChange?.(!anonymous);
+  }, [busy, anonymous, sessionRef, setTurns, onChatIdChange, onAnonymousChange]);
+
+  const openHistory = useCallback(() => {
+    if (historyOpen) {
+      setHistoryOpen(false);
+      return;
+    }
+    setHistoryOpen(true);
+    setHistory(null);
+    setHistoryError(null);
+    listChats()
+      .then(setHistory)
+      .catch((e) => setHistoryError(String(e)));
+  }, [historyOpen]);
+
+  const resumeChat = useCallback(
+    async (id: string) => {
+      if (busy) return;
+      const chat = await loadChat(id);
+      if (!chat) {
+        setHistoryError("This chat couldn’t be read — it may have been deleted.");
+        return;
+      }
+      setTurns(chat.turns);
+      sessionRef.current = chat.sessionId;
+      if (chat.provider in PROVIDER_LABEL) setProvider(chat.provider);
+      onAnonymousChange?.(false);
+      onChatIdChange?.(chat.id);
+      setHistoryOpen(false);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [busy, setTurns, sessionRef, onAnonymousChange, onChatIdChange]
+  );
+
+  const removeChat = useCallback(
+    async (id: string) => {
+      await deleteChat(id);
+      setHistory((h) => (h ? h.filter((c) => c.id !== id) : h));
+      // Deleting the chat that's open keeps the transcript on screen but stops it re-saving
+      // under the deleted id; the next message saves it as a new chat.
+      if (id === chatId) onChatIdChange?.(null);
+    },
+    [chatId, onChatIdChange]
+  );
+
+  // Close the history menu on an outside click or Escape.
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!headRef.current?.contains(e.target as Node)) setHistoryOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHistoryOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [historyOpen]);
 
   /** Insert a `[[ref]]` to the active page (quick "attach current note" affordance). */
   const refCurrent = useCallback(() => {
@@ -420,27 +534,91 @@ export function LlmPanel({
 
   return (
     <div className="llm-panel">
-      <div className="llm-panel-head">
+      <div className="llm-panel-head" ref={headRef}>
         <span className="llm-head-brand">
-          <Robot size={16} weight="duotone" />
-          <span className="llm-head-title">AI Chat</span>
+          {anonymous ? <Detective size={16} weight="duotone" /> : <Robot size={16} weight="duotone" />}
+          <span className="llm-head-title">{anonymous ? "Anonymous chat" : "AI Chat"}</span>
         </span>
         <div className="llm-panel-head-actions">
           <button
+            className={`llm-icon-btn${historyOpen ? " active" : ""}`}
+            title="Chat history"
+            aria-label="Chat history"
+            aria-expanded={historyOpen}
+            onClick={openHistory}
+            disabled={busy}
+          >
+            <ClockCounterClockwise size={18} />
+          </button>
+          <button
+            className={`llm-icon-btn${anonymous ? " active" : ""}`}
+            title={anonymous ? "Leave anonymous chat" : "Anonymous chat (not saved)"}
+            aria-label={anonymous ? "Leave anonymous chat" : "Start an anonymous chat"}
+            aria-pressed={anonymous}
+            onClick={toggleAnonymous}
+            disabled={busy}
+          >
+            <Detective size={18} />
+          </button>
+          <button
             className="llm-icon-btn"
             title="New conversation"
+            aria-label="New conversation"
             onClick={reset}
             disabled={busy || turns.length === 0}
           >
             <Broom size={18} />
           </button>
           {onClose && (
-            <button className="llm-icon-btn" title="Close" onClick={onClose}>
+            <button className="llm-icon-btn" title="Close" aria-label="Close AI chat" onClick={onClose}>
               <X size={18} />
             </button>
           )}
         </div>
+        {historyOpen && (
+          <div className="llm-history" role="dialog" aria-label="Chat history">
+            <div className="llm-pop-group">Recent chats</div>
+            {!saveHistory && (
+              <div className="llm-history-note">
+                Saving is off — new chats aren’t kept. Turn it on in Settings → AI Chat.
+              </div>
+            )}
+            {historyError ? (
+              <div className="llm-history-note">{historyError}</div>
+            ) : history === null ? (
+              <div className="llm-history-note">Loading…</div>
+            ) : history.length === 0 ? (
+              <div className="llm-history-note">No saved chats yet.</div>
+            ) : (
+              <ul className="llm-history-list">
+                {history.map((c) => (
+                  <li key={c.id} className={`llm-history-row${c.id === chatId ? " current" : ""}`}>
+                    <button className="llm-history-open" onClick={() => void resumeChat(c.id)} title={c.title}>
+                      <span className="llm-history-title">{c.title}</span>
+                      <span className="llm-history-meta">
+                        {PROVIDER_LABEL[c.provider] ?? c.provider} · {c.count} messages · {timeAgo(c.updated)}
+                      </span>
+                    </button>
+                    <button
+                      className="llm-icon-btn llm-history-del"
+                      title="Delete chat"
+                      aria-label={`Delete chat “${c.title}”`}
+                      onClick={() => void removeChat(c.id)}
+                    >
+                      <Trash size={15} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
+      {anonymous && (
+        <div className="llm-anon-banner" role="status">
+          <Detective size={14} weight="duotone" /> Anonymous chat — this conversation won’t be saved.
+        </div>
+      )}
 
       <div className="llm-transcript" ref={scrollRef}>
         {turns.length === 0 ? (
