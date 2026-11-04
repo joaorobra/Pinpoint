@@ -1,6 +1,6 @@
 import { ArrowsClockwise, Warning, Flag } from "@phosphor-icons/react";
 import { formatDate, parseISODate } from "../dateformat";
-import { inlineMd } from "../markdown";
+import { inlineMd, stripTaskMeta } from "../markdown";
 
 /** Display label + ordering weight for a priority level. Higher weight = more urgent (sorts first). */
 export const PRIORITY_META: Record<string, { label: string; weight: number }> = {
@@ -151,6 +151,7 @@ export default function TaskList({ tasks, dateFormat, onOpen, onOpenName, onTogg
               disabled={t.contextOnly}
               tabIndex={interactive ? 0 : -1}
               title={interactive ? "Toggle done" : undefined}
+              aria-label={`${t.done ? "Mark not done" : "Mark done"}: ${stripTaskMeta(t.text) || "untitled task"}`}
             />
             <TaskText
               text={t.text}

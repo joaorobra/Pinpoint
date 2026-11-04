@@ -316,7 +316,7 @@ export default function QueryHelper({ top, initialDsl, currentPath, onInsert, on
               className="add-filter"
               onClick={() => set({ filters: [...b.filters, { field: "", op: "=", value: "" }] })}
             >
-              + add filter
+              + Add filter
             </button>
           </div>
 

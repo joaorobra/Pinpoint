@@ -198,7 +198,17 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
     if (e.key === "Escape") {
       e.preventDefault();
       cancel();
-    } else if (e.key === "Enter" && req.kind !== "prompt") {
+    } else if (
+      e.key === "Enter" &&
+      req.kind !== "prompt" &&
+      req.kind !== "password" &&
+      req.kind !== "choose" &&
+      !(e.target instanceof HTMLButtonElement) &&
+      !e.nativeEvent.isComposing
+    ) {
+      // Enter confirms only when focus isn't on a button: a focused button (Cancel, a choice) must
+      // activate itself, or Enter on "Cancel" would run the destructive confirm instead. Prompt and
+      // password fields handle Enter themselves; `choose` resolves only through its buttons.
       e.preventDefault();
       accept();
     }
@@ -234,7 +244,7 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
             placeholder={req.opts.placeholder}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 accept();
               }
@@ -260,7 +270,7 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
                     if (pwError) setPwError(null); // clear stale error as the user types
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                       e.preventDefault();
                       accept();
                     }
@@ -268,7 +278,7 @@ function DialogView({ req, onDone }: { req: Request; onDone: () => void }) {
                 />
               </label>
             ))}
-            {pwError && <p className="dialog-password-error">{pwError}</p>}
+            {pwError && <p className="dialog-password-error" role="alert">{pwError}</p>}
           </div>
         )}
 

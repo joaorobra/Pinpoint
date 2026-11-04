@@ -265,13 +265,18 @@ function TitleCellInput({ title, onRename }: { title: string; onRename: (v: stri
         autoFocus
         onBlur={(e) => { onRename(e.target.value); setEditing(false); }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") { onRename((e.target as HTMLInputElement).value); setEditing(false); }
+          if (e.key === "Enter" && !e.nativeEvent.isComposing) { onRename((e.target as HTMLInputElement).value); setEditing(false); }
           if (e.key === "Escape") setEditing(false);
         }}
       />
     );
   }
-  return <span className="db-title-text" onClick={() => setEditing(true)}>{title || <span className="db-empty">Untitled</span>}</span>;
+  return (
+    <span className="db-title-text" role="button" tabIndex={0} title="Rename" onClick={() => setEditing(true)}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setEditing(true); } }}>
+      {title || <span className="db-empty">Untitled</span>}
+    </span>
+  );
 }
 
 function TextCell({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -335,7 +340,8 @@ function CurrencyCell({ value, currency, onChange }: { value: unknown; currency:
     );
   }
   return (
-    <div className="db-currency-display" onClick={() => setEditing(true)}>
+    <div className="db-currency-display" role="button" tabIndex={0} onClick={() => setEditing(true)}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setEditing(true); } }}>
       {formatted || <span className="db-empty">—</span>}
     </div>
   );

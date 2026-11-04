@@ -353,7 +353,8 @@ export default function SettingsPanel({ settings, onChange, onClose, templates =
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      // A nested dropdown/popover that handled this Escape (it preventDefaults) closes itself only.
+      if (e.key === "Escape" && !e.defaultPrevented) {
         e.preventDefault();
         onClose();
       }

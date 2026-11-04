@@ -10,6 +10,7 @@
 // row to choose the destination, and a live breadcrumb shows exactly where the item will land.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import {
   FileText,
   Folder,
@@ -65,6 +66,9 @@ export default function CreateDialog({ req, onSubmit, onCancel }: Props) {
     return out;
   });
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Declared before the autofocus effect so it records the trigger as the element to return to.
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -95,7 +99,8 @@ export default function CreateDialog({ req, onSubmit, onCancel }: Props) {
     if (e.key === "Escape") {
       e.preventDefault();
       onCancel();
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement) && !e.nativeEvent.isComposing) {
+      // A focused button (a folder row, Cancel) activates itself; Enter elsewhere creates.
       e.preventDefault();
       submit();
     }
@@ -121,6 +126,15 @@ export default function CreateDialog({ req, onSubmit, onCancel }: Props) {
           disabled={!selectable}
           onClick={() => selectable && setParent(node.rel_path)}
           onDoubleClick={() => hasChildren && toggle(node.rel_path)}
+          aria-expanded={hasChildren ? isOpen : undefined}
+          onKeyDown={(e) => {
+            // → / ← open and close a folder row from the keyboard (the caret is mouse-only).
+            if (!hasChildren) return;
+            if ((e.key === "ArrowRight" && !isOpen) || (e.key === "ArrowLeft" && isOpen)) {
+              e.preventDefault();
+              toggle(node.rel_path);
+            }
+          }}
         >
           <span
             className={`cd-caret${hasChildren ? "" : " is-empty"}${isOpen ? " is-open" : ""}`}
@@ -143,6 +157,7 @@ export default function CreateDialog({ req, onSubmit, onCancel }: Props) {
   return (
     <div className="modal-backdrop" onMouseDown={onCancel} onKeyDown={onKeyDown}>
       <div
+        ref={panelRef}
         className="modal create-dialog"
         role="dialog"
         aria-modal="true"

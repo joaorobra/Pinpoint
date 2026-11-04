@@ -5,7 +5,7 @@
 //
 //   toast.show({ message: "Moved to Trash", action: { label: "Undo", run: () => restore() } });
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowUUpLeft } from "@phosphor-icons/react";
 
 export type ToastAction = { label: string; run: () => void };
@@ -47,7 +47,8 @@ export function ToastHost() {
     () => items,
     () => items
   );
-  if (list.length === 0) return null;
+  // The live region stays mounted even when empty: screen readers only announce content that is
+  // added to a region that already existed, so mounting it together with its first toast is missed.
   return (
     <div className="toast-host" role="status" aria-live="polite">
       {list.map((t) => (
@@ -58,15 +59,28 @@ export function ToastHost() {
 }
 
 function ToastView({ toast: t }: { toast: Toast }) {
+  // Pause the countdown while the pointer or keyboard focus is on the toast, so there's time to
+  // reach its action (e.g. Undo). Toasts with an action also get a longer default.
+  const [paused, setPaused] = useState(false);
+  const remaining = useRef(t.durationMs ?? (t.action ? 8000 : 5000));
   useEffect(() => {
-    const ms = t.durationMs ?? 5000;
-    if (ms <= 0) return;
-    const timer = setTimeout(() => dismiss(t.id), ms);
-    return () => clearTimeout(timer);
-  }, [t.id, t.durationMs]);
+    if (paused || remaining.current <= 0) return;
+    const started = Date.now();
+    const timer = setTimeout(() => dismiss(t.id), remaining.current);
+    return () => {
+      clearTimeout(timer);
+      remaining.current -= Date.now() - started;
+    };
+  }, [t.id, paused]);
 
   return (
-    <div className="toast">
+    <div
+      className="toast"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocus={() => setPaused(true)}
+      onBlur={() => setPaused(false)}
+    >
       <span className="toast-message">{t.message}</span>
       {t.action && (
         <button
@@ -76,7 +90,7 @@ function ToastView({ toast: t }: { toast: Toast }) {
             dismiss(t.id);
           }}
         >
-          <ArrowUUpLeft size={14} weight="bold" />
+          {/^undo\b/i.test(t.action.label) && <ArrowUUpLeft size={14} weight="bold" />}
           {t.action.label}
         </button>
       )}

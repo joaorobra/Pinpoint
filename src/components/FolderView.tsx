@@ -104,11 +104,21 @@ export default function FolderView({
     );
   };
 
+  // The card is a div with button semantics, not a <button>: it contains the icon <button>, and a
+  // button nested in a button is invalid HTML (browsers split them apart and clicks misfire).
   const card = (child: TreeNode) => (
-    <button
+    <div
       key={child.rel_path}
       className="folder-card"
+      role="button"
+      tabIndex={0}
       onClick={() => onOpenNode(child)}
+      onKeyDown={(e) => {
+        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onOpenNode(child);
+        }
+      }}
       title={child.name}
     >
       <button
@@ -127,7 +137,7 @@ export default function FolderView({
         <span className="folder-card-name">{child.name.replace(/\.md$/i, "")}</span>
         <span className="folder-card-sub">{subtitle(child)}</span>
       </span>
-    </button>
+    </div>
   );
 
   return (

@@ -180,12 +180,13 @@ function MenuList({ items, onClose }: { items: MenuEntry[]; onClose: () => void 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (openSub >= 0) {
-        if (e.key === "ArrowLeft") { e.preventDefault(); setOpenSub(-1); }
+        if (e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); setOpenSub(-1); }
         return; // the open flyout's MenuList handles the rest
       }
       if (!selectable.length) return;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
+        e.stopPropagation();
         const dir = e.key === "ArrowDown" ? 1 : -1;
         setActive((cur) => {
           const at = selectable.indexOf(cur);
@@ -196,18 +197,21 @@ function MenuList({ items, onClose }: { items: MenuEntry[]; onClose: () => void 
         const it = items[active];
         if (!it || isSection(it)) return;
         e.preventDefault();
+        e.stopPropagation();
         if (it.submenu) setOpenSub(active);
         else run(it);
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase + stopPropagation: the menu handles its keys BEFORE whatever still holds focus
+    // (e.g. the editor behind a right-click menu), so Enter/arrows don't also edit the document.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [openSub, active, items, selectable]);
 
   useEffect(() => () => cancelClose(), []);
 
   return (
-    <div className="ctx-list" ref={listRef}>
+    <div className="ctx-list" ref={listRef} role="menu">
       {items.map((it, i) => {
         if (isSection(it)) {
           return <div key={i} className="ctx-section-label">{it.section}</div>;
@@ -228,6 +232,7 @@ function MenuList({ items, onClose }: { items: MenuEntry[]; onClose: () => void 
           >
             {it.separator && <div className="ctx-sep" />}
             <button
+              role="menuitem"
               className={`ctx-item${it.danger ? " danger" : ""}${it.active ? " on" : ""}${i === active ? " hl" : ""}${isOpen ? " sub-open" : ""}${it.className ? ` ${it.className}` : ""}`}
               disabled={it.disabled}
               aria-haspopup={hasSub || undefined}

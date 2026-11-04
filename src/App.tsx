@@ -41,6 +41,7 @@ import { useViewport } from "./hooks/useViewport";
 import { useSwipeNav } from "./hooks/useSwipeNav";
 import { haptic } from "./lib/haptics";
 import { uiZoom } from "./lib/zoom";
+import { shortcutLabel } from "./lib/keys";
 import Breadcrumb from "./components/Breadcrumb";
 import MobileNavbar, { type FolderOption } from "./components/MobileNavbar";
 import PathBreadcrumb from "./components/PathBreadcrumb";
@@ -335,6 +336,8 @@ export default function App() {
   // Whether the "?" keyboard-shortcuts cheat sheet is open.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const saveTimer = useRef<number | null>(null);
+  // The debounced save waiting in `saveTimer`, so it can be flushed early (see flushSave).
+  const pendingSave = useRef<(() => Promise<void>) | null>(null);
   // Live mirrors of the open page's path / body / dirty flag. The "vault-changed" watcher is
   // registered once and must read the CURRENT values without re-subscribing on every keystroke,
   // so it reads these refs instead of closing over stale state.
@@ -414,7 +417,19 @@ export default function App() {
   const [mobileDrawer, setMobileDrawer] = useState<"left" | "right" | null>(null);
   // Effective visibility: the mobile drawer on a phone, the persisted flag on desktop.
   const showLeft = vp.isMobile ? mobileDrawer === "left" : leftOpen;
-  const showRight = vp.isMobile ? mobileDrawer === "right" : rightOpen;
+  // On a narrow desktop window the right panel steps aside so the editor keeps a usable width,
+  // without touching the persisted preference: widen the window and it comes back. Toggling it on
+  // while it doesn't fit pins it for the session (the user asked for it explicitly).
+  const EDITOR_MIN = 520;
+  const [rightPinned, setRightPinned] = useState(false);
+  const rightFits =
+    vp.width / uiZoom() -
+      (leftOpen ? leftWidth + 6 : 0) -
+      (llmOpen ? chatWidth + 6 : 0) -
+      (rightWidth + 6) >=
+    EDITOR_MIN;
+  const rightDocked = rightOpen && (rightFits || rightPinned);
+  const showRight = vp.isMobile ? mobileDrawer === "right" : rightDocked;
 
   const toggleLeft = useCallback(() => {
     if (vp.isMobile) { setMobileDrawer((d) => (d === "left" ? null : "left")); return; }
@@ -422,8 +437,11 @@ export default function App() {
   }, [vp.isMobile]);
   const toggleRight = useCallback(() => {
     if (vp.isMobile) { setMobileDrawer((d) => (d === "right" ? null : "right")); return; }
-    setRightOpen((v) => (localStorage.setItem("pp.rightOpen", v ? "0" : "1"), !v));
-  }, [vp.isMobile]);
+    const next = !rightDocked;
+    localStorage.setItem("pp.rightOpen", next ? "1" : "0");
+    setRightOpen(next);
+    setRightPinned(next && !rightFits);
+  }, [vp.isMobile, rightDocked, rightFits]);
 
   // Tapping the scrim (or selecting an item) dismisses whichever drawer is open on mobile.
   const closeDrawers = useCallback(() => { haptic("tap"); setMobileDrawer(null); }, []);
@@ -808,6 +826,7 @@ export default function App() {
   // Return to the Start screen to pick a different vault. The open document state is
   // cleared so nothing from the old vault leaks into the next one.
   const switchVault = useCallback(() => {
+    flushSave();
     setTree(null);
     setVaultName("");
     vaultIdRef.current = null;
@@ -1106,6 +1125,30 @@ export default function App() {
     [openDocs, activePath, activateDoc]
   );
 
+  // Keep the tree's highlight on the open document when it changes by any route other than a tree
+  // click (tabs, back/forward, palette, links). A deliberate multi-selection is left alone.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size > 1) return prev;
+      if (!activePath) return prev.size ? new Set() : prev;
+      return prev.has(activePath) ? prev : new Set([activePath]);
+    });
+  }, [activePath]);
+
+  // A newly opened document starts at its top. The scroll container is shared by every page, so
+  // without this the next page inherited the previous one's scroll offset.
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0 });
+  }, [activePath]);
+
+  // Keep the active tab visible in the tab strip, which scrolls sideways once tabs overflow.
+  const tabsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = tabsRef.current?.querySelector<HTMLElement>(".doc-tab.active");
+    el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activePath, openDocs.length, tab]);
+
   // Apply a tree-row click to the multi-selection set.
   // - plain click: selection becomes just this row (and the row opens, handled in FileTree)
   // - ctrl/cmd click: toggle this row in/out, keeping the rest
@@ -1292,15 +1335,49 @@ export default function App() {
       setBody(md);
       setDirty(true);
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(async () => {
-        if (!activePath) return;
-        await api.writePage(activePath, frontmatter, md);
-        setDirty(false);
-        setTaskRefresh((k) => k + 1);
+      const path = activePath;
+      if (!path) return;
+      const save = async () => {
+        pendingSave.current = null;
+        try {
+          await api.writePage(path, frontmatter, md);
+          setDirty(false);
+          setTaskRefresh((k) => k + 1);
+        } catch (e) {
+          // Keep the "unsaved" marker and tell the user — a silent failure loses their writing.
+          const name = (path.split("/").pop() ?? path).replace(/\.md$/i, "");
+          toast.show({ message: `Couldn’t save “${name}” — your changes are still here. ${String(e)}`, durationMs: 8000 });
+        }
+      };
+      pendingSave.current = save;
+      saveTimer.current = window.setTimeout(() => {
+        // Clear the handle first: the vault watcher skips reloads while a save is pending, so a
+        // stale non-null handle would block every external/agent edit from ever reloading.
+        saveTimer.current = null;
+        void save();
       }, 600);
     },
     [activePath, frontmatter]
   );
+
+  // Write any debounced edit immediately (window close, tab hide, vault switch) so the last
+  // ~600 ms of typing is never dropped.
+  const flushSave = useCallback(() => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const save = pendingSave.current;
+    if (save) void save();
+  }, []);
+  useEffect(() => {
+    window.addEventListener("pagehide", flushSave);
+    window.addEventListener("beforeunload", flushSave);
+    return () => {
+      window.removeEventListener("pagehide", flushSave);
+      window.removeEventListener("beforeunload", flushSave);
+    };
+  }, [flushSave]);
 
   // Create a page. When `name` is omitted we prompt (sidebar ＋ button); when provided (the editor's
   // `/page` command) we skip the prompt. Returns the created page's display name so the caller can
@@ -2149,7 +2226,7 @@ export default function App() {
         const ok = await dialogs.confirm({
           title: `Permanently delete this ${what}?`,
           message: `${node.rel_path}\n\nThis can't be undone.`,
-          confirmLabel: "Delete forever",
+          confirmLabel: "Delete permanently",
           danger: true,
         });
         if (!ok) return;
@@ -2243,19 +2320,24 @@ export default function App() {
         await dialogs.alert({ title: "Unlock failed", message: String(e) });
         return;
       }
-      const got = await dialogs.password({
-        title: `Unlock “${node.name}”`,
-        message: status.hint ? `Hint: ${status.hint}` : undefined,
-        fields: [{ key: "password", label: "Password", placeholder: "Enter password" }],
-        confirmLabel: "Unlock",
-      });
-      if (!got) return;
-      try {
-        await api.unlockVault(node.rel_path, got.password);
-      } catch (e) {
-        // The Rust side returns "wrong password" for a bad key; surface it plainly.
-        await dialogs.alert({ title: "Couldn't unlock", message: String(e) });
-        return;
+      // A wrong password re-asks right away with the error shown, instead of closing the prompt and
+      // making the user find "Unlock" in the context menu again.
+      let error: string | null = null;
+      for (;;) {
+        const got = await dialogs.password({
+          title: `Unlock “${node.name}”`,
+          message: [error, status.hint ? `Hint: ${status.hint}` : null].filter(Boolean).join("\n") || undefined,
+          fields: [{ key: "password", label: "Password", placeholder: "Enter password" }],
+          confirmLabel: "Unlock",
+        });
+        if (!got) return;
+        try {
+          await api.unlockVault(node.rel_path, got.password);
+          break;
+        } catch (e) {
+          // The Rust side returns "wrong password" for a bad key; surface it plainly.
+          error = `⚠ Couldn’t unlock: ${String(e)}. Try again.`;
+        }
       }
       await refreshTree();
       setTaskRefresh((k) => k + 1);
@@ -2298,7 +2380,7 @@ export default function App() {
     try {
       await api.changeLockPassword(node.rel_path, got.old, got.new);
     } catch (e) {
-      await dialogs.alert({ title: "Couldn't change password", message: String(e) });
+      await dialogs.alert({ title: "Couldn’t change the password", message: String(e) });
       return;
     }
     toast.show({ message: "Password changed" });
@@ -2324,7 +2406,7 @@ export default function App() {
         const ok = await dialogs.confirm({
           title: `Permanently delete ${roots.length} item${roots.length === 1 ? "" : "s"}?`,
           message: `${roots.join("\n")}\n\nThis can't be undone.`,
-          confirmLabel: "Delete forever",
+          confirmLabel: "Delete permanently",
           danger: true,
         });
         if (!ok) return;
@@ -2691,10 +2773,16 @@ export default function App() {
           t.tagName === "TEXTAREA" ||
           t.tagName === "SELECT" ||
           t.isContentEditable);
+      // A modal/menu is open, or focus sits on an interactive control: single-key shortcuts must not
+      // fire "through" it (Backspace on a Settings button used to trash the page behind the modal).
+      const overlayOpen = !!document.querySelector(
+        '.modal-backdrop, .palette-backdrop, [aria-modal="true"], [role="dialog"], [role="menu"]'
+      );
+      const onControl = !!t?.closest?.('button, a[href], [role="tab"], [role="listbox"], [role="option"]');
 
       // Delete / Shift+Delete act on the explorer selection (or the open page) when not typing.
       // Plain Delete → Trash; Shift+Delete → permanent.
-      if (!typing && (e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (!typing && !overlayOpen && !onControl && (e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const targets = selected.size ? [...selected] : activePath ? [activePath] : [];
         if (!targets.length) return;
         e.preventDefault();
@@ -2710,7 +2798,7 @@ export default function App() {
       }
 
       // "?" toggles the keyboard-shortcuts cheat sheet (no modifier; "?" is Shift+/).
-      if (!typing && e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (!typing && (!overlayOpen || shortcutsOpen) && e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setShortcutsOpen((open) => !open);
         return;
@@ -2763,7 +2851,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tree, newPage, changeZoom, selected, activePath, deleteMany, navHistory, closeTab, setShortcutsOpen, toggleLlm]);
+  }, [tree, newPage, changeZoom, selected, activePath, deleteMany, navHistory, closeTab, setShortcutsOpen, shortcutsOpen, toggleLlm]);
 
   // Keep the sidebar Trash badge count in sync: refresh on vault open and after any trash change.
   useEffect(() => {
@@ -2774,7 +2862,7 @@ export default function App() {
   // Global actions offered by the command palette, alongside page jumps.
   const paletteActions = useMemo<PaletteAction[]>(
     () => [
-      { id: "new-page", label: "New page", hint: "Ctrl+N", icon: Plus, run: () => newPage() },
+      { id: "new-page", label: "New page", hint: isTauri() ? shortcutLabel("mod+N") : undefined, icon: Plus, run: () => newPage() },
       {
         id: "reindex",
         label: "Re-index vault",
@@ -2784,8 +2872,9 @@ export default function App() {
       },
       { id: "settings", label: "Open settings", hint: "Appearance & more", icon: GearSix, run: () => setShowSettings(true) },
       { id: "switch-vault", label: "Switch vault", hint: "Back to start", icon: FolderOpen, run: switchVault },
-      { id: "tab-tasks", label: "Go to Tasks", icon: CheckCircle, run: () => setTab("tasks") },
-      { id: "tab-query", label: "Go to Query", icon: FileText, run: () => setTab("query") },
+      { id: "tab-tasks", label: "Go to Tasks", hint: "All tasks across the vault", icon: CheckCircle, run: () => setTab("tasks") },
+      { id: "tab-query", label: "Go to Query", hint: "Build a table or list from your pages", icon: FileText, run: () => setTab("query") },
+      { id: "tab-tags", label: "Go to Tags", hint: "Browse pages by #tag", icon: Tag, run: () => setTab("tags") },
       { id: "tab-trash", label: "Open Trash", hint: "Restore deleted items", icon: Trash, run: () => setTab("trash") },
     ],
     [newPage, switchVault, doReindex]
@@ -2807,7 +2896,8 @@ export default function App() {
   }, [tab]);
 
   const headerStatus = useMemo(() => {
-    if (!activePath || activeAsset) return null;
+    // Only pages have an editable body with a save state; folders/databases/assets don't.
+    if (!activePath || activeAsset || activeDb || activeFolder || tab !== "editor") return null;
     return dirty ? (
       <span className="status-dot">
         <CircleNotch size={13} weight="bold" /> unsaved
@@ -2817,7 +2907,7 @@ export default function App() {
         <CheckCircle size={13} weight="fill" /> saved
       </span>
     );
-  }, [activePath, activeAsset, dirty]);
+  }, [activePath, activeAsset, activeDb, activeFolder, tab, dirty]);
 
   // Back/forward availability, recomputed whenever the history cursor/stack changes (histTick).
   const canBack = useMemo(() => histIdx.current > 0, [histTick]);
@@ -2857,8 +2947,8 @@ export default function App() {
         // drawers (positioned by CSS) instead of grid tracks, so they no longer reserve space.
         gridTemplateColumns: vp.isMobile
           ? "1fr"
-          : `${leftOpen ? `${leftWidth}px 6px` : "0px 0px"} 1fr ${
-              rightOpen ? `6px ${rightWidth}px` : "0px 0px"
+          : `${leftOpen ? `${leftWidth}px 6px` : "0px 0px"} minmax(0, 1fr) ${
+              rightDocked ? `6px ${rightWidth}px` : "0px 0px"
             } ${llmOpen ? `6px ${chatWidth}px` : "0px 0px"}`,
       }}
     >
@@ -3033,7 +3123,7 @@ export default function App() {
                 </button>
               </Tooltip>
             )}
-            <Tooltip label="Back (Alt+←)">
+            <Tooltip label={`Back (${shortcutLabel("Alt+←")})`}>
               <button
                 className="nav-arrow"
                 disabled={!canBack}
@@ -3043,7 +3133,7 @@ export default function App() {
                 <CaretLeft size={15} weight="bold" />
               </button>
             </Tooltip>
-            <Tooltip label="Forward (Alt+→)">
+            <Tooltip label={`Forward (${shortcutLabel("Alt+→")})`}>
               <button
                 className="nav-arrow"
                 disabled={!canForward}
@@ -3055,18 +3145,49 @@ export default function App() {
             </Tooltip>
           </div>
 
-          <div className="doc-tabs" role="tablist">
-            {openDocs.map((d) => {
+          <div
+            className="doc-tabs"
+            role="tablist"
+            ref={tabsRef}
+            onWheel={(e) => {
+              // A vertical wheel scrolls the (scrollbar-less) strip sideways, like a browser tab bar.
+              const el = e.currentTarget;
+              if (el.scrollWidth > el.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                el.scrollLeft += e.deltaY;
+              }
+            }}
+          >
+            {openDocs.map((d, i) => {
               const isActive = d.path === activePath && tab === "editor";
               const label = (d.path.split("/").pop() ?? d.path).replace(/\.md$/i, "");
+              // Roving tabindex: the active tab (or the first, when none is active) takes Tab focus.
+              const anyActive = tab === "editor" && openDocs.some((o) => o.path === activePath);
               return (
                 <div
                   key={d.path}
                   className={`doc-tab${isActive ? " active" : ""}`}
                   role="tab"
                   aria-selected={isActive}
-                  tabIndex={isActive ? 0 : -1}
+                  tabIndex={isActive || (!anyActive && i === 0) ? 0 : -1}
                   title={d.path}
+                  onKeyDown={(e) => {
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      if (tab !== "editor") setTab("editor");
+                      selectTab(d.path);
+                    } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                      e.preventDefault();
+                      const tabsEls = Array.from(
+                        e.currentTarget.parentElement?.querySelectorAll<HTMLElement>(".doc-tab") ?? []
+                      );
+                      const next = tabsEls[(i + (e.key === "ArrowRight" ? 1 : -1) + tabsEls.length) % tabsEls.length];
+                      next?.focus();
+                    } else if (e.key === "Delete") {
+                      e.preventDefault();
+                      closeTab(d.path);
+                    }
+                  }}
                   onMouseDown={(e) => {
                     // Middle-click closes, like a browser.
                     if (e.button === 1) {
@@ -3098,7 +3219,7 @@ export default function App() {
                   <span className="doc-tab-label">{label}</span>
                   <button
                     className="doc-tab-close"
-                    title="Close (Ctrl+W)"
+                    title={isTauri() ? `Close (${shortcutLabel("mod+W")})` : "Close"}
                     aria-label={`Close ${label}`}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -3140,11 +3261,11 @@ export default function App() {
                 <Tag size={15} weight="bold" />
               </button>
             </Tooltip>
-            <Tooltip label={rightOpen ? "Hide right panel" : "Show right panel"} side="left">
+            <Tooltip label={rightDocked ? "Hide right panel" : "Show right panel"} side="left">
               <button
-                className={`right-toggle${rightOpen ? " active" : ""}`}
+                className={`right-toggle${rightDocked ? " active" : ""}`}
                 onClick={toggleRight}
-                aria-label={rightOpen ? "Hide right panel" : "Show right panel"}
+                aria-label={rightDocked ? "Hide right panel" : "Show right panel"}
               >
                 <SidebarSimple size={15} weight="bold" style={{ transform: "scaleX(-1)" }} />
               </button>
@@ -3166,10 +3287,10 @@ export default function App() {
               dateFormat={settings.date_format}
             />
           )}
-          <span className="status">{headerStatus}</span>
+          {headerStatus && <span className="status">{headerStatus}</span>}
         </div>
 
-        <div className="content">
+        <div className="content" ref={contentRef}>
           <AnimatePresence mode="wait" initial={false}>
           <motion.div
             // Key on the *view identity*, not the document body: the tab plus which doc/db/asset is
@@ -3345,7 +3466,7 @@ export default function App() {
         </div>
       </main>
 
-      {rightOpen && !vp.isMobile && (
+      {rightDocked && !vp.isMobile && (
         <div className="resizer" onPointerDown={startResize("right")} title="Drag to resize" />
       )}
 
@@ -3359,7 +3480,7 @@ export default function App() {
       >
         <RightSidebar
           body={body}
-          hasPage={!!activePath && !activeAsset && tab === "editor"}
+          hasPage={!!activePath && !activeAsset && !activeDb && !activeFolder && tab === "editor"}
           onJumpToHeading={jumpToHeading}
           periodicFolder={settings.periodic_folder}
           dailyFormat={settings.periodic_label_format}

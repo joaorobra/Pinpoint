@@ -73,13 +73,13 @@ export default function Titlebar({ title, autoHide = false }: Props) {
         {title && <span className="titlebar-title">{title}</span>}
       </div>
       <div className="titlebar-controls">
-        <button className="tb-btn" aria-label="Minimize" title="Minimize" onClick={act((w) => w.minimize())}>
+        <button className="titlebar-btn" aria-label="Minimize" title="Minimize" onClick={act((w) => w.minimize())}>
           <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true">
             <rect x="1" y="5" width="9" height="1" fill="currentColor" />
           </svg>
         </button>
         <button
-          className="tb-btn"
+          className="titlebar-btn"
           aria-label={maximized ? "Restore" : "Maximize"}
           title={maximized ? "Restore" : "Maximize"}
           onClick={onMaximize}
@@ -95,7 +95,7 @@ export default function Titlebar({ title, autoHide = false }: Props) {
             </svg>
           )}
         </button>
-        <button className="tb-btn tb-close" aria-label="Close" title="Close" onClick={act((w) => w.close())}>
+        <button className="titlebar-btn titlebar-close" aria-label="Close" title="Close" onClick={act((w) => w.close())}>
           <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true">
             <path d="M1 1 L10 10 M10 1 L1 10" stroke="currentColor" strokeWidth="1.1" fill="none" />
           </svg>

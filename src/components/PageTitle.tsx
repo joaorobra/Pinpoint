@@ -69,7 +69,7 @@ export default function PageTitle({ title, icon, fallback, placeholder = "Untitl
           onChange={(e) => setDraft(e.target.value)}
           onBlur={commit}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
               e.preventDefault();
               commit();
             } else if (e.key === "Escape") {
@@ -86,7 +86,7 @@ export default function PageTitle({ title, icon, fallback, placeholder = "Untitl
           title="Click to rename"
           onClick={() => setEditing(true)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
               e.preventDefault();
               setEditing(true);
             }

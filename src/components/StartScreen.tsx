@@ -330,9 +330,6 @@ export default function StartScreen({
               </div>
             )}
 
-            <button className="link start-newhint" onClick={onOpenNew} disabled={busy}>
-              <Plus size={13} weight="bold" /> Connect a new folder
-            </button>
             <p className="muted small start-foot">
               Point it at any folder — including one synced by Google Drive, OneDrive, or Dropbox.
             </p>

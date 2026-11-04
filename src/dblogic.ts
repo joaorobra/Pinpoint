@@ -13,14 +13,60 @@ import type {
   DbDateRange,
   DbFilter,
   DbFilterOp,
+  DbOption,
+  DbSchema,
   DbSort,
 } from "./types";
+import { DB_OPTION_COLORS } from "./types";
 
 /** A row as the views consume it: the file path, its title, and its frontmatter field map. */
 export interface DbRow {
   rel_path: string;
   title: string;
   fields: Record<string, unknown>;
+}
+
+const COLUMN_TYPES: ReadonlySet<string> = new Set<DbColumnType>([
+  "title", "text", "number", "currency", "checkbox", "select", "multiselect",
+  "date", "datetime", "daterange", "created_time", "last_edited_time",
+]);
+
+/**
+ * Coerce whatever `.pinpoint-db.json` holds into a usable schema. Legacy schemas list
+ * `fields: [{ key, type, options: ["a", "b"] }]`; rows store the option *text*, so a string option
+ * becomes `{ id: text, label: text }` and existing cells still match. Unknown types fall back to text.
+ */
+export function normalizeDbSchema(raw: unknown, fallbackName: string): DbSchema {
+  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const name = typeof src.name === "string" && src.name ? src.name : fallbackName;
+  const rawCols = Array.isArray(src.columns) ? src.columns : Array.isArray(src.fields) ? src.fields : [];
+  const columns: DbColumn[] = [];
+  for (const c of rawCols as Record<string, unknown>[]) {
+    if (!c || typeof c !== "object") continue;
+    const id = String(c.id ?? c.key ?? "").trim();
+    if (!id) continue;
+    const type = (COLUMN_TYPES.has(String(c.type)) ? c.type : "text") as DbColumnType;
+    const col: DbColumn = {
+      ...(c as Partial<DbColumn>),
+      id,
+      name: typeof c.name === "string" && c.name ? c.name : id.charAt(0).toUpperCase() + id.slice(1),
+      type,
+    };
+    delete (col as unknown as Record<string, unknown>).key;
+    if (Array.isArray(c.options)) {
+      col.options = (c.options as unknown[]).map((o, i): DbOption => {
+        const color = DB_OPTION_COLORS[i % DB_OPTION_COLORS.length];
+        if (typeof o === "string") return { id: o, label: o, color };
+        const opt = o as Partial<DbOption>;
+        const label = String(opt.label ?? opt.id ?? "");
+        return { id: String(opt.id ?? label), label, color: opt.color ?? color };
+      });
+    }
+    columns.push(col);
+  }
+  // Keep any extra keys the app stores alongside (icon, views…), minus the legacy `fields` list.
+  const { fields: _legacy, ...rest } = src;
+  return { ...(rest as Partial<DbSchema>), name, columns };
 }
 
 /** Read a column's value from a row. The title column lives on `row.title`, not in `fields`. */

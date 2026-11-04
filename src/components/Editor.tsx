@@ -61,6 +61,7 @@ import { docToMarkdown, markdownToHtml } from "../markdown";
 import { formatDate } from "../dateformat";
 import { CURSOR_SENTINEL } from "../templates";
 import { uiZoom } from "../lib/zoom";
+import { shortcutLabel } from "../lib/keys";
 import type { Period } from "../periodic";
 
 /** A page the `/link` command can reference. */
@@ -1126,6 +1127,33 @@ const SmartReplace = Extension.create<SmartReplaceOptions>({
  * change, so the state always reflects the current children.
  */
 const subtaskRollupKey = new PluginKey("subtaskRollup");
+// Empty-document hint: while the page has no content, mark its single empty paragraph so CSS can
+// show a muted "Start writing…" prompt (and point at the slash menu). Purely a decoration — nothing
+// is written to the document or the markdown.
+const EmptyHint = Extension.create({
+  name: "emptyHint",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey("emptyHint"),
+        props: {
+          decorations: (state) => {
+            const { doc } = state;
+            const only = doc.childCount === 1 ? doc.firstChild : null;
+            if (!only || only.type.name !== "paragraph" || only.content.size > 0) return null;
+            return DecorationSet.create(doc, [
+              Decoration.node(0, only.nodeSize, {
+                class: "is-empty-hint",
+                "data-placeholder": "Start writing, or type / for blocks and commands…",
+              }),
+            ]);
+          },
+        },
+      }),
+    ];
+  },
+});
+
 const SubtaskRollup = Extension.create({
   name: "subtaskRollup",
   addProseMirrorPlugins() {
@@ -2451,6 +2479,7 @@ export default function Editor({
         TableHeader,
         TableCell,
         SubtaskRollup,
+        EmptyHint,
         CompletionStamp.configure({ getStamp: () => doneStampRef.current() }),
         TagPill.configure({ onOpenTag: (tag) => onOpenTagRef.current?.(tag) }),
         PriorityPill,
@@ -3036,13 +3065,13 @@ export default function Editor({
 
       // Top formatting cluster: compact B / I / S / code / link buttons (each shows its on-state).
       const formatRow: MenuFormatButton[] = [
-        { label: "Bold", icon: <TextB size={16} weight="bold" />, active: ed.isActive("bold"), shortcut: "Ctrl+B",
+        { label: "Bold", icon: <TextB size={16} weight="bold" />, active: ed.isActive("bold"), shortcut: shortcutLabel("mod+B"),
           onClick: () => ed.chain().focus().toggleBold().run() },
-        { label: "Italic", icon: <TextItalic size={16} />, active: ed.isActive("italic"), shortcut: "Ctrl+I",
+        { label: "Italic", icon: <TextItalic size={16} />, active: ed.isActive("italic"), shortcut: shortcutLabel("mod+I"),
           onClick: () => ed.chain().focus().toggleItalic().run() },
-        { label: "Strikethrough", icon: <TextStrikethrough size={16} />, active: ed.isActive("strike"), shortcut: "Ctrl+Shift+S",
+        { label: "Strikethrough", icon: <TextStrikethrough size={16} />, active: ed.isActive("strike"), shortcut: shortcutLabel("mod+Shift+S"),
           onClick: () => ed.chain().focus().toggleStrike().run() },
-        { label: "Inline code", icon: <Code size={16} />, active: ed.isActive("code"), shortcut: "Ctrl+E",
+        { label: "Inline code", icon: <Code size={16} />, active: ed.isActive("code"), shortcut: shortcutLabel("mod+E"),
           onClick: () => ed.chain().focus().toggleCode().run() },
         { label: "Link", icon: <LinkSimpleHorizontal size={16} />, active: ed.isActive("link"),
           onClick: async () => {

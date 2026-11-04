@@ -401,7 +401,7 @@ export function LlmPanel({
         setLinkSel((s) => (s - 1 + linkItems.length) % linkItems.length);
         return;
       }
-      if (e.key === "Enter" || e.key === "Tab") {
+      if (!e.nativeEvent.isComposing && (e.key === "Enter" || e.key === "Tab")) {
         e.preventDefault();
         pickLink(linkItems[linkSel]);
         return;
@@ -412,7 +412,7 @@ export function LlmPanel({
         return;
       }
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.nativeEvent.isComposing && !e.shiftKey) {
       e.preventDefault();
       send();
     }

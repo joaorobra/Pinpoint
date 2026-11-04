@@ -156,7 +156,9 @@ export default function Select({
       e.preventDefault();
       commit(active);
     } else if (e.key === "Escape") {
+      // preventDefault marks it handled so an enclosing modal (Settings) doesn't also close.
       e.preventDefault();
+      e.stopPropagation();
       setOpen(false);
     } else if (e.key === "Home") {
       e.preventDefault();

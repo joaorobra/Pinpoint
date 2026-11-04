@@ -2,7 +2,7 @@
 // per-column icons, per-view column visibility, and the in-header type/option/icon config menu.
 
 import { useCallback, useMemo, useState } from "react";
-import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check, ArrowSquareOut, FileText } from "@phosphor-icons/react";
+import { Plus, CaretDown, Trash, PencilSimple, Smiley, Check, ArrowSquareOut, FileText, X } from "@phosphor-icons/react";
 import type { DbAggregation, DbColumn, DbColumnType, DbOption, DbView, NodeIcon } from "../types";
 import { DB_OPTION_COLORS } from "../types";
 import type { DbRow } from "../dblogic";
@@ -130,8 +130,8 @@ export default function DbTableView({
                         onChange={(v) => onSetCell(row.rel_path, col.id, v)}
                         onRenameTitle={(v) => onRenameRow(row, v)} />
                       <div className="db-row-actions">
-                        <button title="Open page" onClick={() => onOpenRow(row.rel_path)}><ArrowSquareOut size={14} /></button>
-                        <button title="Delete row" className="danger" onClick={() => onDeleteRow(row)}><Trash size={14} /></button>
+                        <button title="Open page" aria-label={`Open ${row.title}`} onClick={() => onOpenRow(row.rel_path)}><ArrowSquareOut size={14} /></button>
+                        <button title="Delete row" aria-label={`Delete ${row.title}`} className="danger" onClick={() => onDeleteRow(row)}><Trash size={14} /></button>
                       </div>
                     </div>
                   ) : (
@@ -144,7 +144,18 @@ export default function DbTableView({
               <td className="db-cell db-cell-spacer" />
             </tr>
           ))}
-          <tr className="db-add-row" onClick={onAddRow}>
+          <tr
+            className="db-add-row"
+            onClick={onAddRow}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onAddRow();
+              }
+            }}
+          >
             <td colSpan={columns.length + 1}><Plus size={14} weight="bold" /> New row</td>
           </tr>
         </tbody>
@@ -423,17 +434,17 @@ function OptionEditor({ options, onChange }: { options: DbOption[]; onChange: (o
       <div className="db-col-menu-section">Options</div>
       {options.map((o) => (
         <div key={o.id} className="db-opt-row">
-          <input type="color" className="db-opt-color" value={o.color || "#7c5cff"}
+          <input type="color" className="db-opt-color" aria-label={`Color for ${o.label}`} value={o.color || "#7c5cff"}
             onChange={(e) => onChange(options.map((x) => (x.id === o.id ? { ...x, color: e.target.value } : x)))} />
-          <input className="db-opt-label" defaultValue={o.label}
+          <input className="db-opt-label" aria-label="Option name" defaultValue={o.label}
             onBlur={(e) => onChange(options.map((x) => (x.id === o.id ? { ...x, label: e.target.value.trim() || x.label } : x)))} />
-          <button className="db-opt-del" title="Remove" onClick={() => onChange(options.filter((x) => x.id !== o.id))}>✕</button>
+          <button className="db-opt-del" title="Remove option" aria-label={`Remove option ${o.label}`} onClick={() => onChange(options.filter((x) => x.id !== o.id))}><X size={11} weight="bold" /></button>
         </div>
       ))}
       <div className="db-opt-add">
-        <input className="db-opt-label" placeholder="Add option…" value={draft}
-          onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
-        <button className="db-opt-add-btn" onClick={add}><Plus size={12} weight="bold" /></button>
+        <input className="db-opt-label" placeholder="Add option…" aria-label="New option name" value={draft}
+          onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && add()} />
+        <button className="db-opt-add-btn" onClick={add} aria-label="Add option" title="Add option"><Plus size={12} weight="bold" /></button>
       </div>
     </div>
   );

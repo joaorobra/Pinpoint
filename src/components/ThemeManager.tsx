@@ -42,6 +42,7 @@ import {
 } from "../themes-store";
 import ColorPicker from "./ColorPicker";
 import Select, { type SelectGroup } from "./Select";
+import { dialogs } from "./Dialogs";
 
 type Mode = "dark" | "light";
 
@@ -293,6 +294,13 @@ export default function ThemeManager({ activeName, onSelect, fontGroups, baseTyp
   };
 
   const removeTheme = async (name: string) => {
+    const ok = await dialogs.confirm({
+      title: `Delete the “${name}” theme?`,
+      message: "Its file in the vault’s .themes folder is removed. This can’t be undone.",
+      confirmLabel: "Delete theme",
+      danger: true,
+    });
+    if (!ok) return;
     await deleteTheme(name);
     if (activeName === name) onSelect(""); // fall back to Default if the active one is gone
     await refresh();

@@ -496,7 +496,7 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
       .then(afterMutation)
       .catch((e) => {
         console.error(e);
-        toast.show({ message: "Couldn't change priority." });
+        toast.show({ message: "Couldn’t change the priority." });
       });
   };
 
@@ -524,7 +524,7 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
       });
     } catch (e) {
       console.error(e);
-      toast.show({ message: "Couldn't move the task." });
+      toast.show({ message: "Couldn’t move the task." });
     }
   };
 
@@ -575,18 +575,23 @@ export default function TasksView({ onOpen, onOpenName, refreshKey, dateFormat, 
     return [...s].sort();
   }, [allTasks]);
 
-  // Aggregate stats over the full (unfiltered) set — the summary always reflects everything.
+  // Aggregate stats over the full (unfiltered) set — the summary always reflects everything. Projected
+  // future occurrences of recurring tasks ("Show all recurring ahead") are a preview, not extra work,
+  // so they're left out: otherwise each recurring task adds ~8 phantom open tasks and the completion
+  // percentage swings whenever that display toggle is flipped.
   const stats = useMemo(() => {
     const today = startOfToday();
     let open = 0,
       done = 0,
-      overdue = 0;
+      overdue = 0,
+      total = 0;
     for (const t of allTasks) {
+      if (t.virtual) continue;
+      total++;
       if (t.done) done++;
       else open++;
       if (isOverdue(t, today)) overdue++;
     }
-    const total = allTasks.length;
     const pct = total ? Math.round((done / total) * 100) : 0;
     return { total, open, done, overdue, pct };
   }, [allTasks]);

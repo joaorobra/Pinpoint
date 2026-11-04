@@ -5,6 +5,20 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+// The most recent focus move, so a modal whose button `autoFocus`es itself during commit (before
+// this hook's effect runs) can still find what was focused before it opened: that's the
+// `relatedTarget` of the focusin that landed on the autofocused element.
+let lastFocusIn: { target: EventTarget | null; related: EventTarget | null } | null = null;
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "focusin",
+    (e) => {
+      lastFocusIn = { target: e.target, related: e.relatedTarget };
+    },
+    true
+  );
+}
+
 /**
  * Trap Tab focus within `ref` while `active`, and restore focus to whatever was focused before the
  * modal opened once it closes. Keeps keyboard users from tabbing out to the page behind a modal —
@@ -16,7 +30,13 @@ export function useFocusTrap(ref: RefObject<HTMLElement | null>, active = true):
     const root = ref.current;
     if (!root) return;
 
-    const previouslyFocused = document.activeElement as HTMLElement | null;
+    let previouslyFocused = document.activeElement as HTMLElement | null;
+    if (previouslyFocused && root.contains(previouslyFocused)) {
+      previouslyFocused =
+        lastFocusIn?.target === previouslyFocused && lastFocusIn.related instanceof HTMLElement
+          ? lastFocusIn.related
+          : null;
+    }
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Tab") return;

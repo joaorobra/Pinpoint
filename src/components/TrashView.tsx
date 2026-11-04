@@ -55,13 +55,19 @@ function parentLabel(orig: string): string {
 export default function TrashView({ refreshKey, onRestore, onChanged }: Props) {
   const [entries, setEntries] = useState<TrashEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
+    setLoadError(null);
     api
       .listTrash()
       .then(setEntries)
-      .catch(console.error)
+      .catch((err) => {
+        console.error(err);
+        // Don't fall through to "Trash is empty" — that would wrongly suggest the items are gone.
+        setLoadError(String(err));
+      })
       .finally(() => setLoading(false));
   };
 
@@ -71,14 +77,14 @@ export default function TrashView({ refreshKey, onRestore, onChanged }: Props) {
     const ok = await dialogs.confirm({
       title: `Permanently delete “${e.name}”?`,
       message: "This can't be undone.",
-      confirmLabel: "Delete forever",
+      confirmLabel: "Delete permanently",
       danger: true,
     });
     if (!ok) return;
     try {
       await api.purgeTrash(e.id);
     } catch (err) {
-      await dialogs.alert({ title: "Delete failed", message: String(err) });
+      await dialogs.alert({ title: "Couldn’t delete this item", message: String(err) });
       return;
     }
     load();
@@ -96,7 +102,7 @@ export default function TrashView({ refreshKey, onRestore, onChanged }: Props) {
     try {
       await api.emptyTrash();
     } catch (err) {
-      await dialogs.alert({ title: "Empty trash failed", message: String(err) });
+      await dialogs.alert({ title: "Couldn’t empty the Trash", message: String(err) });
       return;
     }
     load();
@@ -116,6 +122,11 @@ export default function TrashView({ refreshKey, onRestore, onChanged }: Props) {
 
       {loading ? (
         <p className="muted">Loading…</p>
+      ) : loadError ? (
+        <div className="trash-error" role="alert">
+          <p className="muted">Couldn’t read the Trash: {loadError}</p>
+          <button onClick={load}>Retry</button>
+        </div>
       ) : entries.length === 0 ? (
         <p className="muted">
           Trash is empty. Deleted files and folders land here and can be restored — until you empty it.

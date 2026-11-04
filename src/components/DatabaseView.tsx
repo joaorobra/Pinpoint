@@ -260,7 +260,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
   }, [addRow, onApplyTemplate, rows, dir]);
 
   const deleteRow = useCallback(async (row: DbRow) => {
-    const ok = await dialogs.confirm({ title: "Delete row", message: `Move “${row.title}” to trash?`, confirmLabel: "Delete", danger: true });
+    const ok = await dialogs.confirm({ title: "Delete row", message: `Move “${row.title}” to the Trash? You can restore it from there.`, confirmLabel: "Move to Trash", danger: true });
     if (!ok) return;
     try {
       await api.trashPage(row.rel_path);
@@ -359,7 +359,20 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
           const Ico = viewIcon(v.type);
           const active = v.id === activeView.id;
           return (
-            <div key={v.id} className={`db-view-tab${active ? " active" : ""}`} onClick={() => setActiveViewId(v.id)}>
+            <div
+              key={v.id}
+              className={`db-view-tab${active ? " active" : ""}`}
+              role="tab"
+              aria-selected={active}
+              tabIndex={0}
+              onClick={() => setActiveViewId(v.id)}
+              onKeyDown={(e) => {
+                if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  setActiveViewId(v.id);
+                }
+              }}
+            >
               <span className="db-view-tab-icon">
                 {v.icon ? <NodeIconView icon={v.icon} fallback={Ico} size={14} /> : <Ico size={14} />}
               </span>
@@ -371,7 +384,7 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
                   onClick={(e) => e.stopPropagation()}
                   onFocus={(e) => e.target.select()}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") commitRenameView(v, (e.target as HTMLInputElement).value);
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) commitRenameView(v, (e.target as HTMLInputElement).value);
                     else if (e.key === "Escape") setEditingViewId(null);
                   }}
                   onBlur={(e) => commitRenameView(v, e.target.value)}
@@ -417,6 +430,12 @@ export default function DatabaseView({ node, reloadKey, onOpenRow, onTreeChange,
             <Table size={26} weight="duotone" />
             <h2>No matching rows</h2>
             <p className="muted">No rows match this view’s filters. Adjust the filters to see more.</p>
+            <div className="db-empty-actions">
+              <button onClick={() => updateView({ filters: [] })}>Clear filters</button>
+              <button className="primary" onClick={() => void addRow()}>
+                <Plus size={14} weight="bold" /> New row
+              </button>
+            </div>
           </div>
         ) : (
           <>

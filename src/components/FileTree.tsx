@@ -193,6 +193,93 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
     return paths;
   }, [node]);
 
+  // Keyboard model (WAI-ARIA tree): one row is in the Tab order — the open document's row when it's
+  // visible, else the first row — and arrows move between visible rows from there.
+  const rovingPath = useMemo(() => {
+    const visible: string[] = [];
+    const walk = (n: TreeNode) => {
+      visible.push(n.rel_path);
+      if (n.is_dir && !collapsed.has(n.rel_path)) n.children.forEach(walk);
+    };
+    node.children.forEach(walk);
+    return activePath && visible.includes(activePath) ? activePath : visible[0] ?? null;
+  }, [node, collapsed, activePath]);
+
+  const findByRel = (rel: string): TreeNode | null => {
+    let found: TreeNode | null = null;
+    const visit = (n: TreeNode) => {
+      if (found) return;
+      if (n.rel_path === rel) found = n;
+      else n.children.forEach(visit);
+    };
+    node.children.forEach(visit);
+    return found;
+  };
+
+  const onTreeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const t = e.target as HTMLElement;
+    if (t.tagName === "INPUT" || e.altKey || e.ctrlKey || e.metaKey) return;
+    const row = t.closest<HTMLElement>("[data-rel]");
+    const root = rootRef.current;
+    if (!row || !root) return;
+    const rel = row.dataset.rel ?? "";
+    const rows = Array.from(root.querySelectorAll<HTMLElement>(".tree-file[data-rel], .tree-dir[data-rel]"));
+    const at = rows.indexOf(row);
+    const focusRow = (el: HTMLElement | undefined) => {
+      if (!el) return;
+      e.preventDefault();
+      el.focus();
+      el.scrollIntoView({ block: "nearest" });
+    };
+    const isDir = row.classList.contains("tree-dir");
+    const isOpen = isDir && !collapsed.has(rel);
+    switch (e.key) {
+      case "ArrowDown":
+        focusRow(rows[at + 1]);
+        break;
+      case "ArrowUp":
+        focusRow(rows[at - 1]);
+        break;
+      case "Home":
+        focusRow(rows[0]);
+        break;
+      case "End":
+        focusRow(rows[rows.length - 1]);
+        break;
+      case "ArrowRight":
+        if (!isDir) return;
+        e.preventDefault();
+        if (!isOpen) toggle(rel);
+        else focusRow(rows[at + 1]);
+        break;
+      case "ArrowLeft": {
+        e.preventDefault();
+        if (isOpen) {
+          toggle(rel);
+          break;
+        }
+        const parent = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : null;
+        if (parent) focusRow(rows.find((r) => r.dataset.rel === parent));
+        break;
+      }
+      case "Enter":
+      case " ":
+        e.preventDefault();
+        row.click();
+        break;
+      case "ContextMenu":
+      case "F10": {
+        if (e.key === "F10" && !e.shiftKey) return;
+        const n = findByRel(rel);
+        if (!n || !onContextMenu) return;
+        e.preventDefault();
+        const r = row.getBoundingClientRect();
+        onContextMenu(n, r.left + 24, r.bottom);
+        break;
+      }
+    }
+  };
+
   const toggle = (relPath: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -311,6 +398,10 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
       <div
         className={`tree-body${drag?.dropTarget === "" ? " drop-root" : ""}`}
         ref={rootRef}
+        role="tree"
+        aria-label="Vault files"
+        aria-multiselectable
+        onKeyDown={onTreeKeyDown}
         // Dropping onto blank space in the tree (not on a folder row) moves items to the vault root.
         onDragOver={
           drag
@@ -341,6 +432,7 @@ export default function FileTree({ node, activePath, selected, onSelect, nodeIco
             depth={0}
             drag={drag}
             activePath={activePath}
+            rovingPath={rovingPath}
             selected={selected}
             onSelect={handleSelect}
             nodeIcons={nodeIcons}
@@ -368,6 +460,8 @@ interface RowProps {
   node: TreeNode;
   depth: number;
   activePath: string | null;
+  /** The one row that sits in the Tab order (roving tabindex). */
+  rovingPath: string | null;
   selected: Set<string>;
   onSelect: (node: TreeNode, mods: SelectMods) => void;
   nodeIcons: Record<string, NodeIcon>;
@@ -387,7 +481,7 @@ interface RowProps {
   onRenameCancel?: () => void;
 }
 
-function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, lockStatuses, onUnlockFolder, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, drag, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
+function TreeRow({ node, depth, activePath, rovingPath, selected, onSelect, nodeIcons, lockStatuses, onUnlockFolder, collapsed, onToggle, onOpen, onOpenAsset, onOpenDatabase, onOpenFolder, onContextMenu, onPickIcon, drag, renamingPath, onRenameCommit, onRenameCancel }: RowProps) {
   const renaming = renamingPath === node.rel_path;
   const isSelected = selected.has(node.rel_path);
   // Normalize the click into selection modifiers. metaKey covers Cmd on macOS.
@@ -462,6 +556,9 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, lockS
         data-rel={node.rel_path}
         {...dragSrc}
         className={`tree-file${activePath === node.rel_path ? " active" : ""}${isSelected ? " selected" : ""}`}
+        role="treeitem"
+        aria-selected={isSelected}
+        tabIndex={rovingPath === node.rel_path ? 0 : -1}
         onClick={(e) => {
           const m = mods(e);
           onSelect(node, m);
@@ -505,7 +602,11 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, lockS
         data-rel={node.rel_path}
         {...dragSrc}
         {...dropProps(node.rel_path)}
-        className={`tree-dir${isSelected ? " selected" : ""}${drag?.dropTarget === node.rel_path ? " drop-target" : ""}${lockedShut ? " locked" : ""}`}
+        className={`tree-dir${activePath === node.rel_path ? " active" : ""}${isSelected ? " selected" : ""}${drag?.dropTarget === node.rel_path ? " drop-target" : ""}${lockedShut ? " locked" : ""}`}
+        role="treeitem"
+        aria-selected={isSelected}
+        aria-expanded={open}
+        tabIndex={rovingPath === node.rel_path ? 0 : -1}
         onClick={(e) => {
           const m = mods(e);
           // Ctrl/shift select the folder regardless of lock state.
@@ -519,16 +620,26 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, lockS
             onUnlockFolder(node);
             return;
           }
-          // A plain click opens/closes it — and also opens its view: the table for a database
-          // folder, or the gallery page for a plain folder (Notion-style).
-          onToggle(node.rel_path);
+          onSelect(node, m);
+          // A plain click opens its view (the table for a database folder, the gallery page for a
+          // plain folder) and reveals its children. It only collapses when clicked again while its
+          // view is already showing, so opening a folder never hides the pages you were looking at.
+          // The caret toggles on its own.
+          if (!open || activePath === node.rel_path) onToggle(node.rel_path);
           if (node.is_database) onOpenDatabase?.(node);
           else onOpenFolder?.(node);
         }}
         onContextMenu={ctx}
       >
         {guides}
-        <span className="tree-icon tree-caret">
+        <span
+          className="tree-icon tree-caret"
+          onClick={(e) => {
+            if (lockedShut || e.ctrlKey || e.metaKey || e.shiftKey) return;
+            e.stopPropagation();
+            onToggle(node.rel_path);
+          }}
+        >
           {open ? <CaretDown size={12} weight="bold" /> : <CaretRight size={12} weight="bold" />}
         </span>
         <span
@@ -564,6 +675,7 @@ function TreeRow({ node, depth, activePath, selected, onSelect, nodeIcons, lockS
             node={c}
             depth={depth + 1}
             activePath={activePath}
+            rovingPath={rovingPath}
             selected={selected}
             onSelect={onSelect}
             nodeIcons={nodeIcons}
@@ -629,7 +741,7 @@ function RenameInput({
       onBlur={commit}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Enter") {
+        if (e.key === "Enter" && !e.nativeEvent.isComposing) {
           e.preventDefault();
           commit();
         } else if (e.key === "Escape") {

@@ -297,7 +297,7 @@ export default function MobileNavbar({
                     value={taskText}
                     onChange={(e) => setTaskText(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") {
+                      if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                         e.preventDefault();
                         void submitTask();
                       }
@@ -332,7 +332,7 @@ export default function MobileNavbar({
                     value={noteTitle}
                     onChange={(e) => setNoteTitle(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") {
+                      if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                         e.preventDefault();
                         void submitNote();
                       }

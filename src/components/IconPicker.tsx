@@ -4,6 +4,7 @@
 // editor header. Returns the chosen NodeIcon via onPick, or null via onRemove to clear an override.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { IconWeight, NodeIcon } from "../types";
 import { ICON_WEIGHTS, PRESET_COLORS } from "../types";
 import { iconComponent, searchIcons } from "./icon-registry";
@@ -33,6 +34,9 @@ export default function IconPicker({ targetLabel, current, onPick, onRemove, onC
   const [weight, setWeight] = useState<IconWeight>(current?.weight ?? "regular");
   const [color, setColor] = useState<string>(current?.color ?? "");
   const searchRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Declared before the autofocus effect so it records the trigger as the element to return to.
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     searchRef.current?.focus();
@@ -61,9 +65,11 @@ export default function IconPicker({ targetLabel, current, onPick, onRemove, onC
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div
+        ref={panelRef}
         className="modal icon-picker"
         role="dialog"
         aria-modal="true"
+        aria-label={`Set icon for ${targetLabel}`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
@@ -114,6 +120,7 @@ export default function IconPicker({ targetLabel, current, onPick, onRemove, onC
         </div>
 
         <input
+          aria-label="Search icons"
           ref={searchRef}
           className="ip-search"
           placeholder={`Search ${searchIcons("").length}+ icons…`}

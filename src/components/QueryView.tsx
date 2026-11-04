@@ -113,7 +113,7 @@ export default function QueryView({ seedFrom }: Props) {
               </div>
             ))}
             <button className="add-filter" onClick={() => setFilters((fs) => [...fs, { field: "", op: "=", value: "" }])}>
-              + add filter
+              + Add filter
             </button>
           </div>
           <div className="row">

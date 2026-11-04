@@ -144,7 +144,15 @@ export default function RightSidebar({
                   className={`outline-item h${h.level}`}
                   style={{ paddingLeft: `${(h.level - minLevel) * 14 + 8}px` }}
                   title={h.text}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onJumpToHeading(h)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onJumpToHeading(h);
+                    }
+                  }}
                 >
                   {h.text}
                 </li>
@@ -529,7 +537,15 @@ function AgendaSection({
             className={"cal-agenda-task" + (t.done ? " done" : "") + (depth ? " nested" : "")}
             style={depth ? { marginLeft: `calc(var(--sp-4) * ${depth})` } : undefined}
             title={t.rel_path}
+            role="button"
+            tabIndex={0}
             onClick={() => onOpenPath(t.rel_path, t.line)}
+            onKeyDown={(e) => {
+              if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                e.preventDefault();
+                onOpenPath(t.rel_path, t.line);
+              }
+            }}
           >
             {t.done ? <CheckCircle size={14} weight="fill" /> : <Circle size={14} />}
             {/* Body: task text with #tags flowing inline right after it (wrapping with the text). The
@@ -591,6 +607,8 @@ function AgendaText({
     }
     const anchor = (e.target as HTMLElement).closest("a");
     if (anchor) e.preventDefault();
+    // The row's own click handler would open the page a second time.
+    e.stopPropagation();
     onOpenSource();
   };
   return (

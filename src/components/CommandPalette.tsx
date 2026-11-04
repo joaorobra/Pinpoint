@@ -15,6 +15,7 @@ import { fuzzyScore } from "../fuzzy";
 import { api } from "../api";
 import type { SearchHit } from "../types";
 import { transition, slideFade } from "../motion";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 /** A page the palette can jump to. */
 export interface PalettemPage {
@@ -81,6 +82,9 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // Trap Tab inside the palette and hand focus back to where it was when it closes. Declared before
+  // the input's autofocus effect so it records the original trigger.
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -225,12 +229,17 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
             className="palette-input"
             placeholder="Search pages and their contents, or run a command…"
             aria-label="Search pages and commands"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-listbox"
+            aria-autocomplete="list"
+            aria-activedescendant={entries.length ? `palette-opt-${index}` : undefined}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
           />
         </div>
-        <div className="palette-list" ref={listRef}>
+        <div className="palette-list" ref={listRef} id="palette-listbox" role="listbox" aria-label="Results">
           {entries.length === 0 ? (
             <div className="palette-empty">No matches</div>
           ) : (
@@ -239,13 +248,17 @@ export default function CommandPalette({ pages, actions, onOpenPage, onClose }: 
               // Header above the first content hit, separating "found inside pages" from name matches.
               const firstHit = entry.kind === "hit" && (i === 0 || entries[i - 1].kind !== "hit");
               return (
-                <div key={entry.key} className="palette-row">
+                <div key={entry.key} className="palette-row" role="presentation">
                   {firstHit && (
                     <div className="palette-section">
                       <TextAa size={12} /> Found in pages
                     </div>
                   )}
                   <button
+                    id={`palette-opt-${i}`}
+                    role="option"
+                    aria-selected={i === index}
+                    tabIndex={-1}
                     className={`palette-item${i === index ? " active" : ""}`}
                     onMouseEnter={() => setIndex(i)}
                     onClick={() => run(entry)}

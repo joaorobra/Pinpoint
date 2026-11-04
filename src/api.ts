@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AssetData, DbSchema, LockStatus, ParsedDoc, QueryResult, RecentVault, SearchHit, Settings, TagConnection, TagInfo, TagPage, TaskRow, TreeNode, TrashEntry } from "./types";
 import { assetKindFor } from "./types";
+import { normalizeDbSchema } from "./dblogic";
 import {
   webApi,
   pickVaultFolderWeb,
@@ -280,6 +281,10 @@ function stampTimestamps(
 // One object, two backends, wrapped so every page write maintains its timestamps.
 export const api = {
   ...backend,
+  // Older vaults (and the bundled sample vault) store `fields: [{ key, type, options: string[] }]`
+  // instead of `columns`; normalize at the boundary so no view ever sees a column-less schema.
+  readDbSchema: async (relPath: string) =>
+    normalizeDbSchema(await backend.readDbSchema(relPath), relPath.split("/").pop() || "Database"),
   writePage: (relPath: string, frontmatter: Record<string, unknown>, body: string) =>
     backend.writePage(relPath, stampTimestamps(frontmatter, { created: true }), body),
   createPage: async (relPath: string, body: string) => {

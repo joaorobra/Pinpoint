@@ -87,9 +87,9 @@ export default function DbCalendarView({ allColumns, rows, view, onOpenRow, onAd
   return (
     <div className="db-calendar">
       <div className="db-cal-toolbar">
-        <button className="db-cal-nav" onClick={() => step(-1)}><CaretLeft size={14} /></button>
+        <button className="db-cal-nav" onClick={() => step(-1)} aria-label="Previous month" title="Previous month"><CaretLeft size={14} /></button>
         <button className="db-cal-today" onClick={() => setAnchor(today)}>Today</button>
-        <button className="db-cal-nav" onClick={() => step(1)}><CaretRight size={14} /></button>
+        <button className="db-cal-nav" onClick={() => step(1)} aria-label="Next month" title="Next month"><CaretRight size={14} /></button>
         <span className="db-cal-title">{title}</span>
       </div>
       <div className="db-cal-weekrow">

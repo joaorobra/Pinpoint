@@ -38,7 +38,9 @@ export default function DbGalleryView({ columns, allColumns, rows, view, dateFor
   return (
     <div className="db-gallery">
       {rows.map((row) => (
-        <div key={row.rel_path} className="db-gallery-card" onClick={() => onOpenRow(row.rel_path)}>
+        <div key={row.rel_path} className="db-gallery-card" role="button" tabIndex={0} aria-label={`Open ${row.title}`}
+          onClick={() => onOpenRow(row.rel_path)}
+          onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpenRow(row.rel_path); } }}>
           {coverCol && <div className="db-gallery-cover" style={{ background: coverColor(row) ?? "var(--bg-3)" }} />}
           <div className="db-gallery-body">
             <div className="db-card-title">

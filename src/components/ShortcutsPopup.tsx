@@ -1,7 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { motion } from "framer-motion";
 import { Keyboard, X } from "@phosphor-icons/react";
 import { transition, slideFade } from "../motion";
+import { keyLabel } from "../lib/keys";
+import { isTauri } from "../api";
 
 // ⚠️ SOURCE OF TRUTH FOR KEYBOARD SHORTCUTS ⚠️
 // This list is the user-facing mirror of the global key handler in App.tsx
@@ -12,7 +15,8 @@ import { transition, slideFade } from "../motion";
 //
 // `mod` renders as ⌘ on macOS and Ctrl elsewhere.
 
-type Shortcut = { keys: string[]; label: string };
+/** `desktopOnly`: the browser reserves this combo (Ctrl/⌘+N, Ctrl/⌘+W), so it only works in the app. */
+type Shortcut = { keys: string[]; label: string; desktopOnly?: boolean };
 type Group = { title: string; items: Shortcut[] };
 
 const GROUPS: Group[] = [
@@ -27,8 +31,8 @@ const GROUPS: Group[] = [
   {
     title: "Pages & tabs",
     items: [
-      { keys: ["mod", "N"], label: "New page" },
-      { keys: ["mod", "W"], label: "Close current tab" },
+      { keys: ["mod", "N"], label: "New page", desktopOnly: true },
+      { keys: ["mod", "W"], label: "Close current tab", desktopOnly: true },
       { keys: ["Alt", "←"], label: "Go back" },
       { keys: ["Alt", "→"], label: "Go forward" },
     ],
@@ -38,6 +42,19 @@ const GROUPS: Group[] = [
     items: [
       { keys: ["Delete"], label: "Move selection to trash" },
       { keys: ["Shift", "Delete"], label: "Delete permanently" },
+    ],
+  },
+  {
+    title: "Editor",
+    items: [
+      { keys: ["mod", "B"], label: "Bold" },
+      { keys: ["mod", "I"], label: "Italic" },
+      { keys: ["mod", "E"], label: "Inline code" },
+      { keys: ["mod", "Shift", "S"], label: "Strikethrough" },
+      { keys: ["Alt", "↑"], label: "Move line up" },
+      { keys: ["Alt", "↓"], label: "Move line down" },
+      { keys: ["/"], label: "Insert a block or command" },
+      { keys: ["mod", "R"], label: "Toggle page-width ruler" },
     ],
   },
   {
@@ -56,18 +73,14 @@ const GROUPS: Group[] = [
   },
 ];
 
-const IS_MAC =
-  typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform);
-
-/** Render a raw key token into its platform-friendly display label. */
-function keyLabel(key: string): string {
-  if (key === "mod") return IS_MAC ? "⌘" : "Ctrl";
-  if (key === "Alt") return IS_MAC ? "⌥" : "Alt";
-  if (key === "Shift") return IS_MAC ? "⇧" : "Shift";
-  return key;
-}
-
 export default function ShortcutsPopup({ onClose }: { onClose: () => void }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
+  // Move focus into the sheet so Tab/Escape act on it rather than the page behind.
+  useEffect(() => {
+    panelRef.current?.focus();
+  }, []);
+
   // Esc closes; mirrors the dismiss behaviour of the other overlays.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -90,6 +103,8 @@ export default function ShortcutsPopup({ onClose }: { onClose: () => void }) {
       transition={transition("fast")}
     >
       <motion.div
+        ref={panelRef}
+        tabIndex={-1}
         className="modal shortcuts-modal"
         role="dialog"
         aria-modal="true"
@@ -110,7 +125,7 @@ export default function ShortcutsPopup({ onClose }: { onClose: () => void }) {
           {GROUPS.map((group) => (
             <section key={group.title} className="shortcuts-group">
               <h3 className="shortcuts-group-title">{group.title}</h3>
-              {group.items.map((sc) => (
+              {group.items.filter((sc) => !sc.desktopOnly || isTauri()).map((sc) => (
                 <div key={sc.label} className="shortcut-row">
                   <span className="shortcut-label">{sc.label}</span>
                   <span className="shortcut-keys">
