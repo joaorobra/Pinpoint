@@ -1,0 +1,49 @@
+name: Fix Linux AppImage
+
+# Repacks a release's AppImage without the bundled libwayland libraries (they crash the app on
+# hosts whose GPU driver expects the system's libwayland — e.g. NVIDIA on Wayland), re-signs it and
+# updates latest.json. See scripts/appimage-unbundle-wayland.sh.
+#
+# Runs automatically at the end of the Release workflow, after every platform has uploaded (so it
+# never races another job writing latest.json). Can also be run by hand to repair an older release.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to repair (e.g. v0.6.5)"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  unbundle-wayland:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Repack AppImage without bundled libwayland
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/appimage-unbundle-wayland.sh "${{ inputs.tag }}"
