@@ -8,6 +8,13 @@
 # bundled one instead, and the app segfaults in wl_proxy_create_wrapper before a window appears.
 # libwayland belongs to the host, like libGL/libEGL/libdrm already are, so we drop the bundled copy.
 #
+# It also stops the GTK hook from forcing X11. linuxdeploy's hook exports GDK_BACKEND=x11
+# unconditionally (a workaround for Wayland crashes that the bundled libwayland itself caused), so on
+# a Wayland desktop the window goes to whatever X server $DISPLAY names. When that variable is stale —
+# e.g. Chrome Remote Desktop injects DISPLAY=:20 into the user session — the app "opens" on an
+# invisible display. The patched hook uses Wayland when a Wayland session is present (falling back to
+# X11), keeps X11 inside a Chrome Remote Desktop session, and honours PINPOINT_GDK_BACKEND to override.
+#
 # Usage: scripts/appimage-unbundle-wayland.sh <tag>
 # Needs: gh (GH_TOKEN, GH_REPO), jq, curl, npx; TAURI_SIGNING_PRIVATE_KEY[_PASSWORD] for the updater.
 
@@ -34,14 +41,42 @@ chmod +x "$asset"
 # The AppImage runtime can extract itself without FUSE.
 "./$asset" --appimage-extract >/dev/null
 
+changed=0
 shopt -s nullglob
 bundled=(squashfs-root/usr/lib/libwayland-*.so*)
-if [ ${#bundled[@]} -eq 0 ]; then
-  echo "✔ No bundled libwayland in $asset — nothing to do."
+if [ ${#bundled[@]} -gt 0 ]; then
+  printf 'Removing %s\n' "${bundled[@]}"
+  rm -f "${bundled[@]}"
+  changed=1
+fi
+
+hook=squashfs-root/apprun-hooks/linuxdeploy-plugin-gtk.sh
+if [ -f "$hook" ] && grep -q '^export GDK_BACKEND=x11' "$hook"; then
+  # Replace the hook's forced X11 with a session-aware choice (see header).
+  python3 - "$hook" <<'PY'
+import re, sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+choice = '''# PINPOINT: pick the GDK backend from the session instead of forcing X11 (see
+# scripts/appimage-unbundle-wayland.sh in the PINPOINT repo).
+if [ -n "${PINPOINT_GDK_BACKEND:-}" ]; then
+    export GDK_BACKEND="$PINPOINT_GDK_BACKEND"
+elif [ -z "${CHROME_REMOTE_DESKTOP_SESSION:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    export GDK_BACKEND=wayland,x11
+else
+    export GDK_BACKEND=x11
+fi'''
+src = re.sub(r"^export GDK_BACKEND=x11.*$", lambda _m: choice, src, count=1, flags=re.M)
+open(path, "w", encoding="utf-8").write(src)
+PY
+  echo "Patched $hook to choose the GDK backend per session"
+  changed=1
+fi
+
+if [ "$changed" -eq 0 ]; then
+  echo "✔ $asset already has no bundled libwayland and a session-aware GTK hook — nothing to do."
   exit 0
 fi
-printf 'Removing %s\n' "${bundled[@]}"
-rm -f "${bundled[@]}"
 
 curl -fsSL -o appimagetool "$APPIMAGETOOL_URL"
 chmod +x appimagetool
@@ -67,4 +102,4 @@ jq --arg sig "$(cat "$asset.sig")" --arg name "$asset" \
 mv latest.patched.json latest.json
 gh release upload "$TAG" latest.json --clobber
 
-echo "✔ $asset repacked without bundled libwayland, re-signed, and latest.json updated."
+echo "✔ $asset repacked (host libwayland, session-aware GDK backend), re-signed, and latest.json updated."
